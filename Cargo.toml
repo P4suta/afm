@@ -190,7 +190,7 @@ dhat      = "0.3"
 # consolidated from the former sibling repo (ADR-0018). The pure parser /
 # renderer crates never pull these — they stay isolated in the epub crate.
 aozora-encoding = "0.4.1" # SJIS input decoding; aozora-flavored-markdown does not re-export it
-quick-xml = { version = "0.40", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 zip       = { version = "8", default-features = false, features = ["deflate"] }
 uuid      = { version = "1", features = ["v4"] }
 chrono    = { version = "0.4", features = ["serde"] }
