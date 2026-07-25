@@ -19,7 +19,7 @@ export interface WrapShape {
 
 export const WRAP_SHAPES: readonly WrapShape[] = [
   { id: 'aozora-md.wrap.ruby', template: '｜BASE《${0}》', description: 'ルビ' },
-  { id: 'aozora-md.wrap.doubleRuby', template: '｜BASE《《${0}》》', description: 'ダブルルビ' },
+  { id: 'aozora-md.wrap.angleQuote', template: '≪BASE≫${0}', description: '二重山括弧' },
   { id: 'aozora-md.wrap.bouten', template: 'BASE［＃「BASE」に傍点］${0}', description: '傍点' },
   { id: 'aozora-md.wrap.kagikakko', template: '「BASE」${0}', description: '鉤括弧で囲む' },
   { id: 'aozora-md.wrap.kikkou', template: '〔BASE〕${0}', description: '亀甲括弧で囲む' },
@@ -54,7 +54,7 @@ const SHAPE_BY_ID: Record<string, WrapShape> = Object.fromEntries(
 );
 
 /**
- * Keybindings: Mod-Alt-R = ruby, Mod-Alt-Shift-R = double ruby,
+ * Keybindings: Mod-Alt-R = ruby, Mod-Alt-Shift-R = 二重山括弧,
  * Mod-Alt-B = bouten. Mirrors aozora-tools' bindings so muscle memory
  * carries across the VSCode extension and both playgrounds.
  */
@@ -66,7 +66,7 @@ export const aozoraMdWrapKeymap: readonly KeyBinding[] = [
   },
   {
     key: 'Mod-Alt-Shift-r',
-    run: wrapCommand(SHAPE_BY_ID['aozora-md.wrap.doubleRuby']!),
+    run: wrapCommand(SHAPE_BY_ID['aozora-md.wrap.angleQuote']!),
     preventDefault: true,
   },
   {

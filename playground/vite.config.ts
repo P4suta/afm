@@ -5,7 +5,7 @@ import wasm from 'vite-plugin-wasm';
 // Strict Content-Security-Policy for the production bundle. Defense-in-depth
 // layered *on top of* the renderer's escaping: the preview is mounted via
 // `innerHTML` into `.aozora-md-root` (components/PreviewPane.tsx), but the aozora-md
-// renderer (comrak + aozora-render) entity-escapes all text and emits no
+// renderer (comrak + the 青空文庫 parser) entity-escapes all text and emits no
 // active markup, so the CSP is a second wall — not the primary XSS guard.
 //
 // Directive rationale (kept as tight as the app allows):

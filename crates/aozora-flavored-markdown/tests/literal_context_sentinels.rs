@@ -1,17 +1,17 @@
 //! Aozora notations that land in *literal* markdown contexts — inline
-//! code spans and link/image destinations — must render as their original
-//! source, never as an interpreted Aozora node, and must never leak the
-//! internal PUA sentinel (`U+E001..=U+E004`) into the HTML.
+//! code spans, link/image destinations, code blocks and unclaimed `［＃…］`
+//! runs — must render as their original source, never as an interpreted
+//! Aozora node, and must never leak the internal PUA sentinel
+//! (`U+E001..=U+E004`) into the HTML.
 //!
-//! The lexer is CommonMark-blind (ADR-0010): it replaces every Aozora
-//! notation in the text with a sentinel *before* comrak parses, so a
-//! notation written inside backticks or a URL becomes a sentinel that
-//! comrak then routes into a `Code` literal or a `Link.url` field — places
-//! the splicer used to skip. Skipping leaked the sentinel AND desynced the
-//! registry cursor, corrupting *later* notations. These tests pin the fix:
-//! the splicer now rewrites such sentinels back to their original source
-//! (sliced via the lexer's `source_nodes` span table) and keeps the cursor
-//! in lockstep.
+//! Substitution is CommonMark-blind (ADR-0010): every construct in the
+//! text becomes a sentinel *before* comrak parses, so a notation written
+//! inside backticks or a URL becomes a sentinel that comrak then routes
+//! into a `Code` literal or a `Link.url` field — places the splicer used
+//! to skip. Skipping leaked the sentinel AND desynced the construct
+//! cursor, corrupting *later* notations. These tests pin the fix: the
+//! splicer rewrites such a sentinel back to the source run it stands for
+//! and keeps the cursor in lockstep.
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
@@ -89,6 +89,70 @@ fn sentinel_in_inline_code_does_not_desync_following_notation() {
     assert!(
         !html.contains("<ruby>A"),
         "the code span's A must not leak into a rendered ruby, got {html:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unclaimed `［＃…］` runs
+//
+// A run no notation claimed is hidden behind the directive wrapper and read
+// as the author's own bytes — which makes it a literal context like the
+// others, and one that can *contain* a claimed construct.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_notation_inside_an_unclaimed_bracket_run_stays_literal() {
+    // `［＃改…` is not a notation, so the whole run is hidden as written —
+    // including the bouten directive nested inside it, which is one. The
+    // splicer used to copy that construct's sentinel into the wrapper's
+    // text: a U+E001 in the reader's HTML.
+    let html = render_to_string("［＃改［＃「あ」に傍点］］");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("hidden>［＃改［＃「あ」に傍点］］</span>"),
+        "the unclaimed run must be hidden as the author wrote it, got {html:?}"
+    );
+}
+
+#[test]
+fn an_unclaimed_bracket_run_does_not_desync_the_notation_after_it() {
+    // The construct inside the run has to be consumed as well as written
+    // back, or the next real notation reads this one's entry and renders
+    // A/a where the author wrote B/b.
+    let html = render_to_string("［＃改｜A《a》］\n\nそして｜B《b》です");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("hidden>［＃改｜A《a》］</span>"),
+        "the run keeps its literal, got {html:?}"
+    );
+    assert!(
+        html.contains("<ruby>B") && html.contains("<rt>b</rt>"),
+        "the notation after it must render its OWN content (B/b), got {html:?}"
+    );
+    assert!(
+        !html.contains("<ruby>A"),
+        "the run's A must not leak into a rendered ruby, got {html:?}"
+    );
+}
+
+#[test]
+fn an_unclaimed_bracket_run_in_a_heading_does_not_desync_either() {
+    // Inside a heading the run is dropped rather than wrapped (Tier C bars
+    // the wrapper from a heading body), so nothing is written back — but the
+    // construct it swallowed still has to be consumed.
+    let html = render_to_string("# 見出し［＃改｜A《a》］\n\nそして｜B《b》です");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("<h1>見出し</h1>"),
+        "the heading keeps only its own text, got {html:?}"
+    );
+    assert!(
+        html.contains("<ruby>B") && html.contains("<rt>b</rt>"),
+        "the notation after the heading must render B/b, got {html:?}"
+    );
+    assert!(
+        !html.contains("<ruby>A"),
+        "the dropped run's A must not resurface later, got {html:?}"
     );
 }
 

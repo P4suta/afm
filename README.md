@@ -34,12 +34,13 @@ CommonMark  ──▶  GFM  ──▶  Aozora Flavored Markdown
 ## What you can write
 
 ```markdown
-# 第一章                             (Markdown heading)
-［＃「第一篇」は大見出し］            (Aozora heading, aliased to the same AST)
+# 第一章                              (Markdown heading)
+第一篇［＃「第一篇」は大見出し］      (Aozora heading, aliased to the same AST)
 
 彼は｜青梅《おうめ》に行った。        (Ruby)
-それは《《強調したい》》ことだった。    (Bouten / emphasis dots)
-令和［＃縦中横］2［＃縦中横終わり］年。 (Tate-chu-yoko)
+可哀想［＃「可哀想」に傍点］な人。    (Bouten / emphasis dots)
+それは≪強調したい≫ことだった。      (Double angle quote, shown as 《…》)
+昭和20［＃「20」は縦中横］年。        (Tate-chu-yoko)
 
 ［＃ここから字下げ］                  (Block indent)
 段落……
@@ -114,8 +115,7 @@ just ci                # the full gate set, locally
 
 | Repo | What it is |
 |---|---|
-| [`P4suta/aozora`](https://github.com/P4suta/aozora) | Pure 青空文庫記法 parser — lexer, AST, renderer, gaiji table. Aozora-only test surfaces (`spec-aozora`, corpus sweep) live there. |
-| [`P4suta/aozora-tools`](https://github.com/P4suta/aozora-tools) | Authoring tools: `aozora-fmt`, `aozora-lsp`, tree-sitter grammar, VS Code extension. |
+| [`P4suta/aozora`](https://github.com/P4suta/aozora) | Pure 青空文庫記法 parser (`aozora`), its CLI (`aozora-cli`, which carries the formatter and the language server) and the `tree-sitter-aozora` grammar. Aozora-only test surfaces — the conformance vectors and the corpus sweep — live there, as do the authoring tools absorbed from the archived `aozora-tools`. |
 
 ## Security
 

@@ -98,8 +98,15 @@ fn html_escape_payload_stays_balanced() {
 }
 
 #[test]
-fn double_ruby_academic_brackets_balanced() {
-    assert_balanced(&render_to_string("《《強調》》"), "double ruby");
+fn angle_quote_balanced() {
+    assert_balanced(&render_to_string("≪強調≫"), "angle quote");
+}
+
+#[test]
+fn stacked_ruby_openers_balanced() {
+    // `《《…》》` is no longer one construct: it reads as two ruby openers
+    // and raises a diagnostic. The HTML still has to come out balanced.
+    assert_balanced(&render_to_string("《《強調》》"), "stacked ruby openers");
 }
 
 // ---------------------------------------------------------------------------

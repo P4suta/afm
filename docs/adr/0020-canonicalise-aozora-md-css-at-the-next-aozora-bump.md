@@ -45,8 +45,8 @@ pin:
 
 1. **The class contract is not public.** `AOZORA_MD_CLASSES` lives in
    `aozora-flavored-markdown-test-support` (a `publish = false` dev-only crate),
-   not in the library's public API. The principled design — mirroring `aozora`'s
-   `aozora-render::AOZORA_CLASSES` + an auto-drift test that enumerates every
+   not in the library's public API. The principled design — mirroring the parser's own
+   `AOZORA_CLASSES` + an auto-drift test that enumerates every
    emitted class — has to be promoted into the library first.
 2. **The class names are mid-rename upstream.** `aozora` has already renamed
    `aozora-double-ruby` → `aozora-angle-quote` in its source (unreleased; the
@@ -64,7 +64,7 @@ Defer CSS canonicalisation to the next `aozora` dependency bump. At that bump:
 
 1. Promote the class contract into the `aozora-flavored-markdown` library as
    public API (`AOZORA_MD_CLASSES` + an auto-drift test that enumerates every
-   emitted class, per the `aozora-render::AOZORA_CLASSES` pattern), so a renamed
+   emitted class, per the parser's own `AOZORA_CLASSES` pattern), so a renamed
    class can never silently ship.
 2. Add a default-off `theme` feature to the library exposing the canonical
    horizontal/vertical CSS as `pub const` strings (pure data — no new heavy
@@ -122,4 +122,4 @@ maintenance-burden cleanup, not a correctness gap.
 
 - [ADR-0018](0018-consolidate-the-epub-generator-into-this-workspace.md) — interim CSS handling.
 - [ADR-0011](0011-brand-boundary-css-class-rewrite.md) — the `aozora-md-*` brand boundary.
-- aozora `aozora-render::AOZORA_CLASSES` + its `class_list_matches_emitted` test — the contract pattern to adopt.
+- aozora's `AOZORA_CLASSES` + its `class_list_matches_emitted` test — the contract pattern to adopt.

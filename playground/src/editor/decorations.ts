@@ -7,10 +7,8 @@
 // cm-aozora-* class names verbatim because they are an editor-decoration
 // detail, not a brand contract.
 //
-// In aozora-md this lives alongside the legacy regex overlay (aozora-syntax.ts); the
-// intent is for this AST-driven module to eventually replace that overlay, but
-// for now it ships as an independent extension that consumes the parsed node
-// spans (ps.nodes).
+// It ships as an independent extension that consumes the parsed node spans
+// (ps.nodes), so highlighting follows the parser rather than a regex guess.
 
 import { RangeSetBuilder } from '@codemirror/state';
 import {
@@ -38,7 +36,7 @@ import {
  */
 const KIND_TO_CLASS: Record<string, string> = {
   ruby: 'cm-aozora-ruby',
-  angleQuote: 'cm-aozora-double-ruby',
+  angleQuote: 'cm-aozora-angle-quote',
   bouten: 'cm-aozora-bouten',
   gaiji: 'cm-aozora-gaiji',
   combineUpright: 'cm-aozora-tcy',

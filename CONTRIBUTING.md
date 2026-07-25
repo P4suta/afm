@@ -206,15 +206,34 @@ new invariants ride on the same scaffolding.
 
 ### Adding a 青空文庫 notation
 
-This **does not happen on the aozora-flavored-markdown side**. Lexer phases, AST
-shapes, recogniser tables, and per-node renderers all live in the
-sibling [`P4suta/aozora`](https://github.com/P4suta/aozora) repo
-(see ADR-0010 for the rationale). Once a new construct is
-classified upstream and lands in `aozora-syntax`, aozora-flavored-markdown picks it up
-automatically through the workspace dep — usually with a one-line
-mapping in `aozora_flavored_markdown::ir::project_inline` /
-`project_block_leaf` plus a test, and a `AOZORA_MD_CLASSES` update if
-the renderer adds a new CSS hook.
+Recognising it **does not happen on the aozora-flavored-markdown
+side**. Lexer phases, AST shapes, recogniser tables and the notation's
+own HTML all live in the sibling
+[`P4suta/aozora`](https://github.com/P4suta/aozora) repo (ADR-0010 for
+the rationale, ADR-0021 for the boundary). Once a construct is
+classified upstream, the next version bump here gives it neither a
+renderer nor an IR variant of its own: it arrives as one more entry in
+the construct table (`src/constructs.rs`), renders from its own source
+run (`src/fragment.rs`), and reaches the IR as a new `kind` string on
+`IrInline::Aozora` / `IrBlock::Aozora` (ADR-0022).
+
+Three things still have to be checked when the bump brings a notation
+this repo has never seen:
+
+- **`block_sentinel_of` in `src/constructs.rs`** — which of the four
+  sentinels stands for the construct. A notation written on a line of
+  its own (a page break, a container marker, an illustration) needs an
+  arm here. The upstream kind enum is `#[non_exhaustive]`, so a kind
+  no arm names does not fail to compile — it falls through to the
+  inline sentinel, and the construct's block-level markup is then
+  spliced *inside* the surrounding `<p>`.
+- **`inline_is_dropped` in the same file** — which constructs an
+  inline walk consumes rather than renders (a heading hint always, a
+  directive inside a heading). Also a hand-written match over kinds.
+- **A theme rule for each new CSS class.** `AOZORA_MD_CLASSES` is
+  derived from the parser's own list rather than hand-kept, so nothing
+  needs adding to it; `tests/css_class_contract.rs` names the classes
+  no stylesheet covers yet, in both directions.
 
 ## Architectural changes
 
@@ -287,7 +306,11 @@ Releases are automated by [cargo-dist](https://opensource.axo.dev/cargo-dist/)
 (`dist`) and triggered by a git tag of the form `v<semver>`:
 
 1. Update `CHANGELOG.md` — promote `[Unreleased]` to
-   `[<version>] - YYYY-MM-DD` and add a fresh `[Unreleased]` stub.
+   `[<version>] - YYYY-MM-DD` and add a fresh `[Unreleased]` stub. The
+   file is **written by hand**: an entry has to say what broke and what
+   to do about it, which a commit subject does not. `just changelog`
+   prints a Conventional-Commits draft to stdout to check the section
+   against — it does not write the file, and nothing else may.
 2. Regenerate the bundled CLI assets: `just dist-assets`. The man page
    embeds the version, so a version bump changes
    `dist/assets/man/aozora-flavored-markdown.1` (and `just ci`'s `dist-assets-check` gate

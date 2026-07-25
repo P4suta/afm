@@ -9,8 +9,8 @@
 //! - `upstream-sync` — replace `upstream/comrak/` with the source
 //!   tree at a given upstream tag. Pure tree-replace (ADR-0001): the
 //!   diff budget is 0, so there are no patches to re-apply.
-//! - `comment-discipline` — fail when a comment names a retired
-//!   upstream-internal path (ADR-0021).
+//! - `comment-discipline` — fail when a Rust or TOML comment names a
+//!   retired upstream-internal path (ADR-0021).
 //! - `new-adr` — scaffold a new MADR file under `docs/adr/`.
 //! - `spec-refresh` — regenerate `spec/commonmark-*.json` /
 //!   `spec/gfm-*.json` from cmark-format `spec.txt` inputs. Network
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::UpstreamDiff => upstream_diff(),
         Command::UpstreamSync { tag } => upstream_sync(&tag),
-        Command::CommentDiscipline => comment_discipline(Path::new("crates")),
+        Command::CommentDiscipline => comment_discipline(Path::new(".")),
         Command::NewAdr { title } => new_adr(&title),
         Command::SpecRefresh { input, output } => {
             let n = spec_refresh::refresh_one(&input, &output).with_context(|| {
@@ -252,6 +252,9 @@ const RETIRED_UPSTREAM_PATHS: &[(&str, &str)] = &[
     ("aozora-proptest", "no longer a published crate"),
     ("aozora-spec", "no longer a published crate"),
     ("aozora-corpus", "no longer a published crate"),
+    ("aozora-lexer", "no longer a published crate"),
+    ("aozora-parser", "no longer a published crate"),
+    ("aozora-scan", "no longer a published crate"),
     ("lex_into_arena", "not on the public surface"),
     ("BorrowedLexOutput", "not on the public surface"),
     ("NormalizedOffset", "not on the public surface"),
@@ -281,11 +284,31 @@ fn fold_separators(text: &str) -> String {
     text.replace('_', "-")
 }
 
+/// File kinds this gate reads, each with the token its comments open on.
+///
+/// Rust and TOML are where a retired upstream name is written in prose that
+/// nothing compiles: a doc comment and a manifest note. A stale manifest note
+/// rots exactly like a stale doc comment — it is where the reason for a lint
+/// setting or a feature flag is recorded — so it belongs under the same gate.
+/// Markdown is deliberately out: `CHANGELOG.md` records what the retired
+/// crates *were*, and history is not drift.
+const SCANNED_FILES: &[(&str, &str)] = &[("rs", "//"), ("toml", "#")];
+
+/// Directories that are never authored here.
+///
+/// `target/` is cargo output (including each fuzz crate's own), `pkg/` is
+/// wasm-pack output, `node_modules/` is bun's. `upstream/` is the verbatim
+/// vendored comrak tree, which ADR-0001 budgets zero edits for — gating prose
+/// nobody may rewrite would only be a trap.
+const UNSCANNED_DIRS: &[&str] = &["target", "pkg", "node_modules", "upstream", ".git"];
+
 /// Return every comment line in `src` that names a retired upstream path.
 ///
-/// `///`, `//!` and plain `//` all count. Prose rots the same way whichever
-/// marker introduces it, and the compiler already owns everything else.
-fn scan_comments(src: &str) -> Vec<CommentViolation> {
+/// `marker` is the file kind's comment opener, per [`SCANNED_FILES`]; for
+/// Rust that one token covers `///`, `//!` and plain `//` alike. Prose rots
+/// the same way whichever marker introduces it, and the compiler already owns
+/// everything else.
+fn scan_comments(src: &str, marker: &str) -> Vec<CommentViolation> {
     let banned: Vec<(String, &str, &str)> = RETIRED_UPSTREAM_PATHS
         .iter()
         .map(|&(needle, why)| (fold_separators(needle), needle, why))
@@ -294,7 +317,7 @@ fn scan_comments(src: &str) -> Vec<CommentViolation> {
     let mut out = Vec::new();
     for (idx, raw) in src.lines().enumerate() {
         let trimmed = raw.trim_start();
-        if !trimmed.starts_with("//") {
+        if !trimmed.starts_with(marker) {
             continue;
         }
         let folded = fold_separators(trimmed);
@@ -312,22 +335,26 @@ fn scan_comments(src: &str) -> Vec<CommentViolation> {
     out
 }
 
-/// Collect every `.rs` file under `dir`, skipping build-output directories.
-fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Collect every scannable file under `dir` with the comment marker its kind
+/// uses, skipping the directories nobody here authors.
+fn collect_scannable_files(dir: &Path, out: &mut Vec<(PathBuf, &'static str)>) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
         let path = entry.path();
         let name = entry.file_name();
         if path.is_dir() {
-            // `target/` is cargo output (including each fuzz crate's own) and
-            // `pkg/` is wasm-pack output. Neither is authored source.
-            if matches!(name.to_str(), Some("target" | "pkg" | "node_modules")) {
+            if name.to_str().is_some_and(|n| UNSCANNED_DIRS.contains(&n)) {
                 continue;
             }
-            collect_rust_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
+            collect_scannable_files(&path, out)?;
+        } else if let Some(marker) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| SCANNED_FILES.iter().find(|&&(kind, _)| kind == ext))
+            .map(|&(_, marker)| marker)
+        {
+            out.push((path, marker));
         }
     }
     out.sort();
@@ -344,13 +371,13 @@ fn comment_discipline(root: &Path) -> Result<()> {
     }
 
     let mut files = Vec::new();
-    collect_rust_files(root, &mut files)?;
+    collect_scannable_files(root, &mut files)?;
 
     let mut total = 0usize;
-    for path in &files {
+    for (path, marker) in &files {
         let src =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        for v in scan_comments(&src) {
+        for v in scan_comments(&src, marker) {
             if total == 0 {
                 println!("comment-discipline: comments naming retired upstream paths:");
             }
@@ -764,9 +791,18 @@ fn is_semver_triple(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        RETIRED_UPSTREAM_PATHS, aozora_pin_pattern, fold_separators, is_semver_triple,
-        scan_comments,
+        RETIRED_UPSTREAM_PATHS, SCANNED_FILES, aozora_pin_pattern, fold_separators,
+        is_semver_triple, scan_comments,
     };
+
+    /// The comment marker a scanned file kind uses.
+    fn marker(kind: &str) -> &'static str {
+        SCANNED_FILES
+            .iter()
+            .find(|&&(k, _)| k == kind)
+            .map(|&(_, m)| m)
+            .expect("the kind is scanned")
+    }
 
     #[test]
     fn semver_triple_accepts_a_full_version_and_rejects_the_rest() {
@@ -820,7 +856,7 @@ mod tests {
     fn flags_a_retired_path_in_an_inner_doc_comment() {
         // Assembled at runtime so this test's own source stays clean.
         let src = format!("//! Layers {} onto comrak.\n", RETIRED_UPSTREAM_PATHS[0].0);
-        let hits = scan_comments(&src);
+        let hits = scan_comments(&src, marker("rs"));
         assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
         assert_eq!(hits[0].line, 1);
         assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
@@ -828,10 +864,11 @@ mod tests {
 
     #[test]
     fn flags_a_retired_path_in_an_outer_doc_comment() {
-        let src = format!("    /// Delegates to {}.\n", RETIRED_UPSTREAM_PATHS[11].0);
-        let hits = scan_comments(&src);
+        let needle = hyphenated_entry();
+        let src = format!("    /// Delegates to {needle}.\n");
+        let hits = scan_comments(&src, marker("rs"));
         assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[11].0);
+        assert_eq!(hits[0].needle, needle);
     }
 
     #[test]
@@ -841,7 +878,7 @@ mod tests {
         // outlive the crate they point at.
         let hyphenated = hyphenated_entry();
         let src = format!("/// Draws from [`{}`].\n", hyphenated.replace('-', "_"));
-        let hits = scan_comments(&src);
+        let hits = scan_comments(&src, marker("rs"));
         assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
         assert_eq!(hits[0].needle, hyphenated);
     }
@@ -850,9 +887,31 @@ mod tests {
     fn flags_a_retired_path_in_a_plain_comment() {
         // Prose rots whichever marker introduces it.
         let src = format!("    // Mirrors {}.\n", RETIRED_UPSTREAM_PATHS[0].0);
-        let hits = scan_comments(&src);
+        let hits = scan_comments(&src, marker("rs"));
         assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
         assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
+    }
+
+    #[test]
+    fn flags_a_retired_crate_in_a_manifest_comment() {
+        // A manifest note explaining why a lint is set the way it is names
+        // upstream just as a doc comment does, and rots the same way. It went
+        // uncaught while the gate read only `.rs`.
+        let needle = hyphenated_entry();
+        let src = format!("# Kept stricter than aozora: {needle} needs the allow.\n");
+        let hits = scan_comments(&src, marker("toml"));
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, needle);
+    }
+
+    #[test]
+    fn a_manifest_key_is_not_a_manifest_comment() {
+        // TOML has no line marker on real content, so only a leading `#`
+        // counts — a dependency actually named after a retired crate would be
+        // the compiler's problem, not this gate's.
+        let needle = hyphenated_entry();
+        let src = format!("{needle} = {{ version = \"0.4.1\" }}\n");
+        assert!(scan_comments(&src, marker("toml")).is_empty());
     }
 
     #[test]
@@ -861,20 +920,20 @@ mod tests {
         // compiler's job, and this gate covers what the compiler cannot see.
         let needle = RETIRED_UPSTREAM_PATHS[0].0;
         let src = format!("use {needle}::thing;\nlet s = \"{needle}\";\n");
-        assert!(scan_comments(&src).is_empty());
+        assert!(scan_comments(&src, marker("rs")).is_empty());
     }
 
     #[test]
     fn clean_comments_produce_no_violations() {
         let src = "//! Layers the sibling parser onto comrak.\n/// Renders to HTML.\n";
-        assert!(scan_comments(src).is_empty());
+        assert!(scan_comments(src, marker("rs")).is_empty());
     }
 
     #[test]
     fn reports_every_offending_line() {
         let needle = RETIRED_UPSTREAM_PATHS[0].0;
         let src = format!("//! {needle}\nlet filler = 1;\n/// {needle}\n");
-        let hits = scan_comments(&src);
+        let hits = scan_comments(&src, marker("rs"));
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].line, 1);
         assert_eq!(hits[1].line, 3);

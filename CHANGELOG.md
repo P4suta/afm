@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+This cycle follows the sibling parser to **aozora 0.5.0**, which curated
+its published crates down to three and made `Document` / `Snapshot` plus a
+flat projection its whole public surface. Every internal path this
+workspace used to reach through — the borrowed AST, the per-node renderer,
+the normalised-coordinate registry — is private upstream now, so the
+boundary was **redrawn rather than renamed**: substituting the 青空文庫
+constructs, rendering their HTML and projecting them into the IR are all
+owned here, and speak only the parser's public API
+([ADR-0021](docs/adr/0021-aozora-boundary-is-the-public-surface.md)).
+
+Consumers of the IR, of the TypeScript types, or of the `aozora-md-*` CSS
+classes have breaking changes to absorb — see **Changed (breaking)**.
+
 ### Added
 
 - **EPUB3 generator consolidated into this workspace** — the
@@ -16,11 +29,217 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mirroring how `aozora` absorbed `aozora-tools`. The crates are independently
   versioned (0.1.x), and the pure parser/renderer crates stay free of the
   generator's `zip` / `quick-xml` / `uuid` / `chrono` I/O dependencies (asserted
-  via `cargo tree`). The EPUB theme-coverage test now tracks the renderer's
-  `AOZORA_MD_CLASSES` contract automatically. See
+  via `cargo tree`). See
   [ADR-0018](docs/adr/0018-consolidate-the-epub-generator-into-this-workspace.md),
   [ADR-0019](docs/adr/0019-epub-generation-is-hand-rolled-not-via-pandoc.md), and
   [ADR-0020](docs/adr/0020-canonicalise-aozora-md-css-at-the-next-aozora-bump.md).
+- **`AOZORA_MD_CLASSES` and `is_contract_class` are public API** of
+  `aozora-flavored-markdown`, *derived* from the parser's own
+  `AOZORA_CLASSES` by prefix swap (ADR-0011) instead of hand-copied. They
+  used to be a hand-maintained list in the dev-only test-support crate,
+  which could — and did — fall behind a parser that renames classes
+  between releases. (#160)
+- **`theme` feature (default-off)** — `theme::HORIZONTAL_CSS` and
+  `theme::VERTICAL_CSS` publish the two canonical stylesheets as `pub
+  const` data (`include_str!`, no new dependencies), so a downstream
+  packager embeds the constants instead of vendoring a copy that has to
+  track the class contract by hand. The `.css` sources moved to
+  `crates/aozora-flavored-markdown/theme/`, because `include_str!` reaching
+  outside a crate's own directory is not bundled by `cargo publish`. (#160)
+- **`aozora-md::constructs_unresolved` diagnostic** — a construct whose
+  source run cannot be recovered (the fallback path a parser-rewritten
+  document takes) now renders as nothing *and says so*, rather than
+  silently emitting empty markup. (#158)
+- **`cargo xtask comment-discipline`**, wired into `just lint` and the CI
+  lint matrix — a comment naming a retired upstream path fails the build.
+  `//`, `///` and `//!` are all in scope, and `_` / `-` spellings are
+  folded together so one banned entry covers a manifest name and its
+  intra-doc link alike. (#153)
+- **Proptest input strategies in
+  `aozora-flavored-markdown-test-support`** — `config::default_config`
+  (the `AOZORA_PROPTEST_CASES` knob) and `generators::{kanji_fragment,
+  aozora_fragment, pathological_aozora, commonmark_adversarial}`. The
+  CommonMark pool now carries shapes a parser-side generator has no
+  Markdown to express: Aozora notation inside a table cell, a list item,
+  a link label, a code span and a fenced block. (#155)
+- **Three ADRs** — [ADR-0021](docs/adr/0021-aozora-boundary-is-the-public-surface.md)
+  (the boundary is the parser's public surface only, and an upstream API
+  request must be justified from upstream's side alone),
+  [ADR-0022](docs/adr/0022-collapse-the-aozora-half-of-the-ir.md) (collapse
+  the Aozora half of the IR) and
+  [ADR-0023](docs/adr/0023-substitute-constructs-in-source-coordinates.md)
+  (substitute constructs in source coordinates). (#153, #156, #157)
+
+### Changed (breaking)
+
+- **The Aozora half of the IR collapses to one variant per level.** Every
+  青空文庫 notation now projects to `IrInline::Aozora { kind, span, html }` /
+  `IrBlock::Aozora { kind, span, html }`, carrying an opaque `kind` tag,
+  the source `span` and the rendered HTML fragment. Gone: the
+  `IrInline::{Ruby, DoubleRuby, Bouten, Tcy, Gaiji, Annotation}` and
+  `IrBlock::{PageBreak, SectionBreak, Container}` variants, together with
+  the `ContainerSubtype` / `SectionSubtype` / `BoutenStyle` /
+  `BoutenPosition` / `AnnotationKind` enums that existed to restate the
+  parser's vocabulary. **The Markdown half is untouched** and stays typed.
+  A consumer that matched on a notation variant now reads `kind` (and can
+  render straight from `html`, which is byte-identical to what the
+  notation contributes to `render`).
+  [ADR-0022](docs/adr/0022-collapse-the-aozora-half-of-the-ir.md). (#156)
+- **The tsify-derived TypeScript `.d.ts` changes shape with it** — the
+  `IrBlock` / `IrInline` unions gain the collapsed member and lose the
+  per-notation ones. Regenerate against this release; do not hand-edit
+  (ADR-0017). `aozora-flavored-markdown-obsidian` is an archived snapshot
+  with no follow-up to make; the playground's outline reads heading text
+  out of the fragment `html`. (#156)
+- **CSS class renames, inherited from the parser** —
+  `aozora-md-double-ruby` → **`aozora-md-angle-quote`**,
+  `aozora-md-annotation` → **`aozora-md-directive`**, `aozora-md-tcy` →
+  **`aozora-md-combine-upright`**. A stylesheet or a test that pins the old
+  names needs updating; `AOZORA_MD_CLASSES` is the list to check against.
+  The contract went from 19 hand-kept entries to the parser's 91, so most
+  of the delta is *new* classes rather than renames. (#159, #160)
+- **The 二重山括弧 notation's input form flips** — `≪…≫` (U+226A/U+226B) is
+  the input and `《…》` (U+300A/U+300B) the display, correcting a model that
+  was exactly backwards. A stray `《《…》》` in source is now two ruby openers
+  (a nested-ruby diagnostic), not this construct. (#159)
+- **wasm envelope: `wire` → `json`.** The wasm crate enables the parser's
+  `json` feature instead of `wire`, and the editor-assist entry points
+  (`nodesJson` / `pairsJson` / `diagnosticsJson` / `slugsJson` /
+  `gaijiResolutionsJson`) hand back the parser's own envelope rather than
+  one assembled here. The version field is spelled `schemaVersion` (was
+  `schema_version`) and reads **3** (was `1`), so a TypeScript host that
+  pinned either the key or the number must update. (#159)
+- **`aozora` 0.4.1 → 0.5.0**, and the workspace version moves to **0.5.0**
+  with it (ADR-0016's alignment habit). `default-features = false` now
+  keeps `json` / `schema` / `pandoc` / `fmt` out of the build graph; an
+  intentional sync is one PR per `cargo xtask aozora-bump <version>`,
+  which rewrites a registry version rather than a git rev. (#159)
+
+### Changed
+
+- **Sentinel substitution moved into this crate, in one coordinate
+  space.** `src/sentinel_stream.rs` is replaced by `src/constructs.rs`:
+  the masked source is tiled here — bytes between constructs copied
+  verbatim, each construct's byte range replaced by one of four PUA
+  sentinels declared here rather than re-exported — and both walkers
+  cursor over the resulting table in document order. The tiling is trusted
+  by an exact test: it must equal, byte for byte, the sentinel text the
+  parser produces from the same input. As a consequence an
+  `IrInline::Aozora` / `IrBlock::Aozora` `span` slices *the source you
+  passed in*, and is withheld (rather than published in a coordinate space
+  no consumer holds) only for the documents the parser rewrites before
+  lexing.
+  [ADR-0023](docs/adr/0023-substitute-constructs-in-source-coordinates.md). (#157)
+- **A construct's HTML comes from its own source run.** `src/fragment.rs`
+  hands the run back to the parser, drops the paragraph wrapper an inline
+  construct arrives in, and rebrands the class tokens (ADR-0011) — instead
+  of calling the per-node renderer 0.5.0 removed. Fragments are memoised
+  per run, and the rebrand is scoped to `class="…"` values, so text that
+  happens to say `aozora-` (this repository's name does) survives
+  verbatim. (#158)
+- **`aozora-flavored-markdown-epub` enables the `theme` feature** and its
+  vendored `assets/aozora-md-*.css` copy is gone; `compose` embeds the
+  library's constants. The EPUB crate's own theme-coverage test is
+  removed rather than rewritten — it was a substring search that a longer
+  sibling class satisfied on its own. Coverage is settled once, in the
+  library's tokenised sweep, and the drift gate now runs **both** ways: a
+  class no theme styles fails, *and* a theme rule for a class the renderer
+  cannot emit fails. (#160)
+- **Docs slimmed and gated.** The mdbook site is retired (see *Removed*),
+  `README.md` / `README.ja.md` are compressed to Quickstart + links (both
+  languages stay), and the doc comments under `crates/*/src` no longer
+  name an upstream-internal path — 21% of `src` was doc comments, much of
+  it teaching imports that cannot compile. `just lint` keeps it that way.
+  (#153)
+- **The Tier-A predicate has exactly one definition.**
+  `check_no_bare_bracket` now excepts `<code>` regions — a code element's
+  body is the author's bytes verbatim per CommonMark §6.1, so notation
+  *must* surface unwrapped there — and the four hand-rolled copies that
+  disagreed about the same HTML all route through it. (#155)
+- **Tier B (no PUA sentinel in the output) is unconditional**, and runs
+  inside `assert_html_invariants` with the rest. Its caveat — "a source may
+  contain U+E001, so gate on a clean parse" — was never true: a PUA
+  codepoint an author types is replaced with U+FFFD. Gating on it had
+  excused the check from every input that raised a diagnostic, which is the
+  recovery path — where an unresolved construct is likeliest to survive.
+  Un-gating it found the leak above on the first run. (#161)
+- **`cargo xtask comment-discipline` reads TOML comments too**, and runs
+  from the workspace root rather than `crates/` (`upstream/` stays out —
+  ADR-0001 budgets no edits there). A manifest note explaining why a lint is
+  set the way it is names upstream exactly as a doc comment does, and rotted
+  unseen. `aozora-lexer` / `aozora-parser` / `aozora-scan` join the banned
+  list. (#161)
+- **`just changelog` prints a draft instead of overwriting `CHANGELOG.md`.**
+  This file is written by hand — an entry has to say what broke and what to
+  do about it, which no commit subject carries — and `git-cliff -o
+  CHANGELOG.md` regenerated the whole thing, taking every explanation with
+  it. The recipe now prints the Conventional-Commits draft to stdout to
+  check the hand-written section against. (#161)
+
+### Removed
+
+- **`crates/aozora-flavored-markdown-book/`** — the mdbook site (10 files,
+  791 lines) restated what the README and docs.rs already say. Getting
+  started lives in the README, the API on docs.rs; mdbook drops out of CI,
+  `Justfile`, `Dockerfile`, `docker-compose.yml`, the devcontainer and the
+  labeler, and the `book` / `browser` image stages go with it. The Pages
+  site serves rustdoc plus the playground. (#153)
+- **`crates/aozora-flavored-markdown/src/ir/projection.rs`** (480 lines) —
+  the AST mirror the collapsed IR no longer needs. (#156)
+- **`aozora`'s `proptest` feature** from the dev-dependencies: the
+  upstream generator crate is `publish = false` as of 0.5.0, so it is
+  unreachable from crates.io. `proptest` never enters a published crate's
+  runtime graph. (#155)
+- **The four `docs/adr/000{4,6,7,8}-MOVED.md` stubs** — the ADR index
+  already records that those numbers moved to the sibling repo. (#153)
+
+### Fixed
+
+- **An unclaimed `［＃…］` run could publish a PUA sentinel.** A bracket run
+  no notation claimed is hidden behind the directive wrapper and read as the
+  author's own bytes — but a run may still *contain* a notation, as
+  `［＃改［＃「あ」に傍点］］` does. The nested construct's sentinel was copied
+  into the wrapper verbatim (U+E001 in the reader's HTML) and its table entry
+  was left unconsumed, so the next notation in the document rendered this
+  one's content. Inside a heading, where the run is dropped rather than
+  wrapped, only the second half happened — silently. The run now writes each
+  construct it swallowed back as source and consumes it either way.
+  Found by making the Tier B invariant unconditional (below); predates this
+  cycle. (#161)
+- **An indented code block could publish a PUA sentinel.** A four-space
+  indented line carrying ruby rendered as `<pre><code>` around a
+  private-use codepoint — U+E001 in the reader's HTML. A *fenced* block
+  never carries one
+  (`code_block_mask` hides its triggers before the lexer runs), but an
+  indented block is exactly the context that mask does not reproduce, and
+  comrak makes one out of any four-space line — including one a `\r`
+  created. A code block is now treated the way an inline code span already
+  was: literal markdown whose sentinel is written back to the author's
+  source. Predates this cycle and reproduced on 0.4.1. (#158)
+- **Shift_JIS + CRLF documents with a decorative rule lost text.**
+  `本文\r\n----------\r\n｜青梅《おうめ》` rendered the ruby's base text away and
+  opened a `<div>` it never closed: CRLF folding takes a byte off every
+  line, the parser's decorative-rule isolation adds one back, and the
+  cancelled offset lands one byte before the block holding the construct.
+  The recovery index now keeps one sorted candidate list for the whole
+  source and takes the candidate of the right byte length *nearest* the
+  reported offset that also parses back to the same construct shape. (#158)
+- **A heading hint contaminated a Markdown heading.** A `#` heading whose
+  text ended in `［＃「…」は大見出し］` put an `aozora-md-directive` span inside
+  `<h1>`. A hint that reaches an inline walk has no paragraph to promote,
+  so it renders as what it is. (#158)
+- **`［＃地付き］` was styled as if it had content** — the rule gave an empty
+  hook span `display: block; text-align: right`, which split the
+  surrounding paragraph into two anonymous blocks and right-aligned
+  nothing. Both themes now use the `p:has(> …)` shape the sibling markers
+  already use, with logical `text-align: end` / `padding-inline-end`, so
+  the container form works in vertical mode too. (#160)
+- **`StreamingIrBuilder` never drained at end of document.**
+  `render_blocks_to_ir("［＃ここから２字下げ］\n\n本文")` returned a block whose
+  `html` was `</div>` and whose `ir` was empty — the IR stream opened a
+  container it never closed while the HTML stream of the same call
+  balanced. `finish()` is the drain its whole-document sibling always had.
+  (#156)
 
 ## [0.4.1] - 2026-06-21
 

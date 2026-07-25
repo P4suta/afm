@@ -34,12 +34,13 @@ CommonMark  ──▶  GFM  ──▶  Aozora Flavored Markdown
 ## 書ける記法
 
 ```markdown
-# 第一章                             (Markdown 見出し)
-［＃「第一篇」は大見出し］            (青空文庫見出し、同じ AST へ合流)
+# 第一章                              (Markdown 見出し)
+第一篇［＃「第一篇」は大見出し］      (青空文庫見出し、同じ AST へ合流)
 
 彼は｜青梅《おうめ》に行った。        (ルビ)
-それは《《強調したい》》ことだった。    (傍点)
-令和［＃縦中横］2［＃縦中横終わり］年。 (縦中横)
+可哀想［＃「可哀想」に傍点］な人。    (傍点)
+それは≪強調したい≫ことだった。      (二重山括弧、表示は《…》)
+昭和20［＃「20」は縦中横］年。        (縦中横)
 
 ［＃ここから字下げ］                  (ブロック字下げ)
 段落……
@@ -114,8 +115,7 @@ just ci                # full gate set のローカル再現
 
 | Repo | 内容 |
 |---|---|
-| [`P4suta/aozora`](https://github.com/P4suta/aozora) | 純粋な青空文庫記法パーサ —— lexer / AST / renderer / 外字テーブル。青空文庫専用のテスト面(`spec-aozora`、corpus sweep)もこちら。 |
-| [`P4suta/aozora-tools`](https://github.com/P4suta/aozora-tools) | 執筆支援ツール: `aozora-fmt` / `aozora-lsp` / tree-sitter grammar / VS Code extension。 |
+| [`P4suta/aozora`](https://github.com/P4suta/aozora) | 純粋な青空文庫記法パーサ(`aozora`)と CLI(`aozora-cli` —— formatter / language server を内蔵)、`tree-sitter-aozora` grammar。青空文庫専用のテスト面(conformance ベクタ、corpus sweep)もこちら。archive された `aozora-tools` の執筆支援ツールも吸収済み。 |
 
 ## セキュリティ
 

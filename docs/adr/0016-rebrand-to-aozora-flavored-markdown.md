@@ -60,8 +60,8 @@ consistent but produces 25–40-character CSS classes
 verbosity for high-frequency, downstream-facing identifiers.
 
 **Short `aozora-*` for output classes.** Concise, but collides with the raw
-`aozora-render` classes and erases the ADR-0011 brand boundary; `aozora-md-*`
-keeps them distinct.
+classes the parser itself emits and erases the ADR-0011 brand boundary;
+`aozora-md-*` keeps them distinct.
 
 **Keep `afm`.** Rejected: name taken on crates.io and not self-describing.
 

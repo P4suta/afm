@@ -20,23 +20,24 @@
 //! * `gfm_list_with_aozora_items` — a three-item GFM list with
 //!   Aozora content in the items, including a nested item.
 //!
-//! Each property asserts the always-on tier predicates plus Tier A
-//! (no bare `［＃` leak) and Tier B (no PUA sentinel leak), gated on
-//! a clean lexer parse so unbalanced inputs don't sabotage the test.
+//! Each property asserts the always-on tier predicates — Tier B (no PUA
+//! sentinel leak) included, because no input may legitimately leak one —
+//! plus Tier A (no bare `［＃` leak), gated on a clean parse so unbalanced
+//! inputs don't sabotage the test.
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
 use aozora_flavored_markdown_test_support::config::default_config;
 use aozora_flavored_markdown_test_support::generators::aozora_fragment;
 use aozora_flavored_markdown_test_support::{
-    assert_html_invariants, check_html_tag_balance, check_no_bare_bracket, check_no_sentinel_leak,
+    assert_html_invariants, check_html_tag_balance, check_no_bare_bracket,
 };
 use proptest::prelude::*;
 
-/// Whether the lexer raised any diagnostic for `src` — used as a
-/// gate for Tier A / Tier B which only meaningfully assert on
-/// well-formed input. Mirrors the helper in `property_html_shape.rs`.
-fn lexer_is_well_formed(src: &str) -> bool {
+/// Whether the render raised any diagnostic for `src` — the gate for
+/// Tier A, which only meaningfully asserts on well-formed input. Mirrors
+/// the helper in `property_html_shape.rs`.
+fn parse_is_well_formed(src: &str) -> bool {
     render_to_diagnostics(src, &Options::default())
         .diagnostics
         .is_empty()
@@ -45,8 +46,8 @@ fn lexer_is_well_formed(src: &str) -> bool {
 fn assert_mix_invariants(src: &str) {
     let html = render_to_string(src);
 
-    // Always-on predicates: tag balance, content model, markup
-    // completeness, escape invariants, etc.
+    // Always-on predicates: sentinel leak, tag balance, content model,
+    // markup completeness, escape invariants, etc.
     assert_html_invariants(src, &html);
 
     // Cross-cutting tag balance is bundled inside `assert_html_invariants`,
@@ -55,12 +56,10 @@ fn assert_mix_invariants(src: &str) {
     check_html_tag_balance(&html)
         .unwrap_or_else(|e| panic!("HTML tag balance violated for src={src:?}: {e}\n---\n{html}"));
 
-    // Tier A / B — gated on a clean lexer parse.
-    if lexer_is_well_formed(src) {
+    // Tier A — gated on a clean parse.
+    if parse_is_well_formed(src) {
         check_no_bare_bracket(&html)
             .unwrap_or_else(|e| panic!("Tier A (bare ［＃) violated for src={src:?}: {e}"));
-        check_no_sentinel_leak(&html)
-            .unwrap_or_else(|e| panic!("Tier B (PUA sentinel) violated for src={src:?}: {e}"));
     }
 }
 
