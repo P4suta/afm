@@ -28,8 +28,9 @@
 //! 1. **Sole-block-sentinel paragraph** (a `<p>U+E002</p>`-shaped
 //!    paragraph): [`paragraph_sole_block_sentinel`] returns
 //!    `Some(kind)`. Insert a `Raw` node before the paragraph carrying
-//!    the rendered output, then detach the paragraph. Paired open/close
-//!    use the container stack to keep the LIFO invariant.
+//!    the rendered output, then detach the paragraph. A close is spliced
+//!    only against an open the walk has seen, and an open the source
+//!    never closes is closed at end of document.
 //! 2. **Heading-hint promotion** (`［＃「X」は大見出し］`): the first
 //!    inline sentinel in the paragraph is a heading hint. Mutate the
 //!    paragraph's `NodeValue` to `Heading { level, setext: false }`
@@ -47,20 +48,16 @@
 //!    No cursor advance — by construction the orphan has no
 //!    matching construct.
 
-use core::fmt;
 use core::mem;
 use std::borrow::Cow;
 
-use aozora::render::render_node;
-use aozora::syntax::Container;
-use aozora::syntax::ContainerKind;
-use aozora::{AozoraNode, HeadingHint, NodeRef};
+use aozora::{HeadingHint, NodeRef};
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeHeading, NodeValue};
 
 use crate::constructs::{
-    BlockSentinelKind, ConstructCursor, Constructs, INLINE_SENTINEL, ParaScan, is_sentinel_char,
-    paragraph_sole_block_sentinel,
+    BlockSentinelKind, ConstructCursor, Constructs, INLINE_SENTINEL, ParaScan, inline_is_dropped,
+    is_sentinel_char, paragraph_sole_block_sentinel,
 };
 
 /// Splice every Aozora sentinel embedded in `root`'s text descendants
@@ -69,10 +66,11 @@ use crate::constructs::{
 /// HTML in a single verbatim pass.
 ///
 /// `constructs` is the source-coordinate replacement table: the splicer
-/// walks it in document order, and reads a construct's source text from it
-/// for the literal markdown contexts (inline code spans, link
-/// destinations) where the notation must render verbatim rather than as
-/// interpreted Aozora HTML.
+/// walks it in document order and asks it what each construct renders to.
+/// The literal markdown contexts (inline code spans, link destinations)
+/// ask the same table for the construct's source text instead, since the
+/// notation must render verbatim there rather than as interpreted Aozora
+/// HTML.
 pub(crate) fn splice_into_ast<'a, 'src>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
@@ -80,7 +78,7 @@ pub(crate) fn splice_into_ast<'a, 'src>(
 ) {
     let mut splicer = AstSplicer::<'a, '_, 'src> {
         cursor: constructs.cursor(),
-        container_stack: Vec::new(),
+        open_containers: 0,
         in_heading_depth: 0,
         arena,
     };
@@ -92,11 +90,12 @@ pub(crate) fn splice_into_ast<'a, 'src>(
 /// order and weaves rendered Aozora HTML into the comrak tree.
 struct AstSplicer<'a, 't, 'src> {
     cursor: ConstructCursor<'t, 'src>,
-    /// `ContainerKind` of every still-open paired container, in LIFO
-    /// order. Push on `BlockOpen`, pop on `BlockClose`. Tracking the
-    /// kind (rather than just a depth counter) lets us synthesise a
-    /// matching close node when the source ends without one.
-    container_stack: Vec<ContainerKind>,
+    /// How many paired containers are still open. Incremented on
+    /// `BlockOpen`, decremented on `BlockClose`; whatever remains at end
+    /// of document is closed for the source. A count is enough because
+    /// every container closes the same way — the closing markup comes
+    /// from the notation, not from what was opened.
+    open_containers: usize,
     /// Number of `Heading` ancestors the walker is currently inside.
     /// Heading bodies must satisfy Tier C (no `aozora-md-annotation`
     /// contamination) AND Tier A (no bare `［＃` leak), so when
@@ -200,37 +199,42 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     }
 
     fn handle_block_sentinel(&mut self, paragraph: &'a AstNode<'a>, kind: BlockSentinelKind) {
-        let Some(hit) = self.cursor.next() else {
-            // Table exhausted: drop the paragraph silently rather
-            // than leak the PUA sentinel into the rendered HTML.
-            paragraph.detach();
-            return;
-        };
+        match self.block_html(kind) {
+            Some(html) => self.replace_with_block_html(paragraph, html),
+            // Nothing to say for this sentinel: drop the paragraph rather
+            // than leak the PUA codepoint into the rendered HTML.
+            None => paragraph.detach(),
+        }
+    }
+
+    /// The markup the next construct contributes as a block of its own, or
+    /// `None` when it contributes none — and, for the container kinds, the
+    /// bookkeeping that keeps the two in agreement.
+    fn block_html(&mut self, kind: BlockSentinelKind) -> Option<String> {
+        // Table exhausted: nothing stands behind this sentinel.
+        let hit = self.cursor.next()?;
         match (kind, hit.node) {
-            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(node)) => {
-                self.replace_with_block_html(paragraph, render_aozora_html(node, true));
+            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(_)) => hit.html(),
+            (BlockSentinelKind::Open, NodeRef::BlockOpen(_)) => {
+                // A marker that renders to nothing opens nothing, so the
+                // drain does not owe it a close.
+                let html = hit.html()?;
+                self.open_containers += 1;
+                Some(html)
             }
-            (BlockSentinelKind::Open, NodeRef::BlockOpen(ck)) => {
-                self.container_stack.push(ck);
-                self.replace_with_block_html(
-                    paragraph,
-                    render_aozora_html(AozoraNode::Container(Container { kind: ck }), true),
-                );
+            (BlockSentinelKind::Close, NodeRef::BlockClose(_)) if self.open_containers > 0 => {
+                self.open_containers -= 1;
+                // A close carries no payload — every container closes the
+                // same way, which is what lets the drain close them all
+                // with one fragment — so the canonical close notation
+                // stands in for a run the table could not recover. The
+                // container is closed either way.
+                Some(hit.html().unwrap_or_else(|| self.cursor.container_close()))
             }
-            (BlockSentinelKind::Close, NodeRef::BlockClose(ck))
-                if self.container_stack.pop().is_some() =>
-            {
-                self.replace_with_block_html(
-                    paragraph,
-                    render_aozora_html(AozoraNode::Container(Container { kind: ck }), false),
-                );
-            }
-            _ => {
-                // Mismatch (table/AST drift) or orphan close (no
-                // matching open): silently drop the paragraph rather than
-                // emit an unbalanced close tag (Tier-D protection).
-                paragraph.detach();
-            }
+            // Mismatch (table/AST drift) or orphan close (no matching
+            // open): emit nothing rather than an unbalanced close tag
+            // (Tier-D protection).
+            _ => None,
         }
     }
 
@@ -274,23 +278,15 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
                 };
                 if ch == INLINE_SENTINEL
                     && let NodeRef::Inline(aozora) = hit.node
+                    // Ruby / Bouten / Tcy / Gaiji / Kaeriten / DoubleRuby
+                    // are explicitly allowed inside a heading per Tier C's
+                    // documented contract; `inline_is_dropped` names the
+                    // two kinds that are not, and the IR walker asks it
+                    // the same question.
+                    && !inline_is_dropped(aozora, self.in_heading_depth > 0)
+                    && let Some(html) = hit.html()
                 {
-                    // Heading body must not carry `aozora-md-annotation`
-                    // wrappers (Tier C). Annotation-shaped Aozora
-                    // nodes (Unknown / AsIs / TextualNote /
-                    // InvalidRubySpan / WarichuOpen / WarichuClose)
-                    // all render to a `<span class="aozora-md-annotation"
-                    // hidden>...</span>` wrapper, so we drop them
-                    // when in_heading_depth > 0. Other inline Aozora
-                    // (Ruby / Bouten / Tcy / Gaiji / Kaeriten /
-                    // DoubleRuby) are explicitly allowed inside a
-                    // heading per Tier C's documented contract.
-                    let in_heading = self.in_heading_depth > 0;
-                    let is_annotation = matches!(aozora, AozoraNode::Annotation(_));
-                    if !(in_heading && is_annotation) {
-                        let html = render_aozora_html(aozora, true);
-                        segments.push(self.new_raw_node(html));
-                    }
+                    segments.push(self.new_raw_node(html));
                 }
                 // Block sentinel surviving into inline context, or
                 // inline-position table mismatch: drop silently.
@@ -367,15 +363,18 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
         out
     }
 
-    /// Inline code span (`` `…` ``): rewrite sentinels in the code literal
-    /// back to their original source. Inline code is literal markdown, so
-    /// `` `｜青梅《おうめ》` `` must render as the literal text, not as an
-    /// interpreted ruby — and the sentinel must never leak into `<code>`.
+    /// Code span (`` `…` ``) or code block: rewrite sentinels in the
+    /// literal back to their original source. Code is literal markdown, so
+    /// `` `｜青梅《おうめ》` `` must render as the text the author typed,
+    /// not as an interpreted ruby — and the sentinel must never leak into
+    /// `<code>`.
     fn splice_code_literal(&mut self, node: &'a AstNode<'a>, literal: &str) {
         let rewritten = self.rewrite_literal_context(literal);
         let mut data = node.data.borrow_mut();
-        if let NodeValue::Code(code) = &mut data.value {
-            code.literal = rewritten;
+        match &mut data.value {
+            NodeValue::Code(code) => code.literal = rewritten,
+            NodeValue::CodeBlock(code) => code.literal = rewritten,
+            _ => {}
         }
     }
 
@@ -421,9 +420,12 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     }
 
     fn drain_unclosed_containers(&mut self, root: &'a AstNode<'a>) {
-        while let Some(ck) = self.container_stack.pop() {
-            let html = render_aozora_html(AozoraNode::Container(Container { kind: ck }), false);
-            root.append(self.new_raw_node(html));
+        if self.open_containers == 0 {
+            return;
+        }
+        let html = self.cursor.container_close();
+        for _ in 0..mem::take(&mut self.open_containers) {
+            root.append(self.new_raw_node(html.clone()));
         }
     }
 
@@ -472,8 +474,8 @@ enum DispatchAction {
     /// `［＃` prefix. The captured `String` is the text body, ready
     /// to feed into [`AstSplicer::split_text_node`] without re-borrow.
     TextWith(String),
-    /// Inline code span whose literal carries at least one sentinel. The
-    /// captured `String` is the code literal, fed to
+    /// Code span or code block whose literal carries at least one
+    /// sentinel. The captured `String` is the literal, fed to
     /// [`AstSplicer::splice_code_literal`] which rewrites each sentinel to
     /// its original source.
     CodeWith(String),
@@ -514,36 +516,27 @@ fn classify(value: &NodeValue) -> DispatchAction {
         // (not child text). Recurse into the children first, then rewrite
         // the fields, so cursor consumption matches source order.
         NodeValue::Link(_) | NodeValue::Image(_) => DispatchAction::RecurseLink,
-        NodeValue::CodeBlock(_)
-        | NodeValue::HtmlBlock(_)
-        | NodeValue::HtmlInline(_)
-        | NodeValue::Raw(_) => DispatchAction::Skip,
+        // A code block is literal markdown for the same reason a code
+        // span is. A *fenced* one never carries a sentinel — the mask
+        // hides the triggers inside a fence before the lexer runs
+        // (ADR-0010) — but an *indented* one is context the mask
+        // deliberately does not reproduce (see `crate::code_block_mask`),
+        // and comrak reads one out of any four-space line. A sentinel
+        // that lands there has to be written back as the source the
+        // author typed, or it reaches the reader as a private-use
+        // codepoint (Tier B).
+        NodeValue::CodeBlock(c) => {
+            if c.literal.chars().any(is_sentinel_char) {
+                DispatchAction::CodeWith(c.literal.clone())
+            } else {
+                DispatchAction::Skip
+            }
+        }
+        NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) | NodeValue::Raw(_) => {
+            DispatchAction::Skip
+        }
         _ => DispatchAction::Recurse,
     }
-}
-
-/// Render one resolved 青空文庫 construct to its HTML fragment.
-///
-/// `entering` picks the opening or closing half for paired containers; leaf
-/// and inline constructs ignore it and render whole.
-///
-/// [`crate::ir`] calls this too: the collapsed IR carries the same fragment
-/// the HTML splice weaves in, so the two outputs cannot disagree about what
-/// a notation renders to.
-pub(crate) fn render_aozora_html(node: AozoraNode<'_>, entering: bool) -> String {
-    let mut out = String::new();
-    render_node::render(node, entering, &mut StringSink(&mut out))
-        .expect("writing AozoraNode HTML to a String cannot fail");
-    // Brand boundary (ADR-0011): the sibling renderer emits classes under
-    // its own `aozora-*` brand; our HTML uses `aozora-md-*`. The rewrite
-    // is local to the rendered fragment we are about to wrap in a
-    // `Raw` node, so a single `replace` is enough — the fragment is
-    // a self-contained tag/attribute soup with no body text that
-    // could legitimately contain the `aozora-` literal.
-    if out.contains("aozora-") {
-        out = out.replace("aozora-", "aozora-md-");
-    }
-    out
 }
 
 fn push_html_escaped(out: &mut String, s: &str) {
@@ -556,16 +549,6 @@ fn push_html_escaped(out: &mut String, s: &str) {
             '\'' => out.push_str("&#39;"),
             _ => out.push(ch),
         }
-    }
-}
-
-/// `fmt::Write` adapter over `&mut String` so the upstream renderer can
-/// write straight into the buffer that becomes a `Raw` node payload.
-struct StringSink<'s>(&'s mut String);
-
-impl fmt::Write for StringSink<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.write_str(s)
     }
 }
 

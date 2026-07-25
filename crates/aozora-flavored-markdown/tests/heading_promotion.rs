@@ -10,6 +10,7 @@
 //! promote it to a setext heading (`<h2>`).
 
 use aozora_flavored_markdown::html;
+use aozora_flavored_markdown_test_support::{check_heading_integrity, check_no_bare_bracket};
 
 #[test]
 fn big_heading_is_rendered_as_h1() {
@@ -81,6 +82,36 @@ fn heading_hint_without_preceding_target_stays_as_annotation() {
         !out.contains("］は大見出し］"),
         "bracket content should not leak bare; got: {out}"
     );
+}
+
+#[test]
+fn heading_hint_inside_a_markdown_heading_leaves_the_heading_alone() {
+    // Promotion is a paragraph's answer to a hint. A markdown heading is
+    // not a paragraph, so the hint reaches the inline walk instead — and a
+    // hint's own source run, alone among the notations, does not cover the
+    // text it names, so re-parsing that run resolves it to an unknown
+    // annotation. Emitting that would put an `aozora-md-annotation` wrapper
+    // inside the heading body, which Tier C bars.
+    let out = html::render_to_string("# head第一篇［＃「第一篇」は大見出し］");
+    assert_eq!(out, "<h1>head第一篇</h1>\n");
+    assert!(
+        check_heading_integrity(&out).is_ok(),
+        "Tier C: {:?}",
+        check_heading_integrity(&out)
+    );
+    assert!(check_no_bare_bracket(&out).is_ok(), "Tier A: {out}");
+}
+
+#[test]
+fn heading_hint_inside_a_table_cell_renders_nothing() {
+    // Same reasoning one context over: nothing to promote, so the
+    // directive renders as what it is — an instruction, not content.
+    let out = html::render_to_string("| a |\n| - |\n| 第一篇［＃「第一篇」は大見出し］ |");
+    assert!(
+        out.contains("<td>第一篇</td>"),
+        "the cell keeps its text and loses the directive: {out}"
+    );
+    assert!(check_no_bare_bracket(&out).is_ok(), "Tier A: {out}");
 }
 
 #[test]

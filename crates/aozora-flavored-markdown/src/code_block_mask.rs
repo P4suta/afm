@@ -36,9 +36,13 @@
 //! Aozora Bunko source we've seen, code-shaped runs use fenced
 //! syntax; the pinned test
 //! `tests::indent_of_four_spaces_disables_the_fence` codifies the
-//! current behaviour. If a future corpus exhibits real-world
-//! 4-space indented code blocks with Aozora trigger chars, this is
-//! the place to extend.
+//! current behaviour.
+//!
+//! A notation inside one therefore reaches the lexer and becomes a
+//! sentinel, and the reader still has to see what the author typed.
+//! `crate::ast_splice` writes it back there, the same way it does
+//! for an inline code span, so the two spellings of a code block
+//! read the same even though only one of them is masked here.
 //!
 //! ## Why not collide with `MASK_CHAR`?
 //!

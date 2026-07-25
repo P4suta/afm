@@ -61,6 +61,20 @@ fn pathological(target_bytes: usize) -> String {
     s
 }
 
+/// The same document as [`representative`], in the shape a 青空文庫 file
+/// actually arrives in: CRLF line endings under a decorative rule.
+///
+/// That pair is not cosmetic. It is what decides whether a construct's
+/// source run can be sliced out of the caller's own text or has to be
+/// searched for, and the search is the expensive half of the render. Benched
+/// separately because the LF corpus above never reaches it, and this is the
+/// corpus every real file belongs to.
+fn recovered(target_bytes: usize) -> String {
+    let mut s = String::from("本文\r\n----------\r\n");
+    s.push_str(&representative(target_bytes).replace('\n', "\r\n"));
+    s
+}
+
 fn bench_render_to_string(c: &mut Criterion) {
     let opts = Options::default();
     let mut g = c.benchmark_group("render_to_string");
@@ -68,6 +82,7 @@ fn bench_render_to_string(c: &mut Criterion) {
         ("representative_128k", representative(128 * 1024)),
         ("representative_1m", representative(1024 * 1024)),
         ("pathological_128k", pathological(128 * 1024)),
+        ("recovered_128k", recovered(128 * 1024)),
     ] {
         g.throughput(Throughput::Bytes(doc.len() as u64));
         g.bench_function(label, |b| {
