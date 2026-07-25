@@ -45,12 +45,24 @@ jobs:
             Zlib,
             CC-BY-SA-4.0
 
-          # CI-only actions are build-time tooling, never linked into or
-          # shipped with the crates, so their licenses are out of scope for
-          # the `Apache-2.0 OR MIT` product policy. Swatinem/rust-cache is
-          # LGPL-3.0; exempt it. Append a purl here for any future copyleft
-          # CI action.
-          allow-dependencies-licenses: pkg:githubactions/Swatinem/rust-cache
+          # Per-package exemptions, for two distinct reasons:
+          #
+          # - Swatinem/rust-cache (LGPL-3.0). CI-only actions are build-time
+          #   tooling, never linked into or shipped with the crates, so their
+          #   licenses are out of scope for the `Apache-2.0 OR MIT` product
+          #   policy. Append a purl here for any future copyleft CI action.
+          #
+          # - rustc-demangle (transitive: miette -> backtrace-ext ->
+          #   backtrace). It declares the deprecated slash spelling
+          #   `MIT/Apache-2.0`, which this action cannot parse into SPDX and
+          #   reports as `LicenseRef-bad-mitapache-2.0`. The licence itself
+          #   is dual MIT / Apache-2.0 — both already allowed above — so this
+          #   is a parser limitation, not a policy exception. cargo-deny, the
+          #   source of truth, reads the same field and passes. Drop this
+          #   entry once upstream switches to `MIT OR Apache-2.0`.
+          allow-dependencies-licenses: >-
+            pkg:githubactions/Swatinem/rust-cache,
+            pkg:cargo/rustc-demangle
 
           # Comment only on failure so clean PRs aren't spammed.
           comment-summary-in-pr: on-failure
