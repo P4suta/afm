@@ -10,3 +10,4 @@ cc affa2733bbb84f4f4d2bf6fb93a16fda9c4810c87f508f9ddfc4ac413db69e60 # shrinks to
 cc 339bbd9ac77f7757d087094934f67b7a3665b5ce30fc198d5ff917aa3fa89669 # shrinks to src = "［＃］"
 cc 80859b2fe33810c12626da4253198701ee1363bef016cfa47d158fa121424487 # shrinks to src = "［＃］《》"
 cc d940f60a047e347766fa3114c614bdab4a2f659ea47110b969e269df77809248 # shrinks to src = "［＃\n------------\n］｜"
+cc 55db821e30fe438a6eb25a69d27b54684600f70c6c75fd62145828e0e3b4c6e2 # shrinks to src = "```\n｜青梅《おうめ》\n［＃改ページ］\n```\n"

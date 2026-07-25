@@ -93,8 +93,9 @@ snapshot-accept:
     {{_dev}} cargo insta accept
 
 # Property-based tests only. Default 128 cases per proptest block
-# (AOZORA_PROPTEST_CASES override via aozora-test-utils::config). Fast
-# enough to live in `just ci` — see `just prop-deep` for a stress run.
+# (AOZORA_PROPTEST_CASES override, read by the test-support crate's
+# `config::default_config`). Fast enough to live in `just ci` — see
+# `just prop-deep` for a stress run.
 [group('test')]
 prop:
     {{_dev}} cargo nextest run --workspace --all-features --test 'property_*' --run-ignored default

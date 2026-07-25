@@ -24,10 +24,10 @@
 //! The tests here deliberately overlap with `property_html_shape` and
 //! the lexer's own validate phase — defence-in-depth is the point.
 
-use aozora::proptest::generators::aozora_fragment;
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_with_diag, sentinels};
-use aozora_flavored_markdown_test_support::strip_annotation_wrappers;
+use aozora_flavored_markdown_test_support::check_no_bare_bracket;
+use aozora_flavored_markdown_test_support::generators::aozora_fragment;
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ fn render_is_deterministic() {
 // ---------------------------------------------------------------------------
 
 fn tier_a_holds(html: &str) -> bool {
-    !strip_annotation_wrappers(html).contains("［＃")
+    check_no_bare_bracket(html).is_ok()
 }
 
 #[test]

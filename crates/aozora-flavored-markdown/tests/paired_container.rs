@@ -16,42 +16,15 @@
 //! * Tier-A canary: no bare `［＃` ever reaches the rendered HTML.
 
 use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown_test_support::{assert_no_bare_bracket, check_no_sentinel_leak};
 
-/// Tier-A canary reused from `ruby_segments.rs`: strip any
-/// `aozora-md-annotation` hidden-span bodies (which are allowed to carry
-/// raw `［＃`) and assert the remaining HTML has no bare marker.
-fn strip_annotation_wrappers(html: &str) -> String {
-    let open = r#"<span class="aozora-md-annotation" hidden>"#;
-    let close = "</span>";
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find(open) {
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + open.len()..];
-        if let Some(close_rel) = after_open.find(close) {
-            rest = &after_open[close_rel + close.len()..];
-        } else {
-            out.push_str(after_open);
-            rest = "";
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
+/// Tier A plus Tier B in one call. Both predicates come from the
+/// test-support crate, so this file cannot drift from the shared
+/// definition of either tier.
 fn assert_tier_a(html: &str) {
-    let stripped = strip_annotation_wrappers(html);
-    assert!(
-        !stripped.contains("［＃"),
-        "bare ［＃ leaked outside aozora-md-annotation\n  full: {html:?}\n  stripped: {stripped:?}"
-    );
-    // PUA sentinels must never survive to the rendered HTML either.
-    for sentinel in ['\u{E001}', '\u{E002}', '\u{E003}', '\u{E004}'] {
-        assert!(
-            !stripped.contains(sentinel),
-            "PUA sentinel U+{:04X} leaked: {html:?}",
-            sentinel as u32
-        );
+    assert_no_bare_bracket(html);
+    if let Err(violation) = check_no_sentinel_leak(html) {
+        panic!("{violation}\n  full html = {html:?}");
     }
 }
 
@@ -178,13 +151,9 @@ fn orphan_open_does_not_panic_but_leaves_sentinel_paragraph() {
         "body content must survive orphan open: {html:?}"
     );
     // Tier-A: sentinel may survive as a PUA char, which is *not*
-    // `［＃` — so the canary still holds even in the error case.
-    // We specifically check `strip_annotation_wrappers` for `［＃`.
-    let stripped = strip_annotation_wrappers(&html);
-    assert!(
-        !stripped.contains("［＃"),
-        "orphan-open leaked bare ［＃: {html:?}"
-    );
+    // `［＃` — so the bracket canary still holds even in the error case.
+    // Tier B is deliberately not asserted here.
+    assert_no_bare_bracket(&html);
 }
 
 #[test]
@@ -194,11 +163,7 @@ fn orphan_close_does_not_panic() {
         html.contains("本文"),
         "body must survive orphan close: {html:?}"
     );
-    let stripped = strip_annotation_wrappers(&html);
-    assert!(
-        !stripped.contains("［＃"),
-        "orphan-close leaked bare ［＃: {html:?}"
-    );
+    assert_no_bare_bracket(&html);
 }
 
 // ---------------------------------------------------------------------------

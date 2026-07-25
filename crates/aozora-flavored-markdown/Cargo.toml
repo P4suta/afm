@@ -35,11 +35,10 @@ tsify   = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Invariant predicates, plus the proptest input strategies and shared config
+# (`aozora_flavored_markdown_test_support::{config, generators}`). It is a
+# dev-dependency, so the normal build graph stays free of proptest.
 aozora-flavored-markdown-test-support = { workspace = true }
-# Aozora-shaped proptest generators come through the umbrella's
-# `proptest` feature (a dev-only feature so the normal build graph stays
-# free of proptest). Used as `aozora::proptest::{config, generators}`.
-aozora            = { workspace = true, features = ["proptest"] }
 proptest          = { workspace = true }
 pretty_assertions = { workspace = true }
 serde             = { workspace = true }
