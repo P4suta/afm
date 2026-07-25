@@ -167,9 +167,15 @@ Most aozora-md-side changes are one of:
   add new ones there with both the predicate and a unit pin
   (`invariant_unit_check_X_passes_on_clean_input`,
   `invariant_unit_check_X_fires_on_<shape>`).
-- **IR projection** — `crates/aozora-flavored-markdown/src/ir/`. Each
-  Aozora node maps via `project_inline` / `project_block_leaf`;
-  paragraph dispatch flows through `IrWalker::walk_top` →
+- **Construct substitution** — `crates/aozora-flavored-markdown/src/constructs.rs`
+  owns the table both walkers consume: one PUA sentinel per 青空文庫
+  construct, substituted in source coordinates (ADR-0023). Changes there
+  belong with a unit test in the same module, plus a case in
+  `crates/aozora-flavored-markdown/tests/construct_spans.rs` when they touch
+  what a construct's byte range covers or resolves to.
+- **IR projection** — `crates/aozora-flavored-markdown/src/ir/`. Every
+  notation projects to one `IrBlock::Aozora` / `IrInline::Aozora`
+  (ADR-0022); paragraph dispatch flows through `IrWalker::walk_top` →
   `classify_paragraph`. Streaming-mode behaviour goes through
   `StreamingIrBuilder`. Add tests in
   `crates/aozora-flavored-markdown/tests/ir_aozora.rs`.

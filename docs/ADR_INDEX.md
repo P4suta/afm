@@ -26,6 +26,7 @@ was extracted (ADR-0010).
 | [0020](./adr/0020-canonicalise-aozora-md-css-at-the-next-aozora-bump.md) | Canonicalise the `aozora-md-*` CSS at the next aozora bump | accepted |
 | [0021](./adr/0021-aozora-boundary-is-the-public-surface.md) | The aozora boundary is aozora's public surface only | accepted |
 | [0022](./adr/0022-collapse-the-aozora-half-of-the-ir.md) | Collapse the Aozora half of the IR to `{kind, span, html}` | accepted |
+| [0023](./adr/0023-substitute-constructs-in-source-coordinates.md) | Substitute constructs in source coordinates | accepted |
 
 ## Authoring a new ADR
 
