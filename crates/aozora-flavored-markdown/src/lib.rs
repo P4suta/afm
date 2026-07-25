@@ -79,6 +79,8 @@ use aozora::render::serialize as aozora_serialize;
 use aozora::syntax::borrowed::Arena;
 use comrak::nodes::AstNode;
 
+use crate::sentinel_stream::NormalizedSource;
+
 /// Parse-time configuration for [`render`] and friends.
 ///
 /// `comrak::Options` is held with a `'static` lifetime: aozora-flavored-markdown doesn't
@@ -383,13 +385,15 @@ pub fn render(input: &str, options: &Options) -> Rendered {
 /// to emit a typed [`ir::IrDocument`]. The IR is the canonical
 /// contract between aozora-flavored-markdown-wasm and aozora-flavored-markdown-obsidian's TS renderers.
 ///
-/// The IR covers the full Markdown side (paragraph, heading,
-/// blockquote, list, code, thematic break, table, image) and the
-/// full Aozora side (`Ruby` / `DoubleRuby` / `Bouten` / `Tcy` /
-/// `Gaiji` / `Annotation` / `PageBreak` / `SectionBreak` /
-/// `Container`); heading hints (`［＃「X」は大見出し］`) promote
-/// their host paragraph to `IrBlock::Heading` so the IR shape
-/// matches the rendered HTML one-for-one.
+/// The Markdown side is typed (paragraph, heading, blockquote, list,
+/// code, thematic break, table, image). Every 青空文庫 notation lands as
+/// one `IrBlock::Aozora` / `IrInline::Aozora` carrying its tag, source
+/// span, and HTML fragment — except where the notation changes the
+/// *shape* of the document rather than its content: a heading hint
+/// (`［＃「X」は大見出し］`) promotes its host paragraph to
+/// `IrBlock::Heading`, and an annotation inside a heading body drops out.
+/// Both mirror what the HTML renderer does, so the IR and the HTML of one
+/// call describe the same document.
 ///
 /// # Examples
 ///
@@ -438,14 +442,18 @@ pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
 /// `IrDocument` for the IR renderer).
 fn drive_pipeline<F, T>(input: &str, options: &Options, project: F) -> (String, Vec<Diagnostic>, T)
 where
-    F: for<'a> FnOnce(&'a AstNode<'a>, Option<&aozora::BorrowedLexOutput<'a>>, &str) -> T,
+    F: for<'a> FnOnce(
+        &'a AstNode<'a>,
+        Option<&aozora::BorrowedLexOutput<'a>>,
+        NormalizedSource<'_>,
+    ) -> T,
 {
     if !options.aozora_enabled {
         let comrak_arena = comrak::Arena::new();
         let root = comrak::parse_document(&comrak_arena, input, &options.comrak);
-        // No lexer pass (no sentinels): the sanitized-source argument is
+        // No lexer pass (no sentinels): the normalised-source argument is
         // unused by `project` here (empty cursor), so the raw input stands in.
-        let extra = project(root, None, input);
+        let extra = project(root, None, NormalizedSource::verbatim(input));
         let html = format_root(root, options, None);
         return (html, Vec::new(), extra);
     }
@@ -461,7 +469,10 @@ where
     // here to slice literal-context sentinels back to their source. The
     // lexer re-derives the same sanitization internally; `sanitize` is a
     // pure function of `masked_source`, so the coordinates line up.
+    // Comparing the two also settles whether those coordinates still
+    // address `input` — the only source the caller holds.
     let sanitized = sanitize(&masked_source);
+    let normalized = NormalizedSource::derived(&sanitized.text, &masked_source);
 
     let arena = Arena::new();
     let lex_out = aozora::lex_into_arena(&masked_source, &arena);
@@ -474,7 +485,7 @@ where
     // splicer is about to consume. Both walkers share
     // `SentinelCursor` primitives (each materialises its own cursor)
     // so they stay in lockstep without serial coupling.
-    let extra = project(root, Some(&lex_out), &sanitized.text);
+    let extra = project(root, Some(&lex_out), normalized);
 
     // Mutate the AST: every PUA sentinel becomes a `NodeValue::Raw`
     // node carrying the rendered Aozora HTML. After this returns,
@@ -482,7 +493,7 @@ where
     // emits final HTML in a single verbatim pass. `masked_source` is
     // passed so sentinels that landed in literal markdown contexts
     // (inline code, link URLs) can be rewritten to their original source.
-    ast_splice::splice_into_ast(root, &comrak_arena, &lex_out, &sanitized.text);
+    ast_splice::splice_into_ast(root, &comrak_arena, &lex_out, normalized);
 
     let html = format_root(root, options, Some(mask_originals.as_slice()));
     let diagnostics = lex_out.diagnostics.iter().map(Diagnostic::from).collect();
@@ -521,10 +532,9 @@ fn format_root<'a>(
 ///
 /// Each entry corresponds to one top-level comrak child. `html` is the
 /// rendered HTML for that child (with Aozora sentinels spliced).
-/// `ir` is the IR projection — typically a single block, but may be
-/// empty for comrak constructs without a v0.2 IR mapping (definition
-/// lists, footnote refs, raw HTML, etc.) and may carry more than one
-/// block when an Aozora paired-container drains at the call boundary.
+/// `ir` is the IR projection — typically a single block, but empty for
+/// comrak constructs the IR does not model (definition lists, footnote
+/// refs, raw HTML, …).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RenderedBlock {
@@ -547,11 +557,12 @@ pub struct RenderedBlock {
 /// returned alongside the blocks, attached to the document as a
 /// whole rather than per-block (the lexer pass is non-block-scoped).
 ///
-/// Limitation: container constructs that span multiple top-level
-/// blocks (e.g., `［＃ここから２字下げ］`...`［＃ここで字下げ終わり］`)
-/// are emitted as separate blocks; the consumer is responsible for
-/// re-assembling them. The whole-document `render_to_ir` path
-/// preserves cross-block structure if you need it.
+/// A paired container spanning several top-level blocks emits its open
+/// and close markers in the blocks they appear in — the builder threads
+/// its container stack across calls, so the pair still matches. A container
+/// the source never closes is drained at the end into a trailing block of
+/// its own, matching the closing tag the HTML side appends there, so
+/// concatenating either output leaves no container hanging open.
 ///
 /// # Examples
 ///
@@ -588,6 +599,7 @@ pub fn render_blocks_to_ir(
     // `source_nodes` spans are in sanitized-source bytes; recover that text
     // to slice literal-context sentinels. See `drive_pipeline`.
     let sanitized = sanitize(&masked_source);
+    let normalized = NormalizedSource::derived(&sanitized.text, &masked_source);
     let arena = Arena::new();
     let lex_out = aozora::lex_into_arena(&masked_source, &arena);
     let comrak_arena = comrak::Arena::new();
@@ -600,12 +612,19 @@ pub fn render_blocks_to_ir(
     // would restart the cursor at 0 for every block and misalign
     // Aozora projection against the registry.
     let blocks_ir: Vec<Vec<ir::IrBlock>> = {
-        let mut builder = ir::StreamingIrBuilder::new(Some(&lex_out), &sanitized.text);
-        root.children()
+        let mut builder = ir::StreamingIrBuilder::with_source(Some(&lex_out), normalized);
+        let mut per_block: Vec<Vec<ir::IrBlock>> = root
+            .children()
             .map(|child| builder.walk_block(child))
-            .collect()
+            .collect();
+        // End-of-document drain. The splicer appends one synthesised close
+        // per still-open container as a fresh top-level child, so each one
+        // becomes its own `RenderedBlock`; giving the drain the same shape
+        // here keeps `ir` and `html` describing the same block.
+        per_block.extend(builder.finish().into_iter().map(|block| vec![block]));
+        per_block
     };
-    ast_splice::splice_into_ast(root, &comrak_arena, &lex_out, &sanitized.text);
+    ast_splice::splice_into_ast(root, &comrak_arena, &lex_out, normalized);
     let blocks = collect_rendered_blocks(root, options, blocks_ir);
     let diagnostics = lex_out.diagnostics.iter().map(Diagnostic::from).collect();
     (blocks, diagnostics)

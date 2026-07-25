@@ -1,12 +1,5 @@
 //! Intermediate representation produced by [`crate::render_to_ir`].
 //!
-//! The shape mirrors the TypeScript `IRDocument` consumed by
-//! `aozora-flavored-markdown-obsidian/src/ir/types.ts` (and validated in
-//! `aozora-flavored-markdown-obsidian/src/ir/from-wasm.ts`). Keeping the names and field
-//! ordering aligned across the FFI boundary makes the
-//! `serde-wasm-bindgen` round-trip a pass-through, no shape adapters
-//! needed.
-//!
 //! # Examples
 //!
 //! ```
@@ -14,7 +7,7 @@
 //! use aozora_flavored_markdown::{Options, render_to_ir};
 //!
 //! let rendered = render_to_ir("｜青梅《おうめ》", &Options::default());
-//! let ruby_spans = rendered
+//! let ruby_rendered = rendered
 //!     .ir
 //!     .blocks
 //!     .iter()
@@ -23,9 +16,11 @@
 //!         _ => None,
 //!     })
 //!     .flatten()
-//!     .filter(|inline| matches!(inline, IrInline::Ruby { .. }))
-//!     .count();
-//! assert_eq!(ruby_spans, 1);
+//!     .any(|inline| {
+//!         matches!(inline, IrInline::Aozora { kind, html, .. }
+//!             if kind == "ruby" && html.contains("おうめ"))
+//!     });
+//! assert!(ruby_rendered);
 //! ```
 //!
 //! # Coverage
@@ -34,27 +29,26 @@
 //!   fenced code, tables, thematic breaks, images. Inline runs
 //!   preserve `Strong`, `Emphasis`, `Link`, `Image`, `Code`,
 //!   `LineBreak`, and verbatim `Text`.
-//! - **Aozora side**: `Ruby` / `DoubleRuby` / `Bouten` / `Tcy` /
-//!   `Gaiji` / `Annotation` (inline) and `Container` / `PageBreak` /
-//!   `SectionBreak` (block). Heading hints
-//!   (`［＃「X」は大見出し］`) promote their host paragraph to
-//!   `IrBlock::Heading` directly, mirroring `crate::ast_splice`.
+//! - **Aozora side**: every notation, as [`IrInline::Aozora`] or
+//!   [`IrBlock::Aozora`] carrying its tag, source span, and HTML fragment.
+//!   Two context rules follow the HTML splicer rather than the notation:
+//!   a heading hint (`［＃「X」は大見出し］`) promotes its host paragraph
+//!   to [`IrBlock::Heading`] — at any nesting depth, so a hint inside a
+//!   blockquote promotes there too — and an annotation inside a heading
+//!   body is dropped, because the splicer drops it (Tier C).
 //!
 //! # Module map
 //!
 //! - `types` — public IR enum/struct definitions (`IrDocument`,
 //!   `IrBlock`, `IrInline`, `Range`, ...).
-//! - `projection` — pure helpers that convert upstream construct
-//!   variants into IR values plus the enum→string mappers and the
-//!   sourcepos→range bridge. No walker state.
 //! - This file (`mod.rs`) — the stateful walker (`IrWalker`,
-//!   `OpenContainer`, `StreamingIrBuilder`) plus the single-descent
-//!   `ParaScan` and the public entry points (`build_ir`,
+//!   `StreamingIrBuilder`) plus the single-descent `ParaScan` dispatch,
+//!   the notation-tag mapping, and the public entry points (`build_ir`,
 //!   `StreamingIrBuilder::walk_block`).
 //!
 //! # Architecture
 //!
-//! The walker is built from three small primitives:
+//! The walker is built from two small primitives:
 //!
 //! 1. `crate::sentinel_stream::SentinelCursor` — the shared construct-stream
 //!    cursor. The HTML splicer (`crate::ast_splice`) and this
@@ -65,37 +59,41 @@
 //!    heading-hint lookahead at once, eliminating the two-scan
 //!    redundancy that a naive translation of the HTML splicer would
 //!    have.
-//! 3. `OpenContainer` — the per-walker container stack. Where the
-//!    HTML splicer can stream open/close tags into a string buffer,
-//!    the IR demands a tree, so each open container collects
-//!    `IrBlock`s into its own `Vec` until the matching close arrives.
-//!    Move semantics (no `clone`) carry the children into the closed
-//!    `IrBlock::Container`.
+//!
+//! Both walkers render each notation through the same
+//! `crate::ast_splice::render_aozora_html`, so the IR's `html` and the
+//! document's HTML cannot drift apart on what a notation *renders to*.
+//! Whether a notation renders at all is the other half of that agreement,
+//! and it is context-dependent (heading-hint promotion, Tier-C suppression
+//! inside headings); this walker reproduces those decisions, and
+//! `tests/ir_aozora.rs` pins the result by looking for every projected
+//! fragment in the rendered document.
 
-mod projection;
 mod types;
 
 pub use types::{
-    AnnotationKind, BoutenPosition, BoutenStyle, ContainerSubtype, IrBlock, IrDocument, IrInline,
-    IrListItem, IrTableAlign, IrTableRow, Position, Range, SectionSubtype,
+    IrBlock, IrDocument, IrInline, IrListItem, IrTableAlign, IrTableRow, Position, Range, Span,
 };
 
 use core::mem;
 
 use aozora::pipeline::BorrowedLexOutput;
-use aozora::syntax::ContainerKind;
-use aozora::syntax::borrowed::{HeadingHint, NodeRef};
-use comrak::nodes::{AstNode, ListType, NodeHeading, NodeList, NodeValue};
+use aozora::syntax::borrowed::{AozoraNode, HeadingHint, NodeRef};
+use aozora::syntax::{Container, ContainerKind};
+use comrak::nodes::{
+    AstNode, ListType, NodeHeading, NodeList, NodeValue, Sourcepos, TableAlignment,
+};
 
+use crate::ast_splice::render_aozora_html;
 use crate::sentinel_stream::{
-    BlockSentinelKind, ParaScan, SentinelCursor, is_sentinel_char, paragraph_sole_block_sentinel,
-    saturating_u32,
+    BlockSentinelKind, NormalizedSource, ParaScan, SentinelCursor, is_sentinel_char,
+    paragraph_sole_block_sentinel, saturating_u32,
 };
 
-use projection::{
-    container_indent_level, container_subtype, project_block_leaf, project_inline,
-    sourcepos_to_range, table_align,
-};
+/// Tag carried by the block that opens a paired container.
+const CONTAINER_OPEN: &str = "containerOpen";
+/// Tag carried by the block that closes a paired container.
+const CONTAINER_CLOSE: &str = "containerClose";
 
 // ===================================================================
 // Walker entry points
@@ -103,23 +101,25 @@ use projection::{
 
 /// Walk a comrak AST root and project it to [`IrDocument`].
 ///
-/// `lex_out` carries the borrowed-AST registry. When `Some`, every
-/// PUA sentinel in the comrak text is projected to its matching
-/// [`IrBlock`] / [`IrInline`] variant; when `None`, the walker
-/// degrades to markdown-only behaviour (used by
-/// `Options::aozora_enabled = false`).
-/// `sanitized` is the lexer's Phase-0 sanitized source, threaded so a
+/// `lex_out` carries the resolved-construct registry. When `Some`, every
+/// PUA sentinel in the comrak text is projected to an [`IrBlock::Aozora`] /
+/// [`IrInline::Aozora`]; when `None`, the walker degrades to markdown-only
+/// behaviour (used by `Options::aozora_enabled = false`).
+/// `src` is the lexer's input-normalisation output, threaded so a
 /// sentinel that landed in a literal markdown context (inline code,
 /// link/image destination) projects back to its original Aozora source
-/// instead of leaking the PUA char and desyncing the cursor. Must be the
-/// sanitized source (not the raw input) — `source_span` coordinates are
-/// in sanitized-source bytes.
+/// instead of leaking the PUA char and desyncing the cursor — and so the
+/// projection knows whether the lexer's offsets still address the caller's
+/// own text (see `NormalizedSource`).
 pub(crate) fn build_ir<'a>(
     root: &'a AstNode<'a>,
     lex_out: Option<&BorrowedLexOutput<'a>>,
-    sanitized: &str,
+    src: NormalizedSource<'_>,
 ) -> IrDocument {
-    let mut walker = IrWalker::new(SentinelCursor::from_lex_out_with_source(lex_out, sanitized));
+    let mut walker = IrWalker::new(
+        SentinelCursor::from_lex_out_with_source(lex_out, src),
+        Vec::new(),
+    );
     walker.walk_root(root);
     IrDocument {
         blocks: walker.finish(),
@@ -135,44 +135,80 @@ pub(crate) fn build_ir<'a>(
 /// can be issued lazily — aozora-flavored-markdown-obsidian's chunked-cancellation path
 /// (ADR-0009) uses this to checkpoint between blocks.
 ///
-/// Container open/close paragraphs that span multiple top-level
-/// blocks emit fragmented `IrBlock::Container` blocks: the open
-/// pushes onto a stack that drains at the next `walk_block` boundary
-/// (so each block is internally consistent in nesting). Whole-doc
-/// `build_ir` remains the canonical path for cross-block nesting.
+/// The open-container stack threads across calls too, so a container that
+/// opens in one top-level block and closes in a later one still emits a
+/// matched open/close pair. A container the source never closes is drained
+/// by [`StreamingIrBuilder::finish`], which the caller invokes when it runs
+/// out of blocks — the streaming analogue of the whole-document walker's
+/// end-of-document pass. Skipping it leaves the emitted `html` fragments
+/// with an unmatched opening tag.
 #[derive(Debug)]
 pub struct StreamingIrBuilder<'src> {
     cursor: SentinelCursor<'src>,
+    open: Vec<ContainerKind>,
 }
 
 impl<'src> StreamingIrBuilder<'src> {
     /// Materialise the registry once. `None` produces an empty
-    /// builder that degrades to markdown-only projection. `sanitized` is
-    /// the lexer's Phase-0 sanitized source, used to project literal-context
-    /// sentinels (inline code, link/image URLs) back to their original
-    /// Aozora source.
+    /// builder that degrades to markdown-only projection. `normalized` is
+    /// the lexer's input-normalisation output — the same text the sentinels
+    /// were embedded in — used to project literal-context sentinels
+    /// (inline code, link/image URLs) back to their original Aozora source.
+    ///
+    /// Because the caller supplies that text, the spans this builder emits
+    /// are offsets into it — the caller's own coordinates. (The
+    /// whole-document [`crate::render_to_ir`] entry point, whose caller
+    /// only ever sees the raw source, withholds a span that normalisation
+    /// moved out from under it.)
     #[must_use]
-    pub fn new(lex_out: Option<&BorrowedLexOutput<'src>>, sanitized: &str) -> Self {
+    pub fn new(lex_out: Option<&BorrowedLexOutput<'src>>, normalized: &str) -> Self {
+        Self::with_source(lex_out, NormalizedSource::verbatim(normalized))
+    }
+
+    /// [`Self::new`] for the in-crate pipeline, which knows whether the
+    /// lexer's offsets survived normalisation.
+    pub(crate) fn with_source(
+        lex_out: Option<&BorrowedLexOutput<'src>>,
+        src: NormalizedSource<'_>,
+    ) -> Self {
         Self {
-            cursor: SentinelCursor::from_lex_out_with_source(lex_out, sanitized),
+            cursor: SentinelCursor::from_lex_out_with_source(lex_out, src),
+            open: Vec::new(),
         }
     }
 
     /// Walk a single comrak block, advancing the shared cursor.
-    /// Streaming-mode containers fragment per-block; for whole-doc
-    /// nesting use `build_ir`.
     pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
-        // Move the cursor into a freshly-constructed walker for the
-        // duration of this call, then take it back. The walker's
-        // `top` / `open` stacks are scoped per-call (streaming-mode
-        // containers fragment per-block); the cursor is the only
-        // state that threads across calls.
+        // Move the cursor and container stack into a freshly-constructed
+        // walker for the duration of this call, then take them back. The
+        // walker's `top` buffer is scoped per-call; the cursor and the
+        // stack are the state that threads across calls.
         let cursor = mem::replace(&mut self.cursor, SentinelCursor::from_nodes(Vec::new()));
-        let mut walker = IrWalker::new(cursor);
+        let open = mem::take(&mut self.open);
+        let mut walker = IrWalker::new(cursor, open);
         walker.walk_top(node);
-        let (blocks, cursor) = walker.finish_keeping_cursor();
+        let (blocks, cursor, open) = walker.into_parts();
         self.cursor = cursor;
+        self.open = open;
         blocks
+    }
+
+    /// End-of-document drain: one synthesised close block per container the
+    /// source left open, outermost last (LIFO), matching what the HTML
+    /// splicer appends to the document in the same situation.
+    ///
+    /// Call it after the last [`Self::walk_block`]. Without it the emitted
+    /// fragments carry an opening `<div>` with no `</div>`, so a consumer
+    /// concatenating them — aozora-flavored-markdown-obsidian's
+    /// chunked-cancellation path (ADR-0009) inserts them one by one — would
+    /// leave the container swallowing everything that follows.
+    #[must_use]
+    pub fn finish(mut self) -> Vec<IrBlock> {
+        let mut out = Vec::with_capacity(self.open.len());
+        while let Some(kind) = self.open.pop() {
+            out.push(synthesised_close(kind));
+        }
+        out
     }
 }
 
@@ -181,12 +217,12 @@ impl<'src> StreamingIrBuilder<'src> {
 // ===================================================================
 
 /// Tree builder that consumes comrak nodes plus a sentinel cursor and
-/// emits `IrBlock`s into a stack-balanced container hierarchy.
+/// emits `IrBlock`s.
 ///
 /// The state mirrors `crate::ast_splice`'s splicer for the HTML
 /// side: same cursor, same balanced-container model, same
 /// orphan-close drain at end-of-document. They differ only in the
-/// emit target (rewritten comrak AST vs. tree of `Vec<IrBlock>`).
+/// emit target (rewritten comrak AST vs. `Vec<IrBlock>`).
 ///
 /// Lifetime: `'src` is the arena/source lifetime every borrowed upstream
 /// payload references — shared with the owned cursor's payloads and the
@@ -198,22 +234,22 @@ impl<'src> StreamingIrBuilder<'src> {
 /// shadow the struct's `'src`.
 struct IrWalker<'src> {
     cursor: SentinelCursor<'src>,
-    /// Document-level blocks gathered so far. When a container is
-    /// open, new blocks go onto its top-of-stack `children` instead.
+    /// Blocks gathered so far, in document order.
     top: Vec<IrBlock>,
-    /// Stack of currently-open paired containers. Each frame owns the
-    /// blocks gathered between its open and (eventual) close marker.
-    open: Vec<OpenContainer>,
+    /// Kinds of the paired containers currently open, in LIFO order.
+    /// Tracking the kind (not just a depth) lets an unclosed container
+    /// synthesise its own matching close at end-of-document.
+    open: Vec<ContainerKind>,
+    /// Number of `Heading` ancestors the walker is currently inside —
+    /// the mirror of the splicer's `in_heading_depth`, and used for the
+    /// same reason: annotation-shaped notations are dropped from a
+    /// heading body (Tier C), so the IR must drop them too or it would
+    /// carry a fragment the rendered HTML does not have.
+    in_heading: u32,
     /// Current block/inline nesting depth, bounded by [`MAX_AST_DEPTH`]
     /// so pathologically deep input cannot overflow the recursive
     /// `collect_blocks` / `collect_inlines` descent.
     depth: usize,
-}
-
-struct OpenContainer {
-    kind: ContainerKind,
-    source_line: Option<u32>,
-    children: Vec<IrBlock>,
 }
 
 /// Maximum IR block/inline nesting depth.
@@ -232,31 +268,31 @@ struct OpenContainer {
 const MAX_AST_DEPTH: usize = 256;
 
 impl<'src> IrWalker<'src> {
-    fn new(cursor: SentinelCursor<'src>) -> Self {
+    fn new(cursor: SentinelCursor<'src>, open: Vec<ContainerKind>) -> Self {
         Self {
             cursor,
             top: Vec::new(),
-            open: Vec::new(),
+            open,
+            in_heading: 0,
             depth: 0,
         }
     }
 
-    /// Drain any unclosed containers (mirror of the HTML splicer's
-    /// end-of-document orphan-close pass) and return the document
-    /// blocks. Used by `build_ir`.
-    fn finish(self) -> Vec<IrBlock> {
-        self.finish_keeping_cursor().0
+    /// Close any container the source left open (mirror of the HTML
+    /// splicer's end-of-document orphan-close pass) and return the
+    /// document blocks. Used by `build_ir`.
+    fn finish(mut self) -> Vec<IrBlock> {
+        while let Some(kind) = self.open.pop() {
+            self.top.push(synthesised_close(kind));
+        }
+        self.top
     }
 
-    /// Same as [`Self::finish`] but also returns the consumed cursor
-    /// so a streaming caller can thread it into the next per-block
-    /// walk. Used by [`StreamingIrBuilder`].
-    fn finish_keeping_cursor(mut self) -> (Vec<IrBlock>, SentinelCursor<'src>) {
-        while let Some(open) = self.open.pop() {
-            let block = open.into_block();
-            place_in(&mut self.open, &mut self.top, block);
-        }
-        (self.top, self.cursor)
+    /// Return the blocks plus the cursor and container stack, so a
+    /// streaming caller can thread them into the next per-block walk.
+    /// Used by [`StreamingIrBuilder`].
+    fn into_parts(self) -> (Vec<IrBlock>, SentinelCursor<'src>, Vec<ContainerKind>) {
+        (self.top, self.cursor, self.open)
     }
 
     fn walk_root<'a>(&mut self, root: &'a AstNode<'a>) {
@@ -266,13 +302,8 @@ impl<'src> IrWalker<'src> {
     }
 
     fn walk_top<'a>(&mut self, node: &'a AstNode<'a>) {
-        let (source_line, is_paragraph) = top_metadata(node);
-        if is_paragraph && let Some(action) = self.classify_paragraph(node) {
-            self.dispatch_paragraph(action, source_line);
-            return;
-        }
         if let Some(block) = self.walk_block(node, true) {
-            place_in(&mut self.open, &mut self.top, block);
+            self.top.push(block);
         }
     }
 
@@ -293,62 +324,67 @@ impl<'src> IrWalker<'src> {
         None
     }
 
-    fn dispatch_paragraph(&mut self, action: ParagraphAction<'src>, source_line: u32) {
+    fn dispatch_paragraph(
+        &mut self,
+        action: ParagraphAction<'src>,
+        source_line: Option<u32>,
+    ) -> Option<IrBlock> {
         match action {
             ParagraphAction::BlockSentinel(kind) => self.handle_block_sentinel(kind, source_line),
             ParagraphAction::HeadingHint {
                 hint,
                 sentinels_to_consume,
-            } => self.handle_heading_hint(hint, sentinels_to_consume, source_line),
+            } => Some(self.handle_heading_hint(hint, sentinels_to_consume, source_line)),
         }
     }
 
-    fn handle_block_sentinel(&mut self, kind: BlockSentinelKind, source_line: u32) {
-        let Some(node_ref) = self.cursor.next() else {
-            return;
-        };
-        match (kind, node_ref) {
-            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(leaf)) => {
-                if let Some(block) = project_block_leaf(leaf, source_line) {
-                    place_in(&mut self.open, &mut self.top, block);
-                }
-            }
+    fn handle_block_sentinel(
+        &mut self,
+        kind: BlockSentinelKind,
+        source_line: Option<u32>,
+    ) -> Option<IrBlock> {
+        let hit = self.cursor.next()?;
+        let (tag, html) = match (kind, hit.node) {
+            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(node)) => (
+                notation_kind(node).to_owned(),
+                render_aozora_html(node, true),
+            ),
             (BlockSentinelKind::Open, NodeRef::BlockOpen(ck)) => {
-                self.open.push(OpenContainer {
-                    kind: ck,
-                    source_line: Some(source_line),
-                    children: Vec::new(),
-                });
+                self.open.push(ck);
+                (CONTAINER_OPEN.to_owned(), container_html(ck, true))
             }
-            (BlockSentinelKind::Close, NodeRef::BlockClose(_)) => {
-                if let Some(open) = self.open.pop() {
-                    let block = open.into_block();
-                    place_in(&mut self.open, &mut self.top, block);
-                }
-                // Orphan close: silently dropped, in lockstep with
-                // `splice_aozora_html`'s defensive guard.
+            // An orphan close (no matching open) emits nothing, in lockstep
+            // with the HTML splicer's guard against unbalanced close tags.
+            (BlockSentinelKind::Close, NodeRef::BlockClose(ck)) if self.open.pop().is_some() => {
+                (CONTAINER_CLOSE.to_owned(), container_html(ck, false))
             }
-            _ => {}
-        }
+            // Registry/AST drift or an orphan close: emit nothing.
+            _ => return None,
+        };
+        Some(IrBlock::Aozora {
+            kind: tag,
+            span: hit.span,
+            html,
+            source_line,
+        })
     }
 
     fn handle_heading_hint(
         &mut self,
         hint: &'src HeadingHint<'src>,
         sentinels_to_consume: usize,
-        source_line: u32,
-    ) {
+        source_line: Option<u32>,
+    ) -> IrBlock {
         self.cursor.advance(sentinels_to_consume);
-        let block = IrBlock::Heading {
+        IrBlock::Heading {
             level: hint.level.clamp(1, 6),
             children: vec![IrInline::Text {
                 value: hint.target.as_str().to_owned(),
                 range: None,
             }],
-            source_line: Some(source_line),
+            source_line,
             range: None,
-        };
-        place_in(&mut self.open, &mut self.top, block);
+        }
     }
 
     fn walk_block<'a>(&mut self, node: &'a AstNode<'a>, top_level: bool) -> Option<IrBlock> {
@@ -358,6 +394,15 @@ impl<'src> IrWalker<'src> {
         match &data.value {
             NodeValue::Paragraph => {
                 drop(data);
+                // A paragraph the HTML splicer rewrites in place — a sole
+                // block marker, or a heading hint promoting it to a heading
+                // — takes the same turn here. The test runs at *every*
+                // nesting level, because the splicer's does: dispatching
+                // only at top level would leave the IR describing a
+                // paragraph where the HTML has an `<h1>` or a `<div>`.
+                if let Some(action) = self.classify_paragraph(node) {
+                    return self.dispatch_paragraph(action, source_line);
+                }
                 Some(IrBlock::Paragraph {
                     children: self.collect_inlines(node),
                     source_line,
@@ -367,9 +412,12 @@ impl<'src> IrWalker<'src> {
             NodeValue::Heading(NodeHeading { level, .. }) => {
                 let level = (*level).clamp(1, 6);
                 drop(data);
+                self.in_heading += 1;
+                let children = self.collect_inlines(node);
+                self.in_heading -= 1;
                 Some(IrBlock::Heading {
                     level,
-                    children: self.collect_inlines(node),
+                    children,
                     source_line,
                     range,
                 })
@@ -649,16 +697,25 @@ impl<'src> IrWalker<'src> {
                 });
             }
             cursor = idx + ch.len_utf8();
-            let Some(node_ref) = self.cursor.next() else {
+            let Some(hit) = self.cursor.next() else {
                 continue;
             };
             // Block sentinels surviving into an inline context (e.g.
             // raw text inside a fenced code block) drop silently —
             // matches `crate::ast_splice::split_text_node`.
-            if let NodeRef::Inline(aozora) = node_ref
-                && let Some(inline) = project_inline(aozora)
-            {
-                out.push(inline);
+            if let NodeRef::Inline(aozora) = hit.node {
+                // …as does an annotation inside a heading: its fragment is
+                // an `aozora-md-annotation` wrapper, which Tier C bars from
+                // a heading body, so the splicer drops it. The registry
+                // entry is already consumed, so both streams stay in step.
+                if self.in_heading > 0 && matches!(aozora, AozoraNode::Annotation(_)) {
+                    continue;
+                }
+                out.push(IrInline::Aozora {
+                    kind: notation_kind(aozora).to_owned(),
+                    span: hit.span,
+                    html: render_aozora_html(aozora, true),
+                });
             }
         }
         let tail = &text[cursor..];
@@ -671,26 +728,80 @@ impl<'src> IrWalker<'src> {
     }
 }
 
-/// Push `block` onto the top-of-stack open container's children, or
-/// onto the document's top-level blocks if no container is open.
-fn place_in(open: &mut [OpenContainer], top: &mut Vec<IrBlock>, block: IrBlock) {
-    if let Some(frame) = open.last_mut() {
-        frame.children.push(block);
-    } else {
-        top.push(block);
+/// Opening or closing HTML for one paired-container marker.
+fn container_html(kind: ContainerKind, entering: bool) -> String {
+    render_aozora_html(AozoraNode::Container(Container { kind }), entering)
+}
+
+/// The close block for a container the source never closed. Shared by both
+/// drains ([`IrWalker::finish`] for the whole document,
+/// [`StreamingIrBuilder::finish`] for the per-block path) so the two cannot
+/// describe the same situation differently.
+fn synthesised_close(kind: ContainerKind) -> IrBlock {
+    IrBlock::Aozora {
+        kind: CONTAINER_CLOSE.to_owned(),
+        // Synthesised, so there is no source text behind it.
+        span: None,
+        html: container_html(kind, false),
+        source_line: None,
     }
 }
 
-impl OpenContainer {
-    fn into_block(self) -> IrBlock {
-        IrBlock::Container {
-            subtype: container_subtype(self.kind),
-            children: self.children,
-            indent_level: container_indent_level(self.kind),
-            source_line: self.source_line,
-            range: None,
-        }
+/// Opaque tag for a resolved construct, as carried by
+/// [`IrInline::Aozora`] / [`IrBlock::Aozora`].
+///
+/// This is a naming map, not a projection: nothing about the notation's
+/// payload is re-modelled here, so a notation the sibling parser grows
+/// later needs no change on this side to *render* — it only shows up as
+/// `"unknown"` until the tag is named. That is the trailing arm's job, and
+/// it is reachable today: the source enum is `#[non_exhaustive]`.
+fn notation_kind(node: AozoraNode<'_>) -> &'static str {
+    match node {
+        AozoraNode::Ruby(_) => "ruby",
+        AozoraNode::DoubleRuby(_) => "doubleRuby",
+        AozoraNode::Bouten(_) => "bouten",
+        AozoraNode::TateChuYoko(_) => "tateChuYoko",
+        AozoraNode::Gaiji(_) => "gaiji",
+        AozoraNode::Annotation(_) => "annotation",
+        AozoraNode::Kaeriten(_) => "kaeriten",
+        AozoraNode::Indent(_) => "indent",
+        AozoraNode::AlignEnd(_) => "alignEnd",
+        AozoraNode::Warichu(_) => "warichu",
+        AozoraNode::Keigakomi(_) => "keigakomi",
+        AozoraNode::Sashie(_) => "sashie",
+        AozoraNode::PageBreak => "pageBreak",
+        AozoraNode::SectionBreak(_) => "sectionBreak",
+        AozoraNode::AozoraHeading(_) => "aozoraHeading",
+        AozoraNode::HeadingHint(_) => "headingHint",
+        AozoraNode::Container(_) => "container",
+        _ => "unknown",
     }
+}
+
+fn table_align(a: TableAlignment) -> IrTableAlign {
+    match a {
+        TableAlignment::Left => IrTableAlign::Left,
+        TableAlignment::Center => IrTableAlign::Center,
+        TableAlignment::Right => IrTableAlign::Right,
+        TableAlignment::None => IrTableAlign::Default,
+    }
+}
+
+fn sourcepos_to_range(s: &Sourcepos) -> Option<Range> {
+    // comrak source positions are 1-based line / column. Map the
+    // pair through `Position` directly — no pseudo-byte arithmetic.
+    let start = Position {
+        line: saturating_u32(s.start.line),
+        column: saturating_u32(s.start.column),
+    };
+    let end = Position {
+        line: saturating_u32(s.end.line),
+        column: saturating_u32(s.end.column),
+    };
+    // `Position` derives `Ord` lexicographically (line first, then
+    // column), so the comparison works for malformed inputs where
+    // `end` precedes `start`.
+    (end >= start).then_some(Range { start, end })
 }
 
 struct TableMeta {
@@ -708,9 +819,173 @@ enum ParagraphAction<'src> {
     },
 }
 
-fn top_metadata(node: &AstNode<'_>) -> (u32, bool) {
-    let data = node.data.borrow();
-    let line = saturating_u32(data.sourcepos.start.line).max(1);
-    let is_para = matches!(data.value, NodeValue::Paragraph);
-    (line, is_para)
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure helpers the walker composes.
+    //!
+    //! The notation-tag map is exercised against the real lexer rather than
+    //! synthesised nodes: what matters is that the tag a reader sees in the
+    //! IR matches the notation they typed, and only the lexer can say which
+    //! construct a given piece of source resolves to.
+
+    use super::*;
+    use aozora::pipeline::lex_into_arena;
+    use aozora::syntax::borrowed::{Arena, Content};
+    use comrak::nodes::LineColumn;
+
+    /// Every notation tag the lexer can produce from a snippet, in source
+    /// order, tagged the way the IR would tag it.
+    fn kinds_of(src: &str) -> Vec<&'static str> {
+        let arena = Arena::new();
+        let lex_out = lex_into_arena(src, &arena);
+        lex_out
+            .registry
+            .iter_sorted()
+            .map(|(_pos, node)| match node {
+                NodeRef::Inline(n) | NodeRef::BlockLeaf(n) => notation_kind(n),
+                NodeRef::BlockOpen(_) => CONTAINER_OPEN,
+                NodeRef::BlockClose(_) => CONTAINER_CLOSE,
+                _ => "unknown",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn notation_kind_names_the_inline_notations() {
+        for (src, expected) in [
+            ("｜青梅《おうめ》", "ruby"),
+            ("《《強調》》", "doubleRuby"),
+            ("対象［＃「対象」に傍点］", "bouten"),
+            ("20［＃「20」は縦中横］", "tateChuYoko"),
+            ("※［＃二の字点、1-2-22］", "gaiji"),
+            ("［＃ほげふが］", "annotation"),
+            ("天［＃レ］地", "kaeriten"),
+            ("第一篇［＃「第一篇」は大見出し］", "headingHint"),
+        ] {
+            assert!(
+                kinds_of(src).contains(&expected),
+                "{src:?} should tag a {expected}, got {:?}",
+                kinds_of(src)
+            );
+        }
+    }
+
+    #[test]
+    fn notation_kind_names_the_block_notations() {
+        for (src, expected) in [
+            ("［＃改ページ］", "pageBreak"),
+            ("［＃改丁］", "sectionBreak"),
+            ("［＃挿絵（fig1.png）入る］", "sashie"),
+            ("［＃地付き］", "alignEnd"),
+            ("［＃ここから２字下げ］", CONTAINER_OPEN),
+            (
+                "［＃ここから２字下げ］\n本文\n\n［＃ここで字下げ終わり］",
+                CONTAINER_CLOSE,
+            ),
+        ] {
+            assert!(
+                kinds_of(src).contains(&expected),
+                "{src:?} should tag a {expected}, got {:?}",
+                kinds_of(src)
+            );
+        }
+    }
+
+    /// The constructs above are the ones a document can produce today.
+    /// The rest of the map is reached by building the value directly:
+    /// these constructs exist in the notation but only ever arrive as a
+    /// container payload, so an input-driven test cannot name them — and a
+    /// silently wrong tag is exactly what this map must not have.
+    #[test]
+    fn notation_kind_names_the_container_payload_constructs() {
+        use aozora::syntax::borrowed::Warichu;
+        use aozora::syntax::{AlignEnd, Indent, Keigakomi};
+
+        let warichu = Warichu {
+            upper: Content::EMPTY,
+            lower: Content::EMPTY,
+        };
+        let cases = [
+            (AozoraNode::Indent(Indent { amount: 2 }), "indent"),
+            (AozoraNode::AlignEnd(AlignEnd { offset: 1 }), "alignEnd"),
+            (AozoraNode::Keigakomi(Keigakomi), "keigakomi"),
+            (AozoraNode::Warichu(&warichu), "warichu"),
+            (
+                AozoraNode::Container(Container {
+                    kind: ContainerKind::Keigakomi,
+                }),
+                "container",
+            ),
+        ];
+        for (node, expected) in cases {
+            assert_eq!(notation_kind(node), expected);
+        }
+    }
+
+    #[test]
+    fn sourcepos_to_range_returns_some_for_well_ordered_positions() {
+        let pos = Sourcepos {
+            start: LineColumn { line: 1, column: 1 },
+            end: LineColumn { line: 1, column: 5 },
+        };
+        let range = sourcepos_to_range(&pos).expect("forward range");
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.start.column, 1);
+        assert_eq!(range.end.line, 1);
+        assert_eq!(range.end.column, 5);
+        assert!(range.start <= range.end);
+    }
+
+    #[test]
+    fn sourcepos_to_range_returns_none_for_inverted_positions() {
+        // Constructed (impossible) inverted sourcepos: start later
+        // than end. The helper guards against negative ranges by
+        // returning `None`, which keeps the IR robust under malformed
+        // upstream output.
+        let pos = Sourcepos {
+            start: LineColumn { line: 5, column: 5 },
+            end: LineColumn { line: 1, column: 1 },
+        };
+        assert!(sourcepos_to_range(&pos).is_none());
+    }
+
+    #[test]
+    fn sourcepos_to_range_preserves_multiline_extent() {
+        // Comrak emits ranges that span multiple source lines for
+        // block constructs (a fenced code block, a multi-line list
+        // item, …). The IR must preserve the line / column pair so
+        // editor surfaces can map back to the right slice without
+        // doing pseudo-byte arithmetic.
+        let pos = Sourcepos {
+            start: LineColumn { line: 3, column: 1 },
+            end: LineColumn {
+                line: 7,
+                column: 12,
+            },
+        };
+        let range = sourcepos_to_range(&pos).expect("forward range");
+        assert_eq!(range.start.line, 3);
+        assert_eq!(range.end.line, 7);
+        assert_eq!(range.end.column, 12);
+    }
+
+    #[test]
+    fn table_align_maps_every_alignment() {
+        assert!(matches!(
+            table_align(TableAlignment::Left),
+            IrTableAlign::Left
+        ));
+        assert!(matches!(
+            table_align(TableAlignment::Center),
+            IrTableAlign::Center
+        ));
+        assert!(matches!(
+            table_align(TableAlignment::Right),
+            IrTableAlign::Right
+        ));
+        assert!(matches!(
+            table_align(TableAlignment::None),
+            IrTableAlign::Default
+        ));
+    }
 }

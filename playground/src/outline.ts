@@ -1,11 +1,11 @@
 // Derive a heading outline from the aozora-md IR.
 //
-// aozora-md already ships heading positions in its IR (`heading` for Markdown
-// `#`, `aozoraMdHeading` for 青空文庫 `［＃大見出し］`), each carrying a
-// `sourceLine`, so the outline needs no extra WASM call — unlike the
-// sibling aozora playground, which reads a dedicated nodes_json. We walk
-// the block tree (descending into blockquote / list / container) and
-// flatten the headings in document order.
+// aozora-md already ships heading positions in its IR — Markdown `#` and
+// 青空文庫 `［＃大見出し］` both arrive as `heading` blocks carrying a
+// `sourceLine` — so the outline needs no extra WASM call, unlike the sibling
+// aozora playground, which reads a dedicated nodes_json. We walk the block
+// tree (descending into blockquote / list) and flatten the headings in
+// document order.
 
 import type { IrBlock, IrDocument, IrInline } from './wasm-loader';
 
@@ -14,6 +14,21 @@ export interface OutlineEntry {
   readonly text: string;
   /** 1-based source line, when the renderer attached one. */
   readonly sourceLine: number | null;
+}
+
+/**
+ * Visible text of one 青空文庫 fragment, with ruby readings dropped.
+ *
+ * The IR hands every notation over as rendered HTML rather than as a typed
+ * node, so the heading text is read back out of the fragment. Two kinds of
+ * markup are stripped first, because `textContent` reports both and neither
+ * is text the reader sees: `<rt>` / `<rp>` hold the ruby reading (`おうめ`),
+ * and an `aozora-md-annotation` wrapper is `hidden`.
+ */
+function aozoraText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  for (const el of doc.querySelectorAll('rt, rp, .aozora-md-annotation')) el.remove();
+  return doc.body.textContent ?? '';
 }
 
 /** Flatten an inline run to its visible text (ruby readings excluded). */
@@ -25,18 +40,8 @@ function inlineText(nodes: readonly IrInline[]): string {
       case 'code':
         out += node.value;
         break;
-      case 'tcy':
-        out += node.text;
-        break;
       case 'strong':
       case 'emphasis':
-        out += inlineText(node.children);
-        break;
-      case 'ruby':
-      case 'doubleRuby':
-        out += inlineText(node.base);
-        break;
-      case 'bouten':
         out += inlineText(node.children);
         break;
       case 'link':
@@ -45,10 +50,10 @@ function inlineText(nodes: readonly IrInline[]): string {
       case 'image':
         out += inlineText(node.alt);
         break;
-      case 'gaiji':
-        out += node.fallbackText ?? node.description ?? '';
+      case 'aozora':
+        out += aozoraText(node.html);
         break;
-      // lineBreak / annotation contribute no heading text.
+      // lineBreak contributes no heading text.
       default:
         break;
     }
@@ -67,7 +72,6 @@ function collect(blocks: readonly IrBlock[], acc: OutlineEntry[]): void {
         });
         break;
       case 'blockquote':
-      case 'container':
         collect(block.children, acc);
         break;
       case 'list':

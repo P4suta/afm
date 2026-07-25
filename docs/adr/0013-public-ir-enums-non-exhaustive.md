@@ -1,6 +1,6 @@
 # 0013. Public IR enums are `#[non_exhaustive]`
 
-- Status: accepted
+- Status: accepted; scope narrowed by ADR-0022
 - Date: 2026-06-20
 - Deciders: @P4suta
 - Tags: api, ir, stability, semver
@@ -11,12 +11,14 @@
 > decision itself stands unchanged; only the witness / codegen mechanism this
 > ADR mentions is superseded.
 >
-> **Pending supersession (2026-07-25):** PR3 of the aozora 0.5.0
-> follow-through collapses the Aozora half of the IR to a single
-> `Aozora { kind, span, html }` variant per level, so the "every new notation
-> is a new variant" premise stops holding for Aozora constructs (it still
-> holds for the Markdown half). `#[non_exhaustive]` is retained; this ADR is
-> re-stated at that point. See [ADR-0021](0021-aozora-boundary-is-the-public-surface.md).
+> **Amendment (ADR-0022, 2026-07-25):** the Aozora half of the IR collapsed
+> to a single `Aozora { kind, span, html }` variant per level, so the premise
+> below — "every new 青空文庫 notation surfaces here as a new variant" — no
+> longer holds for that half: a new notation is a new `kind` string. The
+> decision itself stands, narrowed: `#[non_exhaustive]` is what keeps
+> **Markdown** growth additive for external `match`es. The Aozora-side
+> examples in the Context are historical. See
+> [ADR-0022](0022-collapse-the-aozora-half-of-the-ir.md).
 
 ## Context
 
