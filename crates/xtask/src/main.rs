@@ -1,28 +1,12 @@
-//! Workspace automation.
+//! Workspace automation: every task the `Justfile` or CI invokes that is not
+//! a direct cargo call. `--help` lists the sub-commands.
 //!
-//! Every task invoked by the `Justfile` or by CI that isn't a direct cargo
-//! invocation lives here. Sub-commands:
-//!
-//! - `upstream-diff` — assert the vendored comrak tree is still
-//!   pinned to the recorded SHA and that the ADR-0001 0-line diff
-//!   budget is documented in `upstream/comrak/UPSTREAM_DIFF.md`.
-//! - `upstream-sync` — replace `upstream/comrak/` with the source
-//!   tree at a given upstream tag. Pure tree-replace (ADR-0001): the
-//!   diff budget is 0, so there are no patches to re-apply.
-//! - `comment-discipline` — fail when a Rust or TOML comment names a
-//!   retired upstream-internal path (ADR-0021).
-//! - `new-adr` — scaffold a new MADR file under `docs/adr/`.
-//! - `spec-refresh` — regenerate `spec/commonmark-*.json` /
-//!   `spec/gfm-*.json` from cmark-format `spec.txt` inputs. Network
-//!   fetching is handled by the `just spec-refresh` target
-//!   (shell-side `curl`); this xtask only transforms
-//!   already-downloaded spec files into fixture JSON.
-//!
-//! Aozora parser / corpus concerns live in the sibling `P4suta/aozora`
-//! repo (ADR-0010), along with their refresh sub-commands.
+//! Aozora parser / corpus concerns live in the sibling `P4suta/aozora` repo
+//! (ADR-0010), along with their refresh sub-commands.
 
 #![forbid(unsafe_code)]
 
+use core::cmp;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -58,9 +42,8 @@ enum Command {
         /// Upstream tag name (e.g. `v0.53.0`).
         tag: String,
     },
-    /// Fail if any comment under `crates/` names a retired
-    /// upstream-internal path. The boundary with the sibling parser is its
-    /// public API only (ADR-0021), and prose must not outlive it.
+    /// Fail if any comment under `crates/` names a retired upstream-internal
+    /// path, or if doc comments outgrow their pinned line budget.
     CommentDiscipline,
     /// Create a new Architecture Decision Record under `docs/adr/`.
     NewAdr { title: String },
@@ -361,7 +344,8 @@ fn collect_scannable_files(dir: &Path, out: &mut Vec<(PathBuf, &'static str)>) -
     Ok(())
 }
 
-/// Fail when a comment under `root` names a retired upstream path.
+/// Fail when a comment under `root` names a retired upstream path, or when
+/// doc comments have outgrown [`MAX_DOC_LINES`].
 fn comment_discipline(root: &Path) -> Result<()> {
     if !root.is_dir() {
         bail!(
@@ -405,6 +389,161 @@ fn comment_discipline(root: &Path) -> Result<()> {
         "comment-discipline: clean ({} file(s), {} banned path(s) checked)",
         files.len(),
         RETIRED_UPSTREAM_PATHS.len()
+    );
+
+    doc_volume_ratchet(root)
+}
+
+// ---------------------------------------------------------------------------
+// doc-comment volume ratchet
+// ---------------------------------------------------------------------------
+
+/// Ceiling on doc-comment lines, pinned to today's count.
+///
+/// The gate is an absolute count and not a share of source, because a share
+/// has a denominator. Pinned to today, `doc / all` fails any commit that nets
+/// even one fewer *non-doc* line — a plain `refactor:` — and the only way out
+/// of that failure is to raise the ceiling. A ratchet that ordinary work can
+/// force upward is not a ratchet. An absolute count moves only when prose
+/// moves, which is the thing being held.
+///
+/// **It only ever moves down.** Nothing computes or rewrites it: lowering it
+/// after a cut is bookkeeping, raising it is a hand edit that shows up in
+/// review as exactly what it is — a decision to let prose grow.
+///
+/// The failure is never "delete a comment". It is: say *why*, once, in the
+/// place a reader will meet the constraint — and stop restating what the
+/// types and the code already say.
+const MAX_DOC_LINES: u64 = 1_608;
+
+/// Backstop on doc lines as a share of source, in parts per 100 000, held at
+/// the sibling `aozora` crate's own ~16.5% rather than at today's measured
+/// share. Slack is the point: it catches the one case [`MAX_DOC_LINES`]
+/// cannot — source shrinking out from under a doc budget that was
+/// proportionate at the old size — without firing on a refactor that merely
+/// deletes some code.
+const MAX_DOC_RATIO_PER_100K: u64 = 16_500;
+
+/// Where the ratchet measures: every `.rs` file under a crate's own `src/`,
+/// inline `#[cfg(test)]` modules and all. The `tests/` and `examples/`
+/// directories are out, an example being documentation by nature, but nothing
+/// carves test code out of `src/` — so the share reported below is of all
+/// source, not of production source alone.
+const DOC_RATCHET_ROOT: &str = "crates";
+
+/// A doc line is one whose first non-space token opens a rustdoc comment.
+/// Plain `//` notes are not counted — they cost a reader nothing until they
+/// go stale, which the retired-path gate above already covers.
+fn count_doc_lines(src: &str) -> (u64, u64) {
+    let mut doc = 0u64;
+    let mut all = 0u64;
+    for line in src.lines() {
+        all += 1;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            doc += 1;
+        }
+    }
+    (doc, all)
+}
+
+/// Why a measured `(doc, all)` fails, or `None` when it clears both gates.
+///
+/// Factored out of the walk so the tests can pin the asymmetry the gates
+/// exist for: prose growing must fail, code shrinking must not. The ratio is
+/// compared by cross-multiplication, so the verdict cannot drift with float
+/// rounding.
+fn doc_budget_failure(doc: u64, all: u64) -> Option<String> {
+    if doc > MAX_DOC_LINES {
+        return Some(format!(
+            "comment-discipline: {doc} doc-comment lines under {DOC_RATCHET_ROOT}/*/src, over the \
+             pinned ceiling of {MAX_DOC_LINES}. Cut restatements of what the code already says, \
+             keep the \"why\". Raising MAX_DOC_LINES is a deliberate hand edit, not a fix."
+        ));
+    }
+    if doc * 100_000 > all * MAX_DOC_RATIO_PER_100K {
+        let measured = doc * 100_000 / all;
+        return Some(format!(
+            "comment-discipline: doc comments are {}.{:03}% of source ({doc}/{all}), over the \
+             {}.{:03}% backstop. The source shrank far enough that the surviving prose is now out \
+             of proportion to it; cut prose to match.",
+            measured / 1000,
+            measured % 1000,
+            MAX_DOC_RATIO_PER_100K / 1000,
+            MAX_DOC_RATIO_PER_100K % 1000,
+        ));
+    }
+    None
+}
+
+/// Every `.rs` file under a crate's own `src/`.
+fn collect_crate_sources(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let crates = root.join(DOC_RATCHET_ROOT);
+    let entries = fs::read_dir(&crates).with_context(|| format!("reading {}", crates.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading an entry of {}", crates.display()))?;
+        let src = entry.path().join("src");
+        if src.is_dir() {
+            collect_rust_sources(&src, out)?;
+        }
+    }
+    out.sort();
+    Ok(())
+}
+
+fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Fail when doc comments have outgrown [`MAX_DOC_LINES`], or the source has
+/// shrunk far enough past them to breach [`MAX_DOC_RATIO_PER_100K`].
+fn doc_volume_ratchet(root: &Path) -> Result<()> {
+    let mut files = Vec::new();
+    collect_crate_sources(root, &mut files)?;
+
+    let mut doc = 0u64;
+    let mut all = 0u64;
+    let mut worst: Vec<(u64, u64, PathBuf)> = Vec::new();
+    for path in files {
+        let src =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (file_doc, file_all) = count_doc_lines(&src);
+        doc += file_doc;
+        all += file_all;
+        worst.push((file_doc, file_all, path));
+    }
+
+    if all == 0 {
+        bail!("comment-discipline: no crate source found under {DOC_RATCHET_ROOT}/");
+    }
+
+    if let Some(reason) = doc_budget_failure(doc, all) {
+        worst.sort_by_key(|&(file_doc, _, _)| cmp::Reverse(file_doc));
+        println!("comment-discipline: heaviest files (doc lines / total):");
+        for (file_doc, file_all, path) in worst.iter().take(5) {
+            println!("  {file_doc:>5} / {file_all:<5}  {}", path.display());
+        }
+        bail!(reason);
+    }
+
+    let measured = doc * 100_000 / all;
+    println!(
+        "comment-discipline: {doc}/{MAX_DOC_LINES} doc lines, {}.{:03}% of {all} source lines \
+         (backstop {}.{:03}%)",
+        measured / 1000,
+        measured % 1000,
+        MAX_DOC_RATIO_PER_100K / 1000,
+        MAX_DOC_RATIO_PER_100K % 1000,
     );
     Ok(())
 }
@@ -791,9 +930,72 @@ fn is_semver_triple(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        RETIRED_UPSTREAM_PATHS, SCANNED_FILES, aozora_pin_pattern, fold_separators,
-        is_semver_triple, scan_comments,
+        MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, RETIRED_UPSTREAM_PATHS, SCANNED_FILES,
+        aozora_pin_pattern, count_doc_lines, doc_budget_failure, fold_separators, is_semver_triple,
+        scan_comments,
     };
+
+    /// The workspace size [`MAX_DOC_LINES`] was pinned against. Only its
+    /// distance from the backstop's floor matters below, so it may drift.
+    const SOURCE_LINES: u64 = 10_398;
+
+    #[test]
+    fn doc_line_count_sees_both_rustdoc_markers_and_ignores_plain_notes() {
+        let (doc, all) =
+            count_doc_lines("//! module\n/// item\n    /// indented\n// plain note\nfn f() {}\n\n");
+        assert_eq!((doc, all), (3, 6));
+    }
+
+    /// The ratchet's whole point: one doc line more than the pinned count
+    /// fails, however the surrounding source moved.
+    #[test]
+    fn one_extra_doc_line_breaks_the_pinned_ceiling() {
+        assert!(
+            doc_budget_failure(MAX_DOC_LINES + 1, SOURCE_LINES + 1).is_some(),
+            "a doc line added along with its file must not fit"
+        );
+        assert!(
+            doc_budget_failure(MAX_DOC_LINES + 1, SOURCE_LINES).is_some(),
+            "a plain note promoted to a doc comment must not fit either"
+        );
+    }
+
+    /// The regression an earlier draft shipped: pinning the *ratio* to today
+    /// made a `refactor:` that deleted code — and no prose at all — fail, and
+    /// the only way out of that failure was to raise the ceiling. Deleting
+    /// source must stay green, or the ratchet is one ordinary commit can
+    /// force upward.
+    #[test]
+    fn deleting_source_lines_does_not_trip_the_ratchet() {
+        // How far the source may shrink at the pinned doc count before the
+        // backstop fires. A ratio pinned to today's measurement left none.
+        let floor = MAX_DOC_LINES * 100_000 / MAX_DOC_RATIO_PER_100K;
+        let slack = SOURCE_LINES - floor;
+        assert!(slack >= 500, "only {slack} non-doc line(s) of slack");
+
+        assert!(doc_budget_failure(MAX_DOC_LINES, SOURCE_LINES).is_none());
+        for shrunk_by in [1, 100, 500] {
+            assert!(
+                doc_budget_failure(MAX_DOC_LINES, SOURCE_LINES - shrunk_by).is_none(),
+                "removing {shrunk_by} non-doc line(s) must not fail a doc-comment gate"
+            );
+        }
+    }
+
+    /// Deleting prose always passes, so the gate never blocks the fix it asks
+    /// for.
+    #[test]
+    fn removing_a_doc_line_stays_within_budget() {
+        assert!(doc_budget_failure(MAX_DOC_LINES - 1, SOURCE_LINES).is_none());
+        assert!(doc_budget_failure(0, 1).is_none());
+    }
+
+    /// What the backstop is for: source shrinking far enough that the prose
+    /// that survived is out of proportion to it.
+    #[test]
+    fn the_ratio_backstop_catches_source_collapsing_under_the_prose() {
+        assert!(doc_budget_failure(MAX_DOC_LINES, 1_000).is_some());
+    }
 
     /// The comment marker a scanned file kind uses.
     fn marker(kind: &str) -> &'static str {

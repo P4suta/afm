@@ -1,16 +1,8 @@
-//! `aozora-flavored-markdown-epub` — convert Aozora Flavored Markdown sources into an
-//! EPUB 3.3 package. Spec-anchored: each phase cites the [EPUB 3.3]
-//! section it implements.
+//! Convert Aozora Flavored Markdown sources into an [EPUB 3.3] package.
 //!
-//! Pipeline ([`build`] is the only entry point):
-//!
-//! 1. **Discover** (`discover`) — collect Aozora Flavored Markdown
-//!    sources + `book.toml`.
-//! 2. **Render** (`render`) — Aozora Flavored Markdown source → XHTML
-//!    spine item.
-//! 3. **Compose** (`compose`) — OPF, Navigation Document, OCF
-//!    `container.xml`, and the `mimetype` byte sequence.
-//! 4. **Package** (`package`) — pack into the `.epub` ZIP container.
+//! [`build`] is the only entry point; it runs the `discover` → `render` →
+//! `compose` → `package` phases, each of which cites the spec section it
+//! implements.
 //!
 //! [EPUB 3.3]: https://www.w3.org/TR/epub-33/
 
@@ -27,7 +19,7 @@ mod render;
 
 pub use error::{Error, Result};
 
-/// Build configuration for one EPUB output.
+/// Inputs for one [`build`].
 #[derive(Debug, Clone)]
 pub struct BuildOptions<'a> {
     /// Directory or single file containing Aozora Flavored Markdown sources.
@@ -38,12 +30,9 @@ pub struct BuildOptions<'a> {
     pub output: &'a Path,
 }
 
-/// Convert an Aozora Flavored Markdown manuscript into an EPUB 3.3 file.
-///
 /// # Errors
 ///
-/// Returns [`Error`] if any phase fails. All errors carry source
-/// spans where applicable (`miette::Report`).
+/// Any failing phase. Errors carry source spans where applicable.
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     let manuscript = discover::collect(opts)?;
     let rendered = render::render_all(&manuscript)?;

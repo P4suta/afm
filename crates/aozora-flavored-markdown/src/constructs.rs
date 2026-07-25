@@ -2,50 +2,25 @@
 //! primitives both consumers ([`crate::ast_splice`] and [`crate::ir`]) use
 //! to sequence it.
 //!
-//! # One coordinate space
-//!
-//! A 青空文庫 construct is addressed by a byte range into the text the parser
-//! measured it against. [`Constructs::build`] tiles that text: the bytes
-//! between constructs are copied verbatim, and each construct's range
-//! collapses to one of this crate's four PUA sentinels. comrak parses the
-//! result; the sentinels survive it untouched, being outside CommonMark's
-//! escape set.
-//!
+//! [`Constructs::build`] tiles the source: bytes between constructs are
+//! copied verbatim and each construct collapses to one PUA sentinel, which
+//! survives comrak untouched by sitting outside CommonMark's escape set.
 //! Both walkers consume the table in document order and never look a
-//! construct up by position, so the table is `O(n)` to build and `O(1)` per
-//! step to walk.
+//! construct up by position, so it is `O(n)` to build and `O(1)` per step.
 //!
-//! # Which text is tiled
+//! **Which text is tiled.** The parser canonicalises before reading (drops a
+//! BOM, folds `\r`, combines accent digraphs, isolates a decorative rule).
+//! comrak must see that canonical text, since it is what the notation was
+//! read from, so where it differs from the caller's the canonical text gets
+//! a second read of its own and *that* is what is tiled. The published
+//! ranges stay with the first read, against the text the caller holds,
+//! paired construct for construct and withheld where the two disagree. A
+//! range into a text no consumer holds is a range no consumer can use.
 //!
-//! The parser canonicalises a document before reading it — it drops a
-//! leading BOM, folds `\r` to `\n`, combines accent digraphs inside `〔…〕`,
-//! and isolates a decorative rule with a blank line — and publishes that
-//! text alongside the ranges. Nearly every document is already its own
-//! canonical form, and then there is one text and one coordinate space.
-//!
-//! When it is not, the canonical text is what comrak must see (it is the
-//! text the notation was read from), so this module parses *that* and tiles
-//! it. The caller still holds the original, so the ranges published to
-//! consumers come from the first read — paired construct for construct with
-//! the second, and withheld where the two disagree. A range into a text no
-//! consumer holds is a range no consumer can use.
-//!
-//! # What a construct renders to
-//!
-//! The same source run answers both questions the walkers ask. Read
-//! verbatim it is the literal a markdown code span or link destination
-//! needs; handed to [`crate::fragment`] it is the HTML the splice weaves in.
-//! The table slices the run per construct and caches the fragment per run,
-//! so a document's repeated notation is parsed once per distinct notation.
-//!
-//! # What counts as one construct
-//!
-//! A run only renders faithfully on its own if the whole of the notation is
-//! inside it. Nearly every node the parser reports is that self-contained —
-//! its notation *is* the node — but three shapes are not, and [`coalesce`]
-//! folds each into the run that spans it before anything is tiled. A folded
-//! group is one construct with one sentinel, so both walkers stay in step
-//! without knowing the folding happened.
+//! **What a construct renders to.** One source run answers both questions:
+//! read verbatim it is the literal a code span or link destination needs;
+//! through [`crate::fragment`] it is the HTML the splice weaves in. Fragments
+//! are cached per run, so repeated notation is parsed once per spelling.
 
 use core::fmt;
 use core::ops::ControlFlow;
@@ -81,8 +56,7 @@ pub(crate) enum BlockSentinelKind {
 }
 
 impl BlockSentinelKind {
-    /// Map a char codepoint back to its sentinel kind. `None` for
-    /// inline sentinel and non-sentinel chars.
+    /// `None` for the inline sentinel as well as for non-sentinels.
     #[inline]
     pub(crate) const fn from_char(ch: char) -> Option<Self> {
         match ch {
@@ -93,7 +67,6 @@ impl BlockSentinelKind {
         }
     }
 
-    /// The codepoint that stands for this kind.
     #[inline]
     const fn sentinel(self) -> char {
         match self {
@@ -104,24 +77,15 @@ impl BlockSentinelKind {
     }
 }
 
-/// Saturating `usize → u32`. Source line / column / byte offsets
-/// past `u32::MAX` only happen for files larger than `~4G`, which
-/// the rest of the pipeline already declines to handle, so a
-/// saturating clamp is the right answer when we have to fit a
-/// `usize` into the IR / sourcepos surface.
+/// Saturating rather than fallible: an offset past `u32::MAX` needs a file
+/// over 4 GiB, which the entry points already decline.
 #[inline]
 #[must_use]
 pub(crate) fn saturating_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// True iff `ch` is one of the four PUA sentinel codepoints
-/// `U+E001..=U+E004`.
-///
-/// Implemented as a single subtract-and-compare. The optimiser would
-/// likely fold the equivalent `matches!` chain into the same code,
-/// but writing it once explicitly keeps the hot path obvious to
-/// readers and lets us const-eval it where needed.
+/// True iff `ch` is one of `U+E001..=U+E004`.
 #[inline]
 pub(crate) const fn is_sentinel_char(ch: char) -> bool {
     (ch as u32).wrapping_sub(INLINE_SENTINEL as u32) < 4
@@ -130,14 +94,9 @@ pub(crate) const fn is_sentinel_char(ch: char) -> bool {
 /// Which sentinel stands for a construct of this kind, or `None` where the
 /// construct belongs to the run of text around it.
 ///
-/// The block kinds are the ones the notation puts on a line of their own: a
-/// page break, a section break, the end-of-body marker, a 青空文庫 heading,
-/// an illustration reference, and either half of a paired container. Every
-/// other notation decorates the text it sits in.
-///
-/// The upstream enum is `#[non_exhaustive]`, so a kind added by a later
-/// spec falls through to the inline arm — the shape a decorating notation
-/// has, and the one that keeps the stream in step either way.
+/// The upstream enum is `#[non_exhaustive]`, so a kind added by a later spec
+/// falls through to the inline arm — the shape a decorating notation has,
+/// and the one that keeps the stream in step either way.
 #[inline]
 pub(crate) const fn block_sentinel_of(kind: NodeKind) -> Option<BlockSentinelKind> {
     match kind {
@@ -153,18 +112,13 @@ pub(crate) const fn block_sentinel_of(kind: NodeKind) -> Option<BlockSentinelKin
 }
 
 /// Whether an inline construct is consumed and dropped rather than
-/// rendered. Both walkers ask, so neither can decide it differently.
+/// rendered. Both walkers ask here, so neither can decide it differently.
 ///
-/// Two notations never reach the output as themselves:
-///
-/// * a directive inside a heading. Its fragment is an
-///   `aozora-md-directive` wrapper, which Tier C bars from a heading body.
-/// * a heading hint, wherever an inline walk reaches one. A hint is a
-///   directive about the text around it, and the paragraph case acts on it
-///   by promoting the whole paragraph to a heading. Reaching it inline
-///   means there is nothing to promote — a markdown heading, a table cell —
-///   and rendering the hint there would put a marker into the very heading
-///   it was written to name.
+/// * a directive inside a heading renders to an `aozora-md-directive`
+///   wrapper, which Tier C bars from a heading body.
+/// * a heading hint reached *inline* has nothing to promote (the paragraph
+///   case handles promotion), and rendering it would put a marker into the
+///   very heading it was written to name.
 pub(crate) const fn inline_is_dropped(kind: NodeKind, in_heading: bool) -> bool {
     match kind {
         NodeKind::HeadingHint => true,
@@ -177,30 +131,23 @@ pub(crate) const fn inline_is_dropped(kind: NodeKind, in_heading: bool) -> bool 
 // What one source run is
 // ===================================================================
 
-/// What the parser reports when it reads one source run on its own: the
-/// constructs the run contains, in run-relative coordinates, and the HTML
-/// the run renders to.
-///
-/// Both answers come from the same read, because both questions are asked
-/// of the same runs — [`coalesce`] asks what a run contains to decide
-/// whether it is a whole construct, and the splice asks what it renders to.
+/// What the parser reports for one source run read on its own. Both answers
+/// come from the same read: [`coalesce`] asks what a run contains, the
+/// splice asks what it renders to.
 #[derive(Debug)]
 struct RunFacts {
     nodes: Vec<(NodeKind, Span)>,
     html: String,
 }
 
-/// [`RunFacts`] by run, read once per distinct run.
-///
-/// A document repeats its notation — the same ruby, the same page break,
-/// the same container marker — and the folding pass asks about a run more
-/// than once besides, so this is what keeps the reads proportional to the
-/// notation a document uses rather than to how often it uses it.
+/// [`RunFacts`] by run, read once per distinct run — a document repeats its
+/// notation, and the folding pass asks about a run more than once besides,
+/// so this keeps reads proportional to the notation used rather than to how
+/// often it is used.
 #[derive(Debug, Default)]
 struct Runs(RefCell<HashMap<String, RunFacts>>);
 
 impl Runs {
-    /// Read `run` if it has not been read, then hand `take` its facts.
     fn with<R>(&self, run: &str, take: impl FnOnce(&RunFacts) -> R) -> R {
         if let Some(facts) = self.0.borrow().get(run) {
             return take(facts);
@@ -210,28 +157,23 @@ impl Runs {
         take(cache.entry(run.to_owned()).or_insert(facts))
     }
 
-    /// The constructs `run` contains when read on its own.
     fn nodes(&self, run: &str) -> Vec<(NodeKind, Span)> {
         self.with(run, |facts| facts.nodes.clone())
     }
 
-    /// The HTML `run` renders to.
     fn html(&self, run: &str) -> String {
         self.with(run, |facts| facts.html.clone())
     }
 
-    /// Whether `run` renders to nothing at all — the shape a marker has
-    /// when it closes something that is not there to be closed.
+    /// Empty HTML is the shape a marker has when it closes something that is
+    /// not there to be closed.
     fn renders_to_nothing(&self, run: &str) -> bool {
         self.with(run, |facts| facts.html.is_empty())
     }
 }
 
-/// Read one source run on its own.
-///
-/// A run past the parser's span budget reads as nothing: the entry points
-/// decline a document that large before any construct is sliced out of it,
-/// so this cannot be reached from a render that started.
+/// A run past the parser's span budget reads as nothing — unreachable from a
+/// render that started, since the entry points decline such a document.
 fn read_run(run: &str) -> RunFacts {
     let Ok(document) = aozora::parse(run.to_owned()) else {
         return RunFacts {
@@ -250,32 +192,25 @@ fn read_run(run: &str) -> RunFacts {
 // The table
 // ===================================================================
 
-/// One construct before it is tiled: what the parser resolved, where its
-/// notation sits in the text being tiled, and where it sits in the caller's
-/// own text.
+/// One construct before it is tiled.
 #[derive(Debug, Clone, Copy)]
 struct Node {
     kind: NodeKind,
-    /// The byte range this notation occupies in the text that was tiled —
-    /// the one coordinate space this crate can still slice after the fact.
+    /// Range in the tiled text — the one coordinate space this crate can
+    /// still slice after the fact.
     run: Span,
-    /// The byte range this notation occupies in the caller's own text, or
-    /// `None` where the parser canonicalised that text and the two reads
-    /// could not be paired.
+    /// Range in the caller's own text, or `None` where the parser
+    /// canonicalised that text and the two reads could not be paired.
     span: Option<Span>,
 }
 
-/// One construct: what the parser resolved, where its notation sits, and
-/// the text the author wrote for it.
+/// One tiled construct.
 #[derive(Debug)]
 struct Construct {
     kind: NodeKind,
-    /// The byte range this notation occupies in the caller's own text, or
-    /// `None` where the parser canonicalised that text and the two reads
-    /// could not be paired.
+    /// Range in the caller's own text; see [`Node::span`].
     span: Option<Span>,
-    /// The byte range this notation occupies in the text that was tiled —
-    /// the one coordinate space this crate can still slice after the fact.
+    /// Range in the tiled text; see [`Node::run`].
     run: Span,
     /// The source run the sentinel stands for.
     literal: String,
@@ -284,26 +219,20 @@ struct Construct {
 /// Source-ordered construct table plus the text comrak parses.
 #[derive(Debug)]
 pub(crate) struct Constructs {
-    /// The text comrak parses: the tiled text with every construct
-    /// replaced by one sentinel.
+    /// The tiled text with every construct replaced by one sentinel.
     text: String,
     /// The text that was tiled, kept whole. A construct's own run answers
     /// nearly every question about it; a heading hint is the exception —
     /// see [`Constructs::heading_hint_of`].
     tiled: String,
     entries: Vec<Construct>,
-    /// What the parser observed, plus this crate's own report of any
-    /// construct whose range did not address the text it was measured
-    /// against.
     diagnostics: Vec<Diagnostic>,
-    /// What each source run contains and renders to.
     runs: Runs,
 }
 
 impl Constructs {
-    /// Empty table for the markdown-only path (`Options::aozora_enabled =
-    /// false`), where no notation is recognised and the caller's own text
-    /// goes straight to comrak.
+    /// Empty table for the markdown-only path, where no notation is
+    /// recognised and the caller's own text goes straight to comrak.
     pub(crate) fn none() -> Self {
         Self::verbatim("")
     }
@@ -348,7 +277,6 @@ impl Constructs {
         )
     }
 
-    /// A table with no constructs whose text is `source` verbatim.
     fn verbatim(source: &str) -> Self {
         Self {
             text: source.to_owned(),
@@ -359,10 +287,8 @@ impl Constructs {
         }
     }
 
-    /// Fold `snapshot`'s nodes into constructs and tile `text` with them.
-    ///
-    /// `published` is the node table of a separate read against the
-    /// caller's own text, when that text differed from `text`.
+    /// `published` is the node table of a separate read against the caller's
+    /// own text, when that text differed from `text`.
     fn from_read(
         text: &str,
         snapshot: &Snapshot,
@@ -375,12 +301,10 @@ impl Constructs {
         Self::tile(text, &nodes, diagnostics, runs)
     }
 
-    /// Substitute one sentinel per construct in `text`.
-    ///
     /// A range that does not address `text` — out of bounds, out of order,
-    /// or landing mid-codepoint — drops its construct from both the tiling
-    /// and the table, so the sentinel stream and the table stay in step,
-    /// and the render says how many were dropped.
+    /// or landing mid-codepoint — drops its construct from *both* the tiling
+    /// and the table, so the sentinel stream and the table stay in step; the
+    /// render reports how many were dropped.
     fn tile(text: &str, nodes: &[Node], mut diagnostics: Vec<Diagnostic>, runs: Runs) -> Self {
         let mut tiled = String::with_capacity(text.len());
         let mut entries = Vec::with_capacity(nodes.len());
@@ -420,28 +344,21 @@ impl Constructs {
         }
     }
 
-    /// The HTML construct `idx` renders to, or `None` when the run behind
-    /// it is empty and there is nothing to render.
     fn fragment_of(&self, idx: usize) -> Option<String> {
         let run = self.entries.get(idx).map(|entry| entry.literal.as_str())?;
         (!run.is_empty()).then(|| self.runs.html(run))
     }
 
-    /// What the parser observed about this document, plus one warning per
-    /// render that dropped a construct it could not place.
+    /// What the parser observed, plus one warning per render that dropped a
+    /// construct it could not place.
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 
-    /// The heading level and title construct `idx` names, when it is a
-    /// heading hint that names a run of text rather than being one.
-    ///
-    /// A hint is the one notation whose own run does *not* cover the text
-    /// it is about, so — alone among the constructs — the run is widened to
-    /// the line it sits on before it is rendered. On that line the hint
-    /// reaches the run it names and reports it; off it, the renderer treats
-    /// the hint as its own text, which is the answer for a hint that names
-    /// nothing and therefore promotes nothing.
+    /// A hint is the one notation whose own run does *not* cover the text it
+    /// is about, so — alone among the constructs — the run is widened to its
+    /// line before rendering. Off that line the renderer treats the hint as
+    /// its own text, which is the right answer for a hint that names nothing.
     fn heading_hint_of(&self, idx: usize) -> Option<HeadingHint> {
         let entry = self.entries.get(idx)?;
         if entry.kind != NodeKind::HeadingHint {
@@ -451,18 +368,15 @@ impl Constructs {
         parse_heading_hint(&self.runs.html(line))
     }
 
-    /// The text comrak parses.
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
-    /// Cursor positioned before the first construct.
     pub(crate) fn cursor(&self) -> ConstructCursor<'_> {
         self.cursor_at(0)
     }
 
-    /// Cursor positioned before construct `idx`. The streaming builder
-    /// resumes here between blocks.
+    /// The streaming builder resumes here between blocks.
     pub(crate) fn cursor_at(&self, idx: usize) -> ConstructCursor<'_> {
         ConstructCursor {
             table: self,
@@ -471,14 +385,10 @@ impl Constructs {
     }
 }
 
-/// Pair the read that drives the tiling with the read against the caller's
-/// own text, so every node carries both ranges.
-///
 /// The published range is identity when there was only ever one text.
-/// Otherwise it comes from the read against the caller's own, and only
-/// where that read found the same construct in the same position — a
-/// document whose two reads disagree publishes no range rather than a
-/// plausible wrong one.
+/// Otherwise it is taken only where the second read found the same construct
+/// in the same position — a document whose two reads disagree publishes no
+/// range rather than a plausible wrong one.
 fn pair_reads(nodes: &[(NodeKind, Span)], published: Option<&[(NodeKind, Span)]>) -> Vec<Node> {
     nodes
         .iter()
@@ -500,43 +410,33 @@ fn pair_reads(nodes: &[(NodeKind, Span)], published: Option<&[(NodeKind, Span)]>
 // Folding nodes into constructs
 // ===================================================================
 
-/// How far past a node the folding pass will look for the rest of its
-/// construct.
-///
 /// A construct that reaches beyond its own node reaches exactly one other —
-/// the marker that closes it, or the directive that names it. The bound is
-/// slack around that, and it is what keeps the pass linear: a run that has
-/// not closed within a few nodes is not one of these shapes.
+/// the marker that closes it, or the directive that names it. This bound is
+/// slack around that, and is what keeps the pass linear.
 const FOLD_REACH: usize = 4;
 
-/// Fold the parser's nodes into the units this crate can render one at a
-/// time.
+/// Fold the parser's nodes into units this crate can render one at a time.
 ///
-/// A node is such a unit when its own notation is the whole of it, because
-/// then reading that notation on its own reaches the answer the document
-/// reached. Nearly every node is. Three shapes are not:
+/// A node qualifies when its own notation is the whole of it. Nearly every
+/// node is; three shapes are not, and each folds into the one run spanning
+/// it:
 ///
 /// * a **paired heading** — `［＃中見出し］見出し［＃中見出し終わり］`. The
-///   markers bracket a heading *body*, which is phrasing content: `<h1>`–
-///   `<h6>` admit no block, so this cannot be a container comrak fills
-///   without putting a `<p>` where the HTML content model forbids one.
+///   markers bracket phrasing content: `<h1>`–`<h6>` admit no block, so this
+///   cannot be a container comrak fills without putting a `<p>` where the
+///   HTML content model forbids one.
 /// * a **forward reference whose target is not adjacent** —
-///   `可哀想な人［＃「可哀想」に傍点］`. The parser reports the referenced text
-///   and the directive as two nodes. The first carries no notation at all,
-///   so on its own it renders as bare text; the second resolves against its
-///   own copy of the target and renders it a second time.
+///   `可哀想な人［＃「可哀想」に傍点］`. The first node carries no notation, so
+///   alone it renders as bare text; the second resolves against its own copy
+///   of the target and renders it a second time.
 /// * an **inline bracket pair** — `［＃割り注］…［＃割り注終わり］`. The close
-///   renders to nothing on its own, having no open to close, and the open
-///   renders as an empty element, so the body between them lands outside
-///   both.
+///   renders to nothing on its own and the open to an empty element, so the
+///   body between them lands outside both.
 ///
-/// Each is folded into the one run that spans it, which then renders as the
-/// document renders it. Everything the fold swallows is notation the parser
-/// owns anyway, with one deliberate exception: markdown written *between*
-/// the two halves of an inline bracket pair or a paired heading is read as
-/// 青空文庫 text rather than as markdown. That is the content model talking
-/// in the heading case, and in the bracket case it is the price of the body
-/// reaching the wrapper at all.
+/// The deliberate cost: markdown written *between* the two halves of a
+/// bracket pair or paired heading is read as 青空文庫 text rather than as
+/// markdown. In the heading case that is the content model talking; in the
+/// bracket case it is the price of the body reaching the wrapper at all.
 fn coalesce(text: &str, nodes: &[Node], snapshot: &Snapshot, runs: &Runs) -> Vec<Node> {
     let fold = Fold {
         text,
@@ -576,21 +476,16 @@ fn coalesce(text: &str, nodes: &[Node], snapshot: &Snapshot, runs: &Runs) -> Vec
 /// What the folding pass needs to answer "does this construct reach past
 /// its own node, and where does it end".
 struct Fold<'a> {
-    /// The text being tiled — the one coordinate space the node ranges
-    /// address.
     text: &'a str,
-    /// What each candidate run contains and renders to.
     runs: &'a Runs,
-    /// Where each paired heading's opening marker starts, mapped to where
-    /// its closing marker starts.
+    /// Each paired heading's open-marker start, mapped to its close-marker
+    /// start.
     headings: HashMap<u32, u32>,
     /// Where every paired container's markers start.
     paired: HashSet<u32>,
 }
 
 impl Fold<'_> {
-    /// The node that closes the paired heading opening at `idx`, if that is
-    /// what `idx` opens.
     fn heading(&self, nodes: &[Node], idx: usize) -> Option<usize> {
         if nodes[idx].kind != NodeKind::ContainerOpen {
             return None;
@@ -607,13 +502,10 @@ impl Fold<'_> {
     /// The node that completes the construct starting at `idx`, when that
     /// construct reaches past its own node.
     ///
-    /// Two shapes reach: a node whose run carries no notation of its own
-    /// (the target half of a forward reference), and a node whose partner
-    /// renders to nothing (the open half of an inline bracket pair). Either
-    /// way the fold is only taken when the widened run *reproduces the
-    /// group* — reading it on its own has to report exactly the nodes the
-    /// document reported inside it. That is what keeps a fold from
-    /// inventing a construct the document does not have.
+    /// The fold is only taken when the widened run *reproduces the group* —
+    /// reading it alone must report exactly the nodes the document reported
+    /// inside it. That is what keeps a fold from inventing a construct the
+    /// document does not have.
     fn coupled(&self, nodes: &[Node], idx: usize) -> Option<usize> {
         let first = nodes[idx];
         if self.paired.contains(&first.run.start) {
@@ -660,14 +552,11 @@ impl Fold<'_> {
         None
     }
 
-    /// The text `span` addresses.
     fn slice(&self, span: Span) -> Option<&str> {
         slice(self.text, span)
     }
 }
 
-/// Where each paired heading's opening marker starts, mapped to where its
-/// closing marker starts.
 fn heading_markers(snapshot: &Snapshot) -> HashMap<u32, u32> {
     snapshot
         .container_pairs()
@@ -677,8 +566,8 @@ fn heading_markers(snapshot: &Snapshot) -> HashMap<u32, u32> {
         .collect()
 }
 
-/// Where every paired container's markers start — the nodes whose pairing
-/// the parser already reports, and which the block sentinels already carry.
+/// The nodes whose pairing the parser already reports, and which the block
+/// sentinels already carry — so the fold must leave them alone.
 fn container_markers(snapshot: &Snapshot) -> HashSet<u32> {
     snapshot
         .container_pairs()
@@ -706,9 +595,6 @@ fn reproduces(runs: &Runs, run: &str, group: &[Node]) -> bool {
     runs.nodes(run).into_iter().eq(expected)
 }
 
-/// Every construct a snapshot reports, in document order, as the pair the
-/// tiling needs: what it is, and where it sits in the text it was measured
-/// against.
 fn nodes_of(snapshot: &Snapshot) -> Vec<(NodeKind, Span)> {
     snapshot
         .nodes()
@@ -725,9 +611,8 @@ fn nodes_of(snapshot: &Snapshot) -> Vec<(NodeKind, Span)> {
         .collect()
 }
 
-/// Append the sentinel that stands for a construct of `kind`, padded into a
-/// paragraph of its own for the block kinds — a block marker is a line, not
-/// a run of inline text, and comrak has to see it that way.
+/// Block kinds are padded into a paragraph of their own — a block marker is
+/// a line, not a run of inline text, and comrak has to see it that way.
 fn push_sentinel(text: &mut String, kind: NodeKind) {
     let Some(block) = block_sentinel_of(kind) else {
         text.push(INLINE_SENTINEL);
@@ -742,31 +627,22 @@ fn push_sentinel(text: &mut String, kind: NodeKind) {
 // Heading hints
 // ===================================================================
 
-/// The heading a hint asks for: how deep, and what to call it.
-///
-/// Read off the hint's own rendered fragment rather than from a typed
-/// payload, so a spec that grows a new heading style needs no change here.
+/// The heading a hint asks for. Read off the hint's own rendered fragment
+/// rather than from a typed payload, so a spec that grows a new heading
+/// style needs no change here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadingHint {
     pub(crate) level: u8,
     pub(crate) target: String,
 }
 
-/// Attribute the fragment carries the outline level in.
 const LEVEL_ATTRIBUTE: &str = "data-level=\"";
-/// Attribute the fragment carries the heading text in. Present only where
-/// the text lives in a run the hint refers back to — which is the only
-/// shape a paragraph can be promoted on.
+/// Present only where the heading text lives in a run the hint refers back
+/// to — the only shape a paragraph can be promoted on.
 const TARGET_ATTRIBUTE: &str = "data-target=\"";
 
-/// The heading a hint's fragment describes, when there is one to promote
-/// to.
-///
-/// A hint that names a run of text carries it as `data-target`, and the run
-/// it names is the heading's body. A hint that is its *own* text carries no
-/// target and renders that text visibly instead — it sits mid-line, where a
-/// block heading is not valid, so there is nothing to promote and this
-/// answers `None`.
+/// `None` for a hint that is its *own* text: it sits mid-line, where a block
+/// heading is not valid, so there is nothing to promote.
 fn parse_heading_hint(html: &str) -> Option<HeadingHint> {
     let level = attribute(html, LEVEL_ATTRIBUTE)?.parse::<u8>().ok()?;
     let target = attribute(html, TARGET_ATTRIBUTE)?;
@@ -776,7 +652,7 @@ fn parse_heading_hint(html: &str) -> Option<HeadingHint> {
     })
 }
 
-/// The line `span` sits on, as a range into `text`.
+/// The line `span` sits on.
 fn line_around(text: &str, span: Span) -> Span {
     let start = text
         .get(..span.start as usize)
@@ -801,19 +677,15 @@ fn slice(text: &str, span: Span) -> Option<&str> {
     text.get(span.start as usize..span.end as usize)
 }
 
-/// The value of the attribute `html` opens with `name`.
 fn attribute<'a>(html: &'a str, name: &str) -> Option<&'a str> {
     let value = html.find(name)? + name.len();
     let rest = html.get(value..)?;
     rest.find('"').and_then(|end| rest.get(..end))
 }
 
-/// `text` with the HTML character references a renderer emits read back.
-/// Anything else beginning with `&` is the author's own text.
-///
-/// Both apostrophe spellings are listed because the two renderers in play
-/// disagree on it — the parser writes `&#x27;`, comrak writes `&#39;` — and
-/// reading either back costs one more row.
+/// Reads back the HTML character references a renderer emits; anything else
+/// beginning with `&` is the author's own text. Both apostrophe spellings
+/// are listed because the parser writes `&#x27;` and comrak writes `&#39;`.
 fn unescape(text: &str) -> String {
     const ENTITIES: [(&str, char); 6] = [
         ("amp;", '&'),
@@ -844,14 +716,10 @@ fn unescape(text: &str) -> String {
 // Cursor
 // ===================================================================
 
-/// One entry of the construct stream: what the parser resolved, the byte
-/// range it occupied in the source, and — on demand — the HTML it renders
-/// to.
-///
-/// The fragment is asked for rather than carried because a construct does
-/// not always reach the output: an orphan close, or a directive inside a
-/// heading, is consumed to keep the stream in step and then dropped. Those
-/// never pay for a parse.
+/// One entry of the construct stream. The fragment is asked for rather than
+/// carried, because a construct does not always reach the output — an orphan
+/// close, or a directive inside a heading, is consumed to keep the stream in
+/// step and then dropped, and those never pay for a parse.
 #[derive(Clone, Copy)]
 pub(crate) struct ConstructHit<'t> {
     pub(crate) kind: NodeKind,
@@ -861,15 +729,13 @@ pub(crate) struct ConstructHit<'t> {
 }
 
 impl ConstructHit<'_> {
-    /// The HTML this construct renders to, or `None` when there is no run
-    /// behind it. A caller that has block structure riding on the answer (a
-    /// container marker) must not treat `None` as empty markup: nothing was
-    /// rendered, so nothing was opened or closed either.
+    /// `None` when there is no run behind the construct. A caller with block
+    /// structure riding on the answer must not treat that as empty markup:
+    /// nothing was rendered, so nothing was opened or closed either.
     pub(crate) fn html(&self) -> Option<String> {
         self.table.fragment_of(self.idx)
     }
 
-    /// The markup that opens this container and the markup that closes it.
     /// `None` when the marker renders to nothing, which opens nothing.
     pub(crate) fn container_halves(&self) -> Option<(String, String)> {
         let fragment = self.html()?;
@@ -879,8 +745,8 @@ impl ConstructHit<'_> {
 }
 
 impl fmt::Debug for ConstructHit<'_> {
-    /// Elides the table — every hit borrows the same one, and printing it
-    /// per hit would bury whatever the caller was debugging.
+    /// Elides the table: every hit borrows the same one, and printing it per
+    /// hit would bury whatever the caller was debugging.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConstructHit")
             .field("kind", &self.kind)
@@ -902,13 +768,10 @@ pub(crate) struct ConstructCursor<'t> {
 }
 
 impl<'t> ConstructCursor<'t> {
-    /// The heading the construct at `offset` past the cursor asks for,
-    /// when it is a heading hint.
     pub(crate) fn heading_hint(&self, offset: usize) -> Option<HeadingHint> {
         self.table.heading_hint_of(self.idx + offset)
     }
 
-    /// Consume and return the next construct, advancing the cursor.
     pub(crate) fn next(&mut self) -> Option<ConstructHit<'t>> {
         let idx = self.idx;
         let hit = self.table.entries.get(idx).map(|entry| ConstructHit {
@@ -923,8 +786,8 @@ impl<'t> ConstructCursor<'t> {
         hit
     }
 
-    /// Consume the next construct, returning the source text it stands for.
-    /// Used by the splicer / IR builder's literal-context paths.
+    /// The source text the next construct stands for — what the splicer and
+    /// IR builder need in literal contexts (code spans, link destinations).
     pub(crate) fn next_literal(&mut self) -> Option<&'t str> {
         let literal = self
             .table
@@ -935,13 +798,11 @@ impl<'t> ConstructCursor<'t> {
         Some(literal)
     }
 
-    /// Saturating advance by `n` constructs.
     pub(crate) fn advance(&mut self, n: usize) {
         self.idx = self.idx.saturating_add(n).min(self.table.entries.len());
     }
 
-    /// How many constructs the cursor has consumed. The streaming IR
-    /// builder threads this across per-block calls.
+    /// The streaming IR builder threads this across per-block calls.
     pub(crate) fn index(&self) -> usize {
         self.idx
     }
@@ -951,37 +812,22 @@ impl<'t> ConstructCursor<'t> {
 // comrak-side traversal primitives
 // ===================================================================
 
-/// How [`visit_text_leaves`] handles non-`Text` child nodes
-/// (`Strong` / `Emph` / `Link` / `Code` / ...).
+/// How [`visit_text_leaves`] handles non-`Text` child nodes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InlineDescend {
-    /// Bail out the moment a non-`Text` child is encountered. Used
-    /// to validate "this paragraph is a single bare block-sentinel
-    /// run" without false-positives from emphasis-wrapped content.
+    /// Validates "this paragraph is a single bare block-sentinel run"
+    /// without false positives from emphasis-wrapped content.
     StopAtNonText,
-    /// Descend through emphasis / strong / link / code wrappers and
-    /// keep visiting their `Text` leaves. The default for paragraph
-    /// dispatch (sentinel counting, heading-hint peeking).
+    /// The default for paragraph dispatch (sentinel counting, heading-hint
+    /// peeking).
     DescendThrough,
 }
 
 /// Visit every `Text`-leaf descendant of `node` left-to-right.
 ///
-/// `mode` decides what happens when the walker meets a non-`Text`
-/// child (see [`InlineDescend`]). The closure is invoked once per
-/// `Text` leaf with the leaf's string slice and may return
-/// [`ControlFlow::Break`] to short-circuit the entire walk.
-///
-/// Returns `Err(())` when:
-/// - `mode == StopAtNonText` and a non-`Text` child was encountered,
-///   OR
-/// - the closure returned `Break` at some point.
-///
-/// Returns `Ok(())` when the whole subtree was visited and every
-/// closure invocation returned `Continue`.
-///
-/// `core::ops::ControlFlow<()>` is the visitor signal so callers can
-/// thread their own early-bail without a bespoke enum.
+/// `Err(())` means the walk did not finish — either `mode` is
+/// `StopAtNonText` and a non-`Text` child appeared, or `visit` returned
+/// [`ControlFlow::Break`].
 pub(crate) fn visit_text_leaves<'a, F>(
     node: &'a AstNode<'a>,
     mode: InlineDescend,
@@ -1042,21 +888,16 @@ where
     Ok(())
 }
 
-/// Push `parent`'s children onto `stack` in reverse document order, so a
-/// `Vec`-as-stack pops them left-to-right. Shared by the iterative
-/// [`visit_text_leaves`] traversal.
+/// Reverse document order, so a `Vec`-as-stack pops them left-to-right.
 fn extend_children_rev<'a>(stack: &mut Vec<&'a AstNode<'a>>, parent: &'a AstNode<'a>) {
     let start = stack.len();
     stack.extend(parent.children());
     stack[start..].reverse();
 }
 
-/// Walk a comrak paragraph node and return `Some(kind)` iff its
-/// body, taken across all `Text`-node descendants, contains exactly
-/// one block-sentinel codepoint and otherwise consists only of ASCII
-/// whitespace, AND the paragraph has no non-`Text` descendants
-/// (which would imply embedded inline structure incompatible with a
-/// sole-sentinel paragraph). Allocation-free.
+/// `Some(kind)` iff the paragraph body is exactly one block sentinel plus
+/// ASCII whitespace, with no non-`Text` descendants — inline structure would
+/// mean this is not a bare block marker. Allocation-free.
 pub(crate) fn paragraph_sole_block_sentinel<'a>(
     node: &'a AstNode<'a>,
 ) -> Option<BlockSentinelKind> {
@@ -1080,11 +921,8 @@ pub(crate) fn paragraph_sole_block_sentinel<'a>(
     walk_ok.then_some(()).and(found)
 }
 
-/// Visit every `Text` descendant of `node` left-to-right, descending
-/// through emphasis / strong / link / code wrappers. Unlike the
-/// general [`visit_text_leaves`] this never bails — used for the
-/// paragraph-level sentinel count + heading-hint peek where every
-/// leaf must be observed.
+/// [`visit_text_leaves`] with no way to bail, for the paragraph-level
+/// sentinel count and heading-hint peek where every leaf must be observed.
 pub(crate) fn for_each_text_descendant<'a, F>(node: &'a AstNode<'a>, mut visit: F)
 where
     F: FnMut(&str),
@@ -1097,21 +935,14 @@ where
     });
 }
 
-/// Single-descent paragraph profile: counts sentinel chars and remembers
-/// the first heading hint.
-///
-/// Both [`crate::ir`] and [`crate::ast_splice`] need this exact summary to
-/// dispatch a paragraph to either heading-hint promotion (Case 2) or
-/// ordinary inline processing (Case 3). Computing it here, once, keeps the
-/// two walkers in lockstep without duplicating the peek-and-count loop.
+/// Single-descent paragraph profile, computed once here so [`crate::ir`] and
+/// [`crate::ast_splice`] dispatch paragraphs identically without duplicating
+/// the peek-and-count loop.
 #[derive(Debug)]
 pub(crate) struct ParaScan {
-    /// Total sentinel chars in the paragraph's text descendants.
-    /// Equals the number of constructs the paragraph would consume
-    /// during inline projection.
+    /// Equals the number of constructs the paragraph consumes during inline
+    /// projection.
     pub(crate) total_sentinels: usize,
-    /// The heading the paragraph's first heading hint asks for.
-    /// `None` if the paragraph carries no inline heading hint.
     pub(crate) first_heading_hint: Option<HeadingHint>,
 }
 

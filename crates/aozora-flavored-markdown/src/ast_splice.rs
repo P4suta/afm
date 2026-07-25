@@ -1,52 +1,31 @@
 //! AST-level Aozora sentinel splicer.
 //!
-//! comrak hands us a typed AST whose paragraphs / code blocks / headings are
-//! separate `NodeValue` variants. We splice the sentinels directly into that
-//! AST and let `comrak::format_html` produce the final HTML in one pass, rather
-//! than re-scanning a flat HTML byte stream.
+//! Sits between `comrak::parse_document` — which leaves PUA sentinels inside
+//! `Text` nodes verbatim, being outside CommonMark's escape set — and
+//! `comrak::format_html`, mutating the AST in place so the final HTML comes
+//! out of one formatting pass rather than a re-scan of a flat byte stream.
 //!
-//! [`crate::ir`]'s `IrWalker` walks the same comrak AST to project an
-//! `IrDocument`; both consume the same [`ConstructCursor`] and
-//! [`paragraph_sole_block_sentinel`] / [`ParaScan`] primitives, differing only
-//! in their emit target.
+//! `NodeValue::Raw` is the node kind for the rendered fragments: comrak
+//! documents it as inserted verbatim, and `format_html` emits it
+//! unconditionally, whereas `HtmlBlock` / `HtmlInline` would be filtered out
+//! by `render.unsafe`.
 //!
-//! ## Pipeline shape
+//! [`crate::ir`]'s `IrWalker` walks the same AST off the same
+//! [`ConstructCursor`] and [`ParaScan`] primitives, differing only in its
+//! emit target. Four cases, referred to by number throughout:
 //!
-//! This module sits between `comrak::parse_document` (which leaves PUA
-//! sentinels inside `Text` nodes verbatim — they are not in CommonMark's HTML
-//! escape set) and `comrak::format_html`. It mutates the AST in place: each
-//! sentinel character is replaced by a `NodeValue::Raw` node carrying the
-//! rendered Aozora HTML.
-//!
-//! `Raw` is the right node kind: `comrak/src/nodes.rs` documents it
-//! as "inserted verbatim into CommonMark and HTML output", and the
-//! `format_html` writer emits it unconditionally — `HtmlBlock` and
-//! `HtmlInline` would be filtered out by `Options::render::unsafe`.
-//!
-//! ## Cases
-//!
-//! 1. **Sole-block-sentinel paragraph** (a `<p>U+E002</p>`-shaped
-//!    paragraph): [`paragraph_sole_block_sentinel`] returns
-//!    `Some(kind)`. Insert a `Raw` node before the paragraph carrying
-//!    the rendered output, then detach the paragraph. A close is spliced
-//!    only against an open the walk has seen, and an open the source
-//!    never closes is closed at end of document.
-//! 2. **Heading-hint promotion** (`［＃「X」は大見出し］`): the first
-//!    inline sentinel in the paragraph is a heading hint. Mutate the
-//!    paragraph's `NodeValue` to `Heading { level, setext: false }`
-//!    in place, replace its children with a single `Text(target)`,
-//!    and advance the cursor past every sentinel the paragraph would
-//!    otherwise have consumed.
-//! 3. **Inline sentinels inside a `Text` node**: split the text
-//!    around each sentinel char and weave `Raw` siblings carrying the
-//!    rendered output. Block sentinels surviving into an inline
-//!    context (e.g. raw text inside a fenced code block we somehow
-//!    didn't mask) drop silently.
-//! 4. **Orphan `［＃...］`**: a bracket run the lexer never claimed.
-//!    Split the `Text` and replace the bracket span with a `Raw` node
-//!    containing `<span class="aozora-md-directive" hidden>...</span>`.
-//!    No cursor advance — by construction the orphan has no
-//!    matching construct.
+//! 1. **Sole-block-sentinel paragraph** — insert a `Raw` before the
+//!    paragraph, then detach it. A close is spliced only against an open the
+//!    walk has seen; an open the source never closes is closed at end of
+//!    document.
+//! 2. **Heading-hint promotion** (`［＃「X」は大見出し］`) — rewrite the
+//!    paragraph in place to a `Heading` whose sole child is the target text,
+//!    and advance the cursor past every sentinel it would have consumed.
+//! 3. **Inline sentinels in a `Text` node** — split around each sentinel and
+//!    weave in `Raw` siblings. A block sentinel surviving into an inline
+//!    context drops silently.
+//! 4. **Orphan `［＃...］`** — a bracket run no notation claimed, replaced by
+//!    a hidden wrapper. No cursor advance: it has no construct.
 
 use core::mem;
 use std::borrow::Cow;
@@ -54,9 +33,8 @@ use std::borrow::Cow;
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeHeading, NodeValue};
 
-/// The wrapper an orphan `［＃…］` run — one no notation claimed — is
-/// hidden behind. Spelled the way the parser spells its own unclaimed
-/// bracket runs, so a reader sees one markup shape for one situation.
+/// Spelled the way the parser spells its own unclaimed bracket runs, so one
+/// situation has one markup shape.
 const ORPHAN_WRAPPER_OPEN: &str = r#"<span class="aozora-md-directive" hidden>"#;
 
 use crate::constructs::{
@@ -64,17 +42,12 @@ use crate::constructs::{
     block_sentinel_of, inline_is_dropped, is_sentinel_char, paragraph_sole_block_sentinel,
 };
 
-/// Splice every Aozora sentinel embedded in `root`'s text descendants
-/// into the comrak AST. After this returns, the AST contains no PUA
-/// sentinel character: `comrak::format_html` will emit fully resolved
-/// HTML in a single verbatim pass.
+/// After this returns the AST carries no sentinel character, so
+/// `comrak::format_html` emits fully resolved HTML in one verbatim pass.
 ///
-/// `constructs` is the source-coordinate replacement table: the splicer
-/// walks it in document order and asks it what each construct renders to.
-/// The literal markdown contexts (inline code spans, link destinations)
-/// ask the same table for the construct's source text instead, since the
-/// notation must render verbatim there rather than as interpreted Aozora
-/// HTML.
+/// Literal markdown contexts (code spans, link destinations) ask the table
+/// for the construct's *source text* instead of its HTML, since a notation
+/// must render verbatim there.
 pub(crate) fn splice_into_ast<'a>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
@@ -90,54 +63,36 @@ pub(crate) fn splice_into_ast<'a>(
     splicer.drain_unclosed_containers(root);
 }
 
-/// AST mutator that consumes the construct table in source
-/// order and weaves rendered Aozora HTML into the comrak tree.
+/// Consumes the construct table in source order, weaving rendered Aozora
+/// HTML into the comrak tree.
 struct AstSplicer<'a, 't> {
     cursor: ConstructCursor<'t>,
-    /// The markup each still-open container closes with, innermost last.
-    /// Pushed on `BlockOpen`, popped on `BlockClose`; whatever remains at
-    /// end of document is closed for the source. The close is carried
-    /// rather than looked up because a close marker renders to nothing on
-    /// its own — the tag that closes a container comes from the marker that
-    /// opened it.
+    /// Closing markup for each still-open container, innermost last. It is
+    /// carried rather than looked up because a close marker renders to
+    /// nothing on its own — the closing tag comes from the *opening* marker.
     open_containers: Vec<String>,
-    /// Number of `Heading` ancestors the walker is currently inside.
-    /// Heading bodies must satisfy Tier C (no `aozora-md-directive`
-    /// contamination) AND Tier A (no bare `［＃` leak), so when
-    /// orphan brackets surface in heading text we silently drop the
-    /// run rather than wrap it. The legitimate Aozora-into-heading
-    /// path is the heading-hint promotion (Case 2 in
-    /// [`Self::dispatch_paragraph`]).
+    /// A heading body must satisfy Tier C (no `aozora-md-directive`) *and*
+    /// Tier A (no bare `［＃`), so an orphan bracket run surfacing there is
+    /// dropped rather than wrapped. Case 2 is the legitimate way Aozora
+    /// notation reaches a heading.
     in_heading_depth: u32,
     arena: &'a Arena<'a>,
 }
 
 impl<'a> AstSplicer<'a, '_> {
-    /// Depth-first traversal over an explicit work stack rather than
-    /// recursion.
+    /// Explicit work stack rather than recursion: comrak builds
+    /// arbitrarily deep ASTs from small inputs (`> > > …`, nested list
+    /// items, nested emphasis) with no nesting cap, so a recursive descent
+    /// would exhaust the call stack — a hard abort under `panic = "abort"`,
+    /// which `SECURITY.md` scopes IN as a crash on untrusted input. The
+    /// stack bounds growth by input size instead. comrak's own `format_html`
+    /// is iterative for the same reason.
     ///
-    /// comrak can build an arbitrarily deep AST from a small input
-    /// (deeply nested blockquotes `> > > …`, nested list items, or
-    /// nested inline emphasis), and `handle_blockquote` carries no
-    /// nesting cap. A recursive descent would exhaust the call stack —
-    /// under the release profile's `panic = "abort"` that is a hard
-    /// process abort, i.e. a crash on untrusted input, which both repos'
-    /// `SECURITY.md` scope IN as a vulnerability. The explicit stack
-    /// moves the unbounded growth to the heap, where it is bounded by
-    /// the input size rather than the OS stack. comrak's own
-    /// `format_html` / AST post-processing are iterative for the same
-    /// reason; this brings the splice walk in line with them.
-    ///
-    /// Children are pushed in reverse so the `Vec`-as-stack pops them in
-    /// document order, and a `Heading`'s subtree is bracketed by a
-    /// [`Work::ExitHeading`] marker so `in_heading_depth` is incremented
-    /// for exactly the heading's descendants — preserving, node for
-    /// node, the recursive `in_heading_depth += 1; walk; -= 1` behaviour
-    /// the Tier-A / Tier-C splice contract depends on. Each leaf
-    /// dispatch (`split_text_node` / `handle_block_sentinel` /
-    /// `handle_heading_hint`) only ever inserts fresh siblings or
-    /// detaches the current node, never the already-stacked siblings, so
-    /// the snapshot-on-push discipline stays sound.
+    /// A `Heading`'s subtree is bracketed by [`Work::ExitHeading`] so
+    /// `in_heading_depth` covers exactly its descendants, reproducing the
+    /// recursive increment/decrement the Tier-A / Tier-C contract needs. The
+    /// snapshot-on-push discipline stays sound because every leaf dispatch
+    /// only inserts fresh siblings or detaches the current node.
     fn walk(&mut self, root: &'a AstNode<'a>) {
         let mut stack: Vec<Work<'a>> = Vec::new();
         push_children_rev(&mut stack, root);
@@ -183,11 +138,8 @@ impl<'a> AstSplicer<'a, '_> {
         }
     }
 
-    /// Dispatch a paragraph (Cases 1/2/3 in module-doc order). The
-    /// ordinary-paragraph case descends by pushing the paragraph's
-    /// children onto the shared work `stack` (a paragraph is never a
-    /// `Heading`, so no depth marker is needed); the block-sentinel and
-    /// heading-hint cases mutate in place and do not descend.
+    /// Cases 1/2/3. Only the ordinary-paragraph case descends, and it needs
+    /// no depth marker because a paragraph is never a `Heading`.
     fn dispatch_paragraph(&mut self, paragraph: &'a AstNode<'a>, stack: &mut Vec<Work<'a>>) {
         if let Some(kind) = paragraph_sole_block_sentinel(paragraph) {
             self.handle_block_sentinel(paragraph, kind);
@@ -212,9 +164,8 @@ impl<'a> AstSplicer<'a, '_> {
         }
     }
 
-    /// The markup the next construct contributes as a block of its own, or
-    /// `None` when it contributes none — and, for the container kinds, the
-    /// bookkeeping that keeps the two in agreement.
+    /// `None` when the construct contributes no block of its own. Also does
+    /// the container bookkeeping, so markup and stack cannot disagree.
     fn block_html(&mut self, kind: BlockSentinelKind) -> Option<String> {
         // Table exhausted: nothing stands behind this sentinel.
         let hit = self.cursor.next()?;
@@ -366,11 +317,8 @@ impl<'a> AstSplicer<'a, '_> {
         node.detach();
     }
 
-    /// Rewrite each sentinel in `s` to the original Aozora source the
-    /// lexer collapsed into it, leaving non-sentinel chars untouched.
-    /// Advances the cursor once per sentinel so later sentinels in
-    /// ordinary text stay in lockstep. A sentinel with no construct
-    /// (cursor exhausted) is dropped rather than leaked.
+    /// Consumes one table entry per sentinel so later ones stay in
+    /// lockstep. A sentinel with no construct left is dropped, not leaked.
     fn rewrite_literal_context(&mut self, s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for ch in s.chars() {
@@ -385,11 +333,8 @@ impl<'a> AstSplicer<'a, '_> {
         out
     }
 
-    /// Code span (`` `…` ``) or code block: rewrite sentinels in the
-    /// literal back to their original source. Code is literal markdown, so
-    /// `` `｜青梅《おうめ》` `` must render as the text the author typed,
-    /// not as an interpreted ruby — and the sentinel must never leak into
-    /// `<code>`.
+    /// Code is literal markdown: `` `｜青梅《おうめ》` `` must render as the
+    /// text the author typed, not as an interpreted ruby.
     fn splice_code_literal(&mut self, node: &'a AstNode<'a>, literal: &str) {
         let rewritten = self.rewrite_literal_context(literal);
         let mut data = node.data.borrow_mut();
@@ -400,11 +345,9 @@ impl<'a> AstSplicer<'a, '_> {
         }
     }
 
-    /// Link/image destination + title: rewrite sentinels in `url` then
-    /// `title` (source order) back to their original source, so a notation
-    /// written inside a URL keeps the literal URL the author typed instead
-    /// of a percent-encoded sentinel. Called after the node's children, so
-    /// cursor consumption follows source order (text, then url, then title).
+    /// So a notation written inside a URL keeps the literal URL the author
+    /// typed rather than a percent-encoded sentinel. Runs after the node's
+    /// children, keeping cursor consumption in source order.
     fn process_link_fields(&mut self, node: &'a AstNode<'a>) {
         let (url, title) = {
             let data = node.data.borrow();
@@ -462,21 +405,16 @@ impl<'a> AstSplicer<'a, '_> {
 enum Work<'a> {
     /// Classify and dispatch this node.
     Visit(&'a AstNode<'a>),
-    /// Sentinel popped after a `Heading`'s entire subtree has been
-    /// processed, to restore `in_heading_depth` — the iterative
-    /// analogue of the recursive `in_heading_depth -= 1` on unwind.
+    /// Restores `in_heading_depth` after a `Heading`'s whole subtree.
     ExitHeading,
-    /// Rewrite a link/image node's `url`/`title` fields after its children
-    /// (the link text) have been processed, so sentinels in the fields
-    /// consume their constructs in source order.
+    /// Deferred until after the link text, so the fields consume their
+    /// constructs in source order.
     ProcessLinkFields(&'a AstNode<'a>),
 }
 
-/// Push `parent`'s children onto `stack` as [`Work::Visit`] items in
-/// reverse document order, so the `Vec`-as-stack pops them
-/// left-to-right. Children are snapshotted here (by being moved onto
-/// the stack) before any dispatch mutates the tree, mirroring the
-/// previous recursive walk's `children().collect()`.
+/// Reverse document order, so the `Vec`-as-stack pops them left-to-right.
+/// Snapshotting the children here — before any dispatch mutates the tree —
+/// is what makes the iterative walk equivalent to the recursive one.
 fn push_children_rev<'a>(stack: &mut Vec<Work<'a>>, parent: &'a AstNode<'a>) {
     let start = stack.len();
     stack.extend(parent.children().map(Work::Visit));
@@ -489,23 +427,17 @@ fn push_children_rev<'a>(stack: &mut Vec<Work<'a>>, parent: &'a AstNode<'a>) {
 enum DispatchAction {
     /// Paragraph node — try Case 1 / 2 / 3 in order.
     Paragraph,
-    /// Text node carrying at least one sentinel char or one orphan
-    /// `［＃` prefix. The captured `String` is the text body, ready
-    /// to feed into [`AstSplicer::split_text_node`] without re-borrow.
+    /// Carries at least one sentinel char or orphan `［＃` prefix. The
+    /// `String` is captured so the dispatch needs no re-borrow.
     TextWith(String),
-    /// Code span or code block whose literal carries at least one
-    /// sentinel. The captured `String` is the literal, fed to
-    /// [`AstSplicer::splice_code_literal`] which rewrites each sentinel to
-    /// its original source.
+    /// Code span or block whose literal carries at least one sentinel.
     CodeWith(String),
-    /// Link or image: recurse into children, then rewrite `url`/`title`
-    /// (see [`Work::ProcessLinkFields`]).
+    /// Recurse into children, then rewrite `url`/`title`.
     RecurseLink,
-    /// Block container that may carry interesting descendants —
-    /// recurse into its children.
+    /// May carry interesting descendants — recurse.
     Recurse,
-    /// Leaf or opaque content (raw HTML, fenced code, already-rendered
-    /// Raw) that must not be searched for sentinels.
+    /// Opaque content (raw HTML, fenced code, already-rendered `Raw`) that
+    /// must not be searched for sentinels.
     Skip,
 }
 
@@ -578,11 +510,8 @@ mod tests {
     use crate::code_block_mask;
     use crate::constructs::BLOCK_LEAF_SENTINEL;
 
-    /// Run the full aozora-flavored-markdown pipeline (mask → lex → tile →
-    /// parse → splice → `format_html` → unmask) through the AST splicer and
-    /// return the produced HTML. Mirrors `crate::lib::drive_pipeline`
-    /// exactly so the unit tests exercise the same code-block-mask
-    /// boundary the production renderer uses.
+    /// Mirrors `drive_pipeline` exactly, so these unit tests exercise the
+    /// same code-block-mask boundary the production renderer uses.
     fn render_via_ast_splice(input: &str) -> String {
         let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
         let constructs = Constructs::build(&masked);
