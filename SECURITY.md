@@ -21,7 +21,7 @@ In scope:
   10 MiB.
 - HTML-escape bypass anywhere in the render path — output is embedded in
   web pages.
-- An internal PUA sentinel (`U+E001..=U+E004`) reaching the rendered HTML,
+- An internal PUA sentinel (`U+E000..=U+E004`) reaching the rendered HTML,
   or a desynced construct cursor swapping one notation's content for
   another's. Gated by the `check_no_sentinel_leak` invariant.
 - CommonMark / GFM conformance regressions that enable a bypass.

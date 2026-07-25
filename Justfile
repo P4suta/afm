@@ -136,8 +136,9 @@ spec-gfm:
 
 # --- fuzzing -----------------------------------------------------------------
 #
-# libFuzzer harnesses (`parse_render` / `serialize_round_trip` / `sjis_decode`)
-# live in `crates/aozora-flavored-markdown/fuzz/`; they run under nightly in the dev
+# libFuzzer harnesses (`parse_render` / `render_blocks` /
+# `serialize_round_trip` / `sjis_decode`) live in
+# `crates/aozora-flavored-markdown/fuzz/`; they run under nightly in the dev
 # container. Triaged crashes are promoted into `tests/fuzz_regressions/` so
 # `just test` replays them with no nightly required.
 
@@ -239,6 +240,7 @@ fuzz-promote TARGET ARTIFACT:
 [group('fuzz')]
 fuzz-all-quick:
     just fuzz-quick parse_render
+    just fuzz-quick render_blocks
     just fuzz-quick serialize_round_trip
     just fuzz-quick sjis_decode
 
@@ -247,6 +249,7 @@ fuzz-all-quick:
 [group('fuzz')]
 fuzz-all-deep:
     just fuzz-deep parse_render
+    just fuzz-deep render_blocks
     just fuzz-deep serialize_round_trip
     just fuzz-deep sjis_decode
 
@@ -257,7 +260,7 @@ fuzz-all-deep:
 fuzz-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    targets=(parse_render serialize_round_trip sjis_decode)
+    targets=(parse_render render_blocks serialize_round_trip sjis_decode)
     printf "%-22s  %-10s  %-12s\n" target pending_crashes pinned_regressions
     printf "%-22s  %-10s  %-12s\n" ---------------------- ---------- ------------
     for t in "${targets[@]}"; do

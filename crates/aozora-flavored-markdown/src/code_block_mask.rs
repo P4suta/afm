@@ -17,16 +17,16 @@
 //! same even though only one is masked here.
 //!
 //! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
-//! returning a borrowed `Cow` and no originals. That keeps the parser's own
-//! `SourceContainsPua` diagnostic meaningful on the user's pristine input,
-//! and avoids ambiguity of origin in [`unmask_html`].
+//! returning a borrowed `Cow` and no originals. The sibling parser
+//! neutralizes U+E001..U+E004 only, so such a codepoint reaches the output
+//! as the author's own byte, with no ambiguity of origin to resolve.
 
 use core::cmp::min;
 use std::borrow::Cow;
 
 /// Distinct from the four construct sentinels (U+E001..U+E004), so masking
 /// cannot collide with them.
-const MASK_CHAR: char = '\u{E000}';
+pub(crate) const MASK_CHAR: char = '\u{E000}';
 
 /// Mirrors the sibling tokeniser; if the upstream list grows, so must this.
 const AOZORA_TRIGGERS: &[char] = &['｜', '《', '》', '［', '］', '※', '〔', '〕', '「', '」'];
@@ -79,11 +79,17 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
     }
 }
 
-/// Source-scan order matches the order the masks appear in the rendered
-/// HTML. If `originals` runs short the remaining masks flow through
-/// unchanged, which is benign: a PUA glyph never collides with body text.
 #[must_use]
 pub(crate) fn unmask_html<'a>(html: &'a str, originals: &[char]) -> Cow<'a, str> {
+    let mut cursor = originals;
+    unmask_html_from(html, &mut cursor)
+}
+
+/// Restores in source-scan order — the order the masks appear in the HTML —
+/// advancing `originals` past what it consumed, so a caller formatting one
+/// block at a time resumes instead of replaying. Extra masks flow through.
+#[must_use]
+pub(crate) fn unmask_html_from<'a>(html: &'a str, originals: &mut &[char]) -> Cow<'a, str> {
     if originals.is_empty() || !html.contains(MASK_CHAR) {
         return Cow::Borrowed(html);
     }
@@ -97,6 +103,7 @@ pub(crate) fn unmask_html<'a>(html: &'a str, originals: &[char]) -> Cow<'a, str>
             out.push(ch);
         }
     }
+    *originals = &originals[idx..];
     Cow::Owned(out)
 }
 

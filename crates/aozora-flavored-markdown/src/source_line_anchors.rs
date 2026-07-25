@@ -4,8 +4,7 @@
 //! Formatting each top-level child into its own buffer makes the Nth child
 //! the Nth anchored tag: no depth tracking, no full-document HTML scan, and
 //! no ambiguity about which open tag is top-level. The two-pass alternative
-//! had to reconstruct that boundary with a hand-rolled tag walker carrying
-//! quote tracking, void-tag detection and self-closing handling.
+//! needed a hand-rolled tag walker with quote and void-tag tracking.
 
 use comrak::nodes::AstNode;
 
@@ -19,13 +18,21 @@ pub(crate) fn format_root_with_anchors<'a>(
     let children: Vec<&AstNode<'a>> = root.children().collect();
     let mut out = String::with_capacity(children.len() * 64);
     for child in children {
-        let line = saturating_u32(child.data.borrow().sourcepos.start.line).max(1);
-        let mut buf = String::new();
-        comrak::format_html(child, options, &mut buf).expect("formatting to a String never fails");
-        inject_anchor_into_first_open_tag(&mut buf, line);
-        out.push_str(&buf);
+        out.push_str(&format_block_with_anchor(child, options));
     }
     out
+}
+
+/// The per-child half, shared with the streaming block renderer.
+pub(crate) fn format_block_with_anchor<'a>(
+    child: &'a AstNode<'a>,
+    options: &comrak::Options<'static>,
+) -> String {
+    let line = saturating_u32(child.data.borrow().sourcepos.start.line).max(1);
+    let mut buf = String::new();
+    comrak::format_html(child, options, &mut buf).expect("formatting to a String never fails");
+    inject_anchor_into_first_open_tag(&mut buf, line);
+    buf
 }
 
 /// "First opening tag" means the first `<X` where `X` is an ASCII letter,

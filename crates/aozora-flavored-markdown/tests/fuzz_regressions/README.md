@@ -13,6 +13,8 @@ tests/fuzz_regressions/
   parse_render/
     crash-<sha>            # raw byte payload, fed verbatim
     crash-<sha>.expect.txt # (optional) panic snippet, archaeology only
+  render_blocks/
+    ...
   serialize_round_trip/
     ...
   sjis_decode/
@@ -20,7 +22,8 @@ tests/fuzz_regressions/
 ```
 
 The runner picks files up by directory walk — drop a new file in and
-`just test` will replay it without further plumbing.
+`just test` will replay it without further plumbing. A target with no
+regressions yet has no directory at all; `just fuzz-promote` creates it.
 
 ## Workflow
 
@@ -29,8 +32,8 @@ The runner picks files up by directory walk — drop a new file in and
    ```sh
    just fuzz-quick parse_render          # 60 s
    just fuzz-deep  parse_render          # 5 min — release gate
-   just fuzz-all-quick                   # all three targets, 60 s each
-   just fuzz-all-deep                    # all three targets, 5 min each
+   just fuzz-all-quick                   # every target, 60 s each
+   just fuzz-all-deep                    # every target, 5 min each
    ```
 
 2. If libFuzzer flags a crash, it writes the offending input to
@@ -66,6 +69,7 @@ The runner picks files up by directory walk — drop a new file in and
    # target              pending_crashes  pinned_regressions
    # --------------------------------------------------------
    # parse_render        0                3
+   # render_blocks       0                0
    # serialize_round_trip 0                1
    # sjis_decode         0                0
    ```

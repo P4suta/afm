@@ -30,12 +30,14 @@
 //! included.
 
 use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
+use aozora_flavored_markdown::{Options, render as render_to_diagnostics, render_blocks_to_ir};
 use aozora_flavored_markdown_test_support::config::default_config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
 };
-use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_bare_bracket};
+use aozora_flavored_markdown_test_support::{
+    assert_html_invariants, check_no_bare_bracket, check_no_sentinel_leak,
+};
 use proptest::prelude::*;
 
 /// Whether the render raised any diagnostic for `src`. Gates the Tier A
@@ -54,6 +56,27 @@ fn parse_is_well_formed(src: &str) -> bool {
 /// inside [`assert_html_invariants`].
 fn assert_always_on(html: &str, src: &str) {
     assert_html_invariants(src, html);
+}
+
+/// The per-block path's share of the same invariants, mirroring the
+/// `render_blocks` fuzz target. Tier B is asserted per chunk, because a leak
+/// into one chunk is what the reader sees; the rest is asserted on the
+/// concatenation, since a paired container legitimately opens in one block
+/// and closes in another and only the joined output owes tag balance.
+fn assert_always_on_per_block(src: &str) {
+    let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+    let mut joined = String::new();
+    for block in &blocks {
+        check_no_sentinel_leak(src, &block.html).unwrap_or_else(|e| {
+            panic!(
+                "Tier B (PUA sentinel leak) violated in one block for src={src:?}: {e:?}\n  \
+                 block html = {:?}",
+                block.html
+            )
+        });
+        joined.push_str(&block.html);
+    }
+    assert_html_invariants(src, &joined);
 }
 
 /// Assert Tier A, which holds only where the bracket pairing is well-formed.
@@ -101,5 +124,16 @@ proptest! {
         let html = render_to_string(&src);
         assert_always_on(&html, &src);
         assert_gated(&html, &src);
+    }
+
+    /// The chunked path the wasm `renderBlocks` export drives owes the same
+    /// shape guarantees. It carries state the document path does not — the
+    /// code-block mask is restored a block at a time — so the same source can
+    /// be clean in one shape and leaking in the other.
+    #[test]
+    fn html_shape_invariants_hold_per_block(
+        src in prop_oneof![aozora_fragment(12), pathological_aozora(6), commonmark_adversarial()]
+    ) {
+        assert_always_on_per_block(&src);
     }
 }

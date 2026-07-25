@@ -18,14 +18,17 @@
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::{assert_no_bare_bracket, check_no_sentinel_leak};
 
-/// Tier A plus Tier B in one call. Both predicates come from the
-/// test-support crate, so this file cannot drift from the shared
-/// definition of either tier.
-fn assert_tier_a(html: &str) {
-    assert_no_bare_bracket(html);
-    if let Err(violation) = check_no_sentinel_leak(html) {
+/// Render, then hold the output to Tier A plus Tier B. Both predicates come
+/// from the test-support crate, so this file cannot drift from the shared
+/// definition of either tier; checking at the render site is what gives
+/// Tier B the source it reads.
+fn render_checked(src: &str) -> String {
+    let html = render_to_string(src);
+    assert_no_bare_bracket(&html);
+    if let Err(violation) = check_no_sentinel_leak(src, &html) {
         panic!("{violation}\n  full html = {html:?}");
     }
+    html
 }
 
 // ---------------------------------------------------------------------------
@@ -34,7 +37,7 @@ fn assert_tier_a(html: &str) {
 
 #[test]
 fn indent_container_wraps_body_with_div() {
-    let html = render_to_string("［＃ここから字下げ］\n本文\n［＃ここで字下げ終わり］");
+    let html = render_checked("［＃ここから字下げ］\n本文\n［＃ここで字下げ終わり］");
     // Opening and closing must bracket the body paragraph.
     assert!(
         html.contains(
@@ -47,24 +50,22 @@ fn indent_container_wraps_body_with_div() {
         html.contains("<p>本文</p>"),
         "inner paragraph must survive: {html:?}"
     );
-    assert_tier_a(&html);
 }
 
 #[test]
 fn indent_container_with_amount_carries_data_attribute() {
-    let html = render_to_string("［＃ここから3字下げ］\n本文\n［＃ここで字下げ終わり］");
+    let html = render_checked("［＃ここから3字下げ］\n本文\n［＃ここで字下げ終わり］");
     assert!(
         html.contains(
             r#"<div class="aozora-md-container aozora-md-container-indent aozora-md-container-indent-3" data-amount="3">"#,
         ),
         "3-wide indent must carry data-amount: {html:?}"
     );
-    assert_tier_a(&html);
 }
 
 #[test]
 fn align_end_container_wraps_body() {
-    let html = render_to_string("［＃ここから地付き］\n後書き\n［＃ここで地付き終わり］");
+    let html = render_checked("［＃ここから地付き］\n後書き\n［＃ここで地付き終わり］");
     assert!(
         html.contains(
             r#"<div class="aozora-md-container aozora-md-container-align-end" data-offset="0">"#
@@ -72,18 +73,16 @@ fn align_end_container_wraps_body() {
         "align-end open tag missing: {html:?}"
     );
     assert!(html.contains("<p>後書き</p>"));
-    assert_tier_a(&html);
 }
 
 #[test]
 fn keigakomi_container_wraps_body() {
-    let html = render_to_string("［＃罫囲み］\n引用\n［＃罫囲み終わり］");
+    let html = render_checked("［＃罫囲み］\n引用\n［＃罫囲み終わり］");
     assert!(
         html.contains(r#"<div class="aozora-md-container aozora-md-container-keigakomi">"#),
         "keigakomi open tag missing: {html:?}"
     );
     assert!(html.contains("<p>引用</p>"));
-    assert_tier_a(&html);
 }
 
 #[test]
@@ -96,7 +95,7 @@ fn warichu_renders_inline_not_as_block_container() {
     // *inside* that span. The parser reports the two markers as separate
     // nodes, so the body only reaches the wrapper because `constructs`
     // folds the pair into one construct before tiling.
-    let html = render_to_string("黄色い鑑札（［＃割り注］淫売婦の鑑札［＃割り注終わり］）をもって");
+    let html = render_checked("黄色い鑑札（［＃割り注］淫売婦の鑑札［＃割り注終わり］）をもって");
     assert!(
         html.contains(r#"<span class="aozora-md-warichu">淫売婦の鑑札</span>"#),
         "warichu must wrap its side-note text in an inline span: {html}"
@@ -111,7 +110,6 @@ fn warichu_renders_inline_not_as_block_container() {
         1,
         "warichu must not split the host paragraph: {html}"
     );
-    assert_tier_a(&html);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +118,7 @@ fn warichu_renders_inline_not_as_block_container() {
 
 #[test]
 fn keigakomi_inside_indent_wraps_via_two_passes() {
-    let html = render_to_string(
+    let html = render_checked(
         "［＃ここから字下げ］\n\n［＃罫囲み］\n本文\n［＃罫囲み終わり］\n\n［＃ここで字下げ終わり］",
     );
     // Two opens + two closes with correct nesting
@@ -136,7 +134,6 @@ fn keigakomi_inside_indent_wraps_via_two_passes() {
     );
     // Inner body still present
     assert!(html.contains("<p>本文</p>"));
-    assert_tier_a(&html);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,21 +173,19 @@ fn orphan_close_does_not_panic() {
 #[test]
 fn empty_container_body_still_wraps_with_div() {
     // Paired markers back-to-back with no content between them.
-    let html = render_to_string("［＃ここから字下げ］\n\n［＃ここで字下げ終わり］");
+    let html = render_checked("［＃ここから字下げ］\n\n［＃ここで字下げ終わり］");
     assert!(html.contains("aozora-md-container-indent"));
     assert!(html.contains("</div>"));
-    assert_tier_a(&html);
 }
 
 #[test]
 fn container_with_multiple_child_blocks_captures_all() {
-    let html = render_to_string(
+    let html = render_checked(
         "［＃ここから字下げ］\n\n段落一\n\n段落二\n\n段落三\n\n［＃ここで字下げ終わり］",
     );
     // Three <p> under the wrapping <div>.
     let p_count = html.matches("<p>").count();
     assert_eq!(p_count, 3, "3 child paragraphs expected: {html:?}");
-    assert_tier_a(&html);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +203,7 @@ fn consecutive_indent_opens_with_single_close_do_not_leak_sentinel() {
     // 字下げ］ opens of different amounts with only one explicit close
     // between them. Per Aozora spec the inner open implicitly ends the
     // outer scope so both render as sibling containers.
-    let html = render_to_string(
+    let html = render_checked(
         "［＃ここから２字下げ］\n\
          前半一行目\n\
          前半二行目\n\
@@ -217,7 +212,6 @@ fn consecutive_indent_opens_with_single_close_do_not_leak_sentinel() {
          後半二行目\n\
          ［＃ここで字下げ終わり］",
     );
-    assert_tier_a(&html);
     // Both indent scopes must materialise as containers.
     assert!(
         html.contains("aozora-md-container-indent-2"),
@@ -227,7 +221,7 @@ fn consecutive_indent_opens_with_single_close_do_not_leak_sentinel() {
         html.contains("aozora-md-container-indent-5"),
         "inner Indent{{5}} must render: {html}"
     );
-    // No orphan sentinel survives — `assert_tier_a` already checks,
+    // No orphan sentinel survives — `render_checked` already checks,
     // but pin the specific codepoint so a regression surfaces under
     // the exact lexer constant name.
     assert!(
@@ -241,7 +235,7 @@ fn three_consecutive_same_family_opens_with_one_close_all_wrap() {
     // Three cascading opens followed by a single explicit close. Each
     // new open implicitly closes the previous; the explicit close
     // matches the last open.
-    let html = render_to_string(
+    let html = render_checked(
         "［＃ここから１字下げ］\n\
          A\n\
          ［＃ここから２字下げ］\n\
@@ -250,7 +244,6 @@ fn three_consecutive_same_family_opens_with_one_close_all_wrap() {
          C\n\
          ［＃ここで字下げ終わり］",
     );
-    assert_tier_a(&html);
     for amount in [1, 2, 3] {
         assert!(
             html.contains(&format!("aozora-md-container-indent-{amount}")),
@@ -270,7 +263,7 @@ fn cross_family_nest_preserved_only_same_family_cascades() {
     // Keigakomi's paired syntax is `［＃罫囲み］...［＃罫囲み終わり］`
     // (no `ここから` / `ここで` prefix — the classifier accepts the
     // bare form per phase3_classify).
-    let html = render_to_string(
+    let html = render_checked(
         "［＃罫囲み］\n\
          外枠テキスト\n\
          ［＃ここから２字下げ］\n\
@@ -279,7 +272,6 @@ fn cross_family_nest_preserved_only_same_family_cascades() {
          戻り\n\
          ［＃罫囲み終わり］",
     );
-    assert_tier_a(&html);
     assert!(
         html.contains("aozora-md-container-keigakomi"),
         "outer Keigakomi must render: {html}"
@@ -302,14 +294,13 @@ fn cross_family_nest_preserved_only_same_family_cascades() {
 fn same_family_cascade_preserves_align_end_shape() {
     // 地付き (AlignEnd) family — two consecutive opens should cascade
     // the same way Indent does.
-    let html = render_to_string(
+    let html = render_checked(
         "［＃ここから地付き］\n\
          後書き一行目\n\
          ［＃ここから地から３字上げ］\n\
          後書き二行目\n\
          ［＃ここで地付き終わり］",
     );
-    assert_tier_a(&html);
     assert!(
         html.contains("aozora-md-container-align-end"),
         "AlignEnd must render: {html}"
