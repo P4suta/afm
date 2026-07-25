@@ -27,9 +27,8 @@
 /// The wrapper the renderer puts around a document whose whole content is
 /// inline. The pair is the one HTML shape this crate reads.
 const PARAGRAPH_OPEN: &str = "<p>";
-/// Closing half of [`PARAGRAPH_OPEN`], newline included: the renderer ends
-/// every paragraph with one.
-const PARAGRAPH_CLOSE: &str = "</p>\n";
+/// Closing half of [`PARAGRAPH_OPEN`].
+const PARAGRAPH_CLOSE: &str = "</p>";
 /// Start of the one attribute whose value carries the parser's brand.
 const CLASS_ATTRIBUTE: &str = "class=\"";
 /// The parser's brand, and this crate's (ADR-0011).
@@ -37,15 +36,36 @@ const BRAND: &str = "aozora-";
 /// This crate's brand.
 const REBRAND: &str = "aozora-md-";
 
-/// The fragment `run` renders to, where `run` is the source text of exactly
-/// one construct.
-pub(crate) fn render(run: &str) -> String {
-    let html = aozora::Document::new(run).parse().to_html();
+/// The fragment `snapshot` renders to, where `snapshot` is the parser's
+/// reading of exactly one construct's source run.
+///
+/// The caller parses rather than passing the run itself because the same
+/// reading answers the other question [`crate::constructs`] asks of a run —
+/// which constructs it contains — and one parse answers both.
+pub(crate) fn of(snapshot: &aozora::Snapshot) -> String {
+    let html = snapshot.to_html();
+    // The renderer ends a document with a newline; a fragment is woven into
+    // a line of comrak's making, so the document's own line break is not
+    // ours to keep.
+    let html = html.trim_end_matches('\n');
     let body = html
         .strip_prefix(PARAGRAPH_OPEN)
         .and_then(|inner| inner.strip_suffix(PARAGRAPH_CLOSE))
-        .unwrap_or(html.as_str());
+        .unwrap_or(html);
     rebrand(body)
+}
+
+/// The two halves a paired container's marker renders to.
+///
+/// A container marker with nothing inside it renders as one empty element,
+/// so the markup that opens the container is everything before its own
+/// closing tag and the markup that closes it is that tag. Reading both off
+/// the same fragment is what lets a close — which renders to nothing on its
+/// own, having no open to close — be spliced at all.
+pub(crate) fn halves(fragment: &str) -> (&str, &str) {
+    fragment
+        .rfind("</")
+        .map_or((fragment, ""), |at| fragment.split_at(at))
 }
 
 /// `fragment` with every class token under the parser's brand rewritten to
@@ -76,6 +96,14 @@ fn rebrand(fragment: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The fragment `run` renders to, going through the parse the
+    /// production path caches. A run past the parser's span budget renders
+    /// to nothing, exactly as it does there.
+    fn render(run: &str) -> String {
+        aozora::parse(run.to_owned())
+            .map_or_else(|_| String::new(), |document| of(&document.snapshot()))
+    }
+
     #[test]
     fn inline_construct_loses_its_paragraph_wrapper() {
         assert_eq!(
@@ -94,12 +122,21 @@ mod tests {
 
     #[test]
     fn container_markers_render_to_their_own_halves() {
+        let fragment = render("［＃ここから字下げ］");
+        let (open, close) = halves(&fragment);
         assert!(
-            render("［＃ここから字下げ］").starts_with(r#"<div class="aozora-md-container"#),
-            "container open: {}",
-            render("［＃ここから字下げ］")
+            open.starts_with(r#"<div class="aozora-md-container"#),
+            "container open: {open}"
         );
-        assert_eq!(render("［＃ここで字下げ終わり］"), "</div>");
+        assert_eq!(close, "</div>");
+        // A close has no open to close, so on its own it renders to
+        // nothing — which is why the halves are read off the open.
+        assert_eq!(render("［＃ここで字下げ終わり］"), "");
+    }
+
+    #[test]
+    fn halves_of_an_unpaired_fragment_are_the_whole_and_nothing() {
+        assert_eq!(halves("plain"), ("plain", ""));
     }
 
     #[test]

@@ -45,7 +45,7 @@ let cache: SlugEntry[] | null = null;
 /**
  * Load the slug catalogue from the WASM module. Idempotent: the first call
  * serialises via `aozora-flavored-markdown-wasm`'s `slugsJson()` and parses the shared envelope
- * (`{ schema_version, data }`); subsequent calls return the cached array.
+ * (`{ schemaVersion, data }`); subsequent calls return the cached array.
  *
  * Must be called after the wasm bundle has booted (the editor is created
  * after wasm init, so this is always safe from the completion source).
@@ -54,7 +54,7 @@ export function loadSlugCatalog(): SlugEntry[] {
   if (cache) return cache;
   try {
     const env = JSON.parse(slugsJson()) as {
-      schema_version: number;
+      schemaVersion: number;
       data: SlugEntry[];
     };
     cache = env.data ?? [];
@@ -147,11 +147,11 @@ function familyToKind(family: string): string {
     case 'leafAlign':
       return 'property';
     case 'bouten':
-    case 'tateChuYoko':
+    case 'combineUpright':
     case 'warichu':
-    case 'keigakomi':
+    case 'framed':
       return 'function';
-    case 'sashie':
+    case 'illustration':
       return 'class';
     case 'kaeritenSingle':
     case 'kaeritenCompound':

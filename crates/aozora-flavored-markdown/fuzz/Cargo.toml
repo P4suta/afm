@@ -11,12 +11,11 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 aozora-flavored-markdown              = { path = ".." }
 aozora-flavored-markdown-test-support = { path = "../../aozora-flavored-markdown-test-support" }
-# Depend on the umbrella `aozora` crate (not the internal aozora-encoding),
-# matching the workspace's B1 migration, and pin the same rev as the
-# parent workspace's `aozora` (a loose `branch = "main"` could drift from
-# the rev aozora-flavored-markdown builds against). `aozora::encoding::decode_sjis` is the
-# umbrella path for the SJIS decoder the sjis_decode target fuzzes.
-aozora                    = { version = "0.4.0", git = "https://github.com/P4suta/aozora.git", rev = "a53c632b1d1be4bfcbce7de010ab5b0843e98cc0", default-features = false }
+# Registry dependency pinned to the exact version the parent workspace
+# builds against — `cargo xtask aozora-bump` rewrites both manifests in one
+# pass and `just verify-version-pins` fails if they drift. `aozora::decode_sjis`
+# is the umbrella path for the SJIS decoder the sjis_decode target fuzzes.
+aozora                    = { version = "=0.5.0", default-features = false }
 
 # Prevent this crate from joining the aozora-flavored-markdown workspace.
 # Each fuzz target needs libfuzzer-sys (nightly-gated), which the

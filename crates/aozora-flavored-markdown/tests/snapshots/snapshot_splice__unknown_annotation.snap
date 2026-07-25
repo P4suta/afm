@@ -2,4 +2,4 @@
 source: crates/aozora-flavored-markdown/tests/snapshot_splice.rs
 expression: "render(\"前［＃ほげふが］後\")"
 ---
-<p>前<span class="aozora-md-annotation" hidden>［＃ほげふが］</span>後</p>
+<p>前<span class="aozora-md-directive" hidden>［＃ほげふが］</span>後</p>

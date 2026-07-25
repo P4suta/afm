@@ -244,7 +244,7 @@ pub enum IrInline {
         /// [`crate::render`]'s output — including the case where that run
         /// is empty: a notation the HTML suppresses in context (an
         /// annotation inside a heading body, which would contaminate it
-        /// with `aozora-md-annotation` markup) is suppressed here too, so
+        /// with `aozora-md-directive` markup) is suppressed here too, so
         /// rendering from the IR cannot produce markup the document does
         /// not have.
         html: String,

@@ -56,7 +56,7 @@ fn decode_source(source: &SourceFile) -> Result<String> {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     if matches!(ext.as_deref(), Some("sjis" | "shift_jis" | "shift-jis")) {
-        aozora_encoding::decode_sjis(&source.bytes).map_err(Error::from)
+        aozora::decode_sjis(&source.bytes).map_err(Error::from)
     } else {
         str::from_utf8(&source.bytes)
             .map(str::to_owned)
@@ -106,7 +106,7 @@ mod tests {
     // `angle-quote` rename), this surfaces the theme gap with no manual sync.
     use std::path::PathBuf;
 
-    use aozora_flavored_markdown_test_support::AOZORA_MD_CLASSES;
+    use aozora_flavored_markdown_test_support::styled_classes;
 
     use super::*;
 
@@ -129,7 +129,7 @@ mod tests {
     /// both vendored themes.
     #[test]
     fn vendored_themes_cover_every_emitted_class() {
-        for class in AOZORA_MD_CLASSES {
+        for class in styled_classes() {
             let selector = format!(".{class}");
             assert!(
                 CSS_HORIZONTAL.contains(&selector),

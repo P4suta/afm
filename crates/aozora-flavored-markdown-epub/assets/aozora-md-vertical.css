@@ -67,9 +67,9 @@
 .aozora-md-bouten-right { text-emphasis-position: over; }
 .aozora-md-bouten-left  { text-emphasis-position: under; }
 
-/* ----- Tate-chu-yoko --------------------------------------------- */
+/* ----- Combine-upright (縦中横) ----------------------------------- */
 
-.aozora-md-tcy {
+.aozora-md-combine-upright {
   text-combine-upright: all;
 }
 
@@ -90,14 +90,32 @@
   vertical-align: super;
 }
 
-.aozora-md-annotation {
+.aozora-md-directive {
   display: none;
 }
 
-/* ----- Double angle brackets ------------------------------------- */
+/* ----- Heading hint / body end / illustration --------------------- */
 
-.aozora-md-double-ruby {
-  font-style: italic;
+.aozora-md-heading-hint {
+  display: none;
+}
+
+.aozora-md-body-end {
+  display: block;
+  margin: 0 3em 0 1em;
+  border-right: 1px solid currentColor;
+  opacity: 0.3;
+}
+
+.aozora-md-illustration {
+  display: block;
+  margin: auto 1.5em;
+  text-align: center;
+}
+
+.aozora-md-illustration img {
+  max-height: 100%;
+  width: auto;
 }
 
 /* ----- Block leaves ---------------------------------------------- */

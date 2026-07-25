@@ -590,6 +590,29 @@ verify-version-pins:
         fail=1
     fi
 
+    # aozora: workspace manifest / cargo-fuzz manifest. Both are rewritten in
+    # one pass by `cargo xtask aozora-bump <version>`; drift here means the
+    # fuzz targets are building against a different parser than the library.
+    az_ws=$(extract Cargo.toml '^aozora[[:space:]]*=[[:space:]]*\{[[:space:]]*version[[:space:]]*=[[:space:]]*"=?[0-9.]+')
+    az_fuzz=$(extract crates/aozora-flavored-markdown/fuzz/Cargo.toml '^aozora[[:space:]]*=[[:space:]]*\{[[:space:]]*version[[:space:]]*=[[:space:]]*"=?[0-9.]+')
+    if [[ -n "$az_ws" && "$az_ws" == "$az_fuzz" ]]; then
+        printf '[OK] aozora pin: %s (Cargo.toml / fuzz/Cargo.toml agree)\n' "$az_ws"
+    else
+        printf '[!!] aozora pin drift: Cargo.toml=%s fuzz/Cargo.toml=%s\n' \
+            "$az_ws" "$az_fuzz" >&2
+        fail=1
+    fi
+
+    # No git source may reintroduce itself: a git dependency makes
+    # `cargo publish` reject the crate (ADR-0015), and `aozora-bump` only
+    # knows how to rewrite registry versions.
+    if git_pins=$(grep -rn 'P4suta/aozora\.git' Cargo.toml crates/*/Cargo.toml crates/*/fuzz/Cargo.toml 2>/dev/null); then
+        printf '[!!] aozora git source pin(s) found — registry versions only:\n%s\n' "$git_pins" >&2
+        fail=1
+    else
+        echo "[OK] aozora source: registry only (no git pin)"
+    fi
+
     if (( fail == 0 )); then
         echo "verify-version-pins: all pins agree"
         exit 0

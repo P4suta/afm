@@ -5,13 +5,13 @@
 //! expressed against the final rendered HTML:
 //!
 //! - **Tier-A invariant**: no bare `［＃` ever leaks into rendered HTML
-//!   outside an `aozora-md-annotation` wrapper, for arbitrary inputs.
+//!   outside an `aozora-md-directive` wrapper, for arbitrary inputs.
 //! - **Sentinel consumption**: no PUA sentinel character (U+E001 ..
 //!   U+E004) survives in the output for inputs the lexer reports as
 //!   well-formed.
 //! - **Count invariant**: an input with *N* explicit-delimiter rubies
 //!   renders into HTML with at least *N* `<ruby>` tags. *N* unknown
-//!   `［＃…］` annotations render into at least *N* `aozora-md-annotation`
+//!   `［＃…］` annotations render into at least *N* `aozora-md-directive`
 //!   wrappers.
 //! - **Document order**: Aozora-derived markup appears in the output
 //!   in the same order as the corresponding constructs appear in
@@ -85,10 +85,10 @@ fn explicit_ruby_count_matches_input_count() {
 #[test]
 fn unknown_annotation_count_matches_input_count() {
     let html = render_to_string("［＃ほげ］と［＃ふが］と［＃ぴよ］");
-    let annotation_count = html.matches("aozora-md-annotation").count();
+    let annotation_count = html.matches("aozora-md-directive").count();
     assert!(
         annotation_count >= 3,
-        "3 unknown ［＃…］ must yield ≥ 3 aozora-md-annotation wrappers, got {annotation_count}: {html}"
+        "3 unknown ［＃…］ must yield ≥ 3 aozora-md-directive wrappers, got {annotation_count}: {html}"
     );
 }
 
@@ -101,10 +101,10 @@ fn aozora_constructs_render_in_source_order() {
     let html = render_to_string("｜一《いち》と｜二《に》と［＃ほげ］と｜三《さん》");
     // Find every "ruby" / "annotation" landmark and confirm the
     // sequence is Ruby, Ruby, Annotation, Ruby.
-    let order = order_of_landmarks(&html, &["<ruby>", "aozora-md-annotation"]);
+    let order = order_of_landmarks(&html, &["<ruby>", "aozora-md-directive"]);
     assert_eq!(
         order,
-        vec!["<ruby>", "<ruby>", "aozora-md-annotation", "<ruby>"],
+        vec!["<ruby>", "<ruby>", "aozora-md-directive", "<ruby>"],
         "Aozora landmarks must appear in source order; got {order:?}\nhtml: {html}"
     );
 }

@@ -15,7 +15,7 @@ members = [
 exclude = ["upstream/comrak"]
 
 [workspace.package]
-version       = "0.4.1"
+version       = "0.5.0"
 edition       = "2024"
 rust-version  = "1.96.0"
 license       = "Apache-2.0 OR MIT"
@@ -128,7 +128,7 @@ redundant_pub_crate     = "allow" # conflicts with rustc's `unreachable_pub` (ou
 use_self                = "allow" # IR enums spell recursive fields `Vec<IrBlock>` / `Vec<IrInline>`, not `Vec<Self>`, so `tsify` emits valid TS type names instead of `Self[]` (ADR-0017)
 
 [workspace.dependencies]
-aozora-flavored-markdown = { version = "0.4.1", path = "crates/aozora-flavored-markdown" }
+aozora-flavored-markdown = { version = "0.5.0", path = "crates/aozora-flavored-markdown" }
 # Test-only dev-dependency; `publish = false`. Path-only (no version) so
 # `cargo publish` strips it from the published manifest — it is never on
 # crates.io. The resulting `*` path requirement is permitted by deny.toml's
@@ -138,11 +138,11 @@ aozora-flavored-markdown-test-support = { path = "crates/aozora-flavored-markdow
 # Sibling 青空文庫記法 parser. Depend on the umbrella `aozora` crate only, not
 # its internal build-block crates, so aozora-flavored-markdown is insulated from its decomposition.
 # Registry dependency (crates.io) so aozora-flavored-markdown can itself be published — a
-# git source would make `cargo publish` reject the crate (ADR-0015). v0.4.1 is
-# the published cut of the former `rev = a53c632…` pin; an intentional sync is
-# now one PR per `cargo update -p aozora` + version bump. `default-features =
-# false` keeps cst / query / wire / proptest / schema out of the build graph.
-aozora = { version = "0.4.1", default-features = false }
+# git source would make `cargo publish` reject the crate (ADR-0015). An
+# intentional sync is one PR per `cargo xtask aozora-bump <version>`.
+# `default-features = false` keeps json / schema / pandoc / fmt out of the
+# build graph; the wasm crate opts into `json` on its own.
+aozora = { version = "0.5.0", default-features = false }
 
 # Vendored comrak fork (path, not crates.io). `default-features = false` drops
 # the comrak CLI (`cli` / `syntect` / `bon`); aozora-flavored-markdown-cli is our own binary.
@@ -189,7 +189,6 @@ dhat      = "0.3"
 # EPUB output. Consumed only by aozora-flavored-markdown-epub (+ its CLI),
 # consolidated from the former sibling repo (ADR-0018). The pure parser /
 # renderer crates never pull these — they stay isolated in the epub crate.
-aozora-encoding = "0.4.1" # SJIS input decoding; aozora-flavored-markdown does not re-export it
 quick-xml = { version = "0.41", features = ["serialize"] }
 zip       = { version = "8", default-features = false, features = ["deflate"] }
 uuid      = { version = "1", features = ["v4"] }

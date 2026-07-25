@@ -13,7 +13,7 @@
 
 #![no_main]
 
-use aozora::encoding::decode_sjis;
+use aozora::decode_sjis;
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::assert_html_invariants;
 use libfuzzer_sys::fuzz_target;

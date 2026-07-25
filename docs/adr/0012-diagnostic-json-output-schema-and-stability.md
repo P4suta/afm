@@ -19,8 +19,9 @@ The diagnostics themselves come from the sibling `aozora` crate
 `error|warning|note` and `source|internal`), and `span()` (byte offsets, as
 `u32`). It carries no line/column — only byte spans. aozora-flavored-markdown-cli must turn this into
 a contract it controls without leaking the upstream Rust enum shape, and must
-not depend on `aozora`'s own `wire` feature (kept out of aozora-flavored-markdown's build graph via
-`default-features = false`).
+not depend on `aozora`'s own `json` feature (kept out of aozora-flavored-markdown's build graph via
+`default-features = false`; only aozora-flavored-markdown-wasm opts into it, for the editor-assist
+envelopes).
 
 ## Decision
 

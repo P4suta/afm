@@ -20,7 +20,7 @@ use std::fs;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use aozora::encoding::decode_sjis;
+use aozora::decode_sjis;
 use aozora_flavored_markdown::{Options, render, render_to_ir};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 

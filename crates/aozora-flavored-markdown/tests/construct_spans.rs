@@ -91,16 +91,34 @@ fn collect_inlines(inlines: &[IrInline], out: &mut Vec<Projected>) {
 /// parse the slice as a document, unwrap the paragraph the upstream
 /// renderer wraps inline content in, and rebrand to this crate's classes
 /// (ADR-0011).
-fn fragment_from_slice(slice: &str) -> String {
-    let document = aozora::Document::new(slice.to_owned());
-    let html = document.parse().to_html();
+///
+/// A container marker with nothing inside it renders as one empty element,
+/// and what this crate splices in its place is the half that opens it — so
+/// `kind` decides which half of the fragment the projection is compared
+/// against.
+fn fragment_from_slice(slice: &str, kind: &str) -> String {
+    let document = aozora::parse(slice.to_owned()).expect("a construct's run is small");
+    let html = document.snapshot().to_html();
     let unwrapped = html
         .trim()
         .strip_prefix("<p>")
         .and_then(|rest| rest.strip_suffix("</p>"))
         .unwrap_or_else(|| html.trim());
-    unwrapped.replace("aozora-", "aozora-md-")
+    let rebranded = unwrapped.replace("aozora-", "aozora-md-");
+    if kind == CONTAINER_OPEN {
+        return rebranded
+            .rfind("</")
+            .map_or_else(|| rebranded.clone(), |at| rebranded[..at].to_owned());
+    }
+    rebranded
 }
+
+/// Tag of the block that opens a paired container.
+const CONTAINER_OPEN: &str = "containerOpen";
+/// Tag of the block that closes one. Its markup comes from the marker that
+/// opened it — a close renders to nothing on its own — so its fragment is
+/// not compared against its own run.
+const CONTAINER_CLOSE: &str = "containerClose";
 
 /// The notation zoo: one document per construct family this crate can
 /// project, each with the exact source run its range must cover.
@@ -114,7 +132,7 @@ const ZOO: &[(&str, &str)] = &[
     ("20［＃「20」は縦中横］です", "20［＃「20」は縦中横］"),
     ("※［＃二の字点、1-2-22］の外字", "※［＃二の字点、1-2-22］"),
     ("天［＃レ］地", "［＃レ］"),
-    ("《《強調》》の語", "《《強調》》"),
+    ("≪強調≫の語", "≪強調≫"),
     ("前［＃改ページ］後", "［＃改ページ］"),
     ("前［＃改丁］後", "［＃改丁］"),
     ("［＃挿絵（fig1.png）入る］", "［＃挿絵（fig1.png）入る］"),
@@ -146,9 +164,12 @@ fn a_ranges_own_text_resolves_to_the_same_fragment_on_its_own() {
             let Some(span) = construct.span else {
                 panic!("{src:?} projects {} without a range", construct.kind);
             };
+            if construct.kind == CONTAINER_CLOSE {
+                continue;
+            }
             let slice = &src[span.start as usize..span.end as usize];
             assert_eq!(
-                fragment_from_slice(slice),
+                fragment_from_slice(slice, &construct.kind),
                 construct.html,
                 "{src:?}: the {} at {slice:?} must resolve the same on its own",
                 construct.kind,
@@ -164,7 +185,7 @@ fn container_markers_get_a_range_each() {
     const SRC: &str = "［＃ここから２字下げ］\n本文\n［＃ここで字下げ終わり］";
     let projected = constructs_of(SRC);
     let kinds: Vec<&str> = projected.iter().map(|c| c.kind.as_str()).collect();
-    assert_eq!(kinds, ["containerOpen", "containerClose"], "{kinds:?}");
+    assert_eq!(kinds, [CONTAINER_OPEN, CONTAINER_CLOSE], "{kinds:?}");
     for construct in &projected {
         let span = construct.span.expect("both markers carry a range");
         let slice = &SRC[span.start as usize..span.end as usize];
@@ -173,8 +194,14 @@ fn container_markers_get_a_range_each() {
             "the {} range must cover its marker, got {slice:?}",
             construct.kind
         );
+        if construct.kind == CONTAINER_CLOSE {
+            // The close half of the open marker's element — a close marker
+            // renders to nothing on its own, having no open to close.
+            assert_eq!(construct.html, "</div>");
+            continue;
+        }
         assert_eq!(
-            fragment_from_slice(slice),
+            fragment_from_slice(slice, &construct.kind),
             construct.html,
             "the {} marker must resolve the same on its own",
             construct.kind
@@ -215,8 +242,11 @@ fn sweep(documents: &[String]) -> Swept {
                          {span:?} of {src:?}"
                     )
                 });
+            if construct.kind == CONTAINER_CLOSE {
+                continue;
+            }
             assert_eq!(
-                fragment_from_slice(slice),
+                fragment_from_slice(slice, &construct.kind),
                 construct.html,
                 "the {} at {slice:?} must resolve the same on its own",
                 construct.kind

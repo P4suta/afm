@@ -59,17 +59,17 @@ fn heading_with_preceding_indent_marker_still_becomes_heading() {
         "indent marker must not leak into the heading: {out}"
     );
     assert!(
-        !out.contains("<h1><span class=\"aozora-md-annotation"),
+        !out.contains("<h1><span class=\"aozora-md-directive"),
         "annotation wrapper must not leak into the heading: {out}"
     );
 }
 
 #[test]
-fn heading_hint_without_preceding_target_stays_as_annotation() {
-    // No preceding "第一篇" run — the classifier rejects and the
-    // catch-all emits `Annotation{Unknown}`. Tier-A canary still
-    // holds: `［＃` never appears outside the `aozora-md-annotation`
-    // hidden wrapper.
+fn heading_hint_without_preceding_target_promotes_nothing() {
+    // No preceding "第一篇" run, so the hint names no run of the
+    // paragraph: it is its own text, sits mid-line, and there is nothing
+    // to promote. Tier-A canary still holds — `［＃` never appears
+    // outside a hidden wrapper.
     let input = "本文［＃「第一篇」は大見出し］";
     let out = html::render_to_string(input);
     assert!(
@@ -90,7 +90,7 @@ fn heading_hint_inside_a_markdown_heading_leaves_the_heading_alone() {
     // not a paragraph, so the hint reaches the inline walk instead — and a
     // hint's own source run, alone among the notations, does not cover the
     // text it names, so re-parsing that run resolves it to an unknown
-    // annotation. Emitting that would put an `aozora-md-annotation` wrapper
+    // annotation. Emitting that would put an `aozora-md-directive` wrapper
     // inside the heading body, which Tier C bars.
     let out = html::render_to_string("# head第一篇［＃「第一篇」は大見出し］");
     assert_eq!(out, "<h1>head第一篇</h1>\n");

@@ -32,7 +32,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::str;
 
-use aozora::encoding::decode_sjis;
+use aozora::decode_sjis;
 use aozora_flavored_markdown::{Options, render, serialize};
 use aozora_flavored_markdown_test_support::assert_html_invariants;
 

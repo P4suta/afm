@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 aozora-flavored-markdown = { workspace = true }
-aozora-encoding          = { workspace = true }
+aozora                   = { workspace = true }
 miette          = { workspace = true }
 thiserror       = { workspace = true }
 serde           = { workspace = true }

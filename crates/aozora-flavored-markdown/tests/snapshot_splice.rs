@@ -19,7 +19,7 @@
 //!   block-level `<div class="aozora-md-page-break">` between two paragraphs
 //!   (the `BLOCK_LEAF` path + brand rewrite).
 //! * `unknown_annotation` — an orphan `［＃…］` the lexer never claimed,
-//!   wrapped in a hidden `aozora-md-annotation` span (Tier-A canary: no bare
+//!   wrapped in a hidden `aozora-md-directive` span (Tier-A canary: no bare
 //!   bracket leaks into body text).
 //!
 //! Each case passes an explicit snapshot name so the on-disk
@@ -59,6 +59,6 @@ fn snapshot_block_page_break() {
 #[test]
 fn snapshot_unknown_annotation() {
     // Tier-A canary in snapshot form: the bracket text survives only
-    // inside the hidden `aozora-md-annotation` wrapper, never bare in body.
+    // inside the hidden `aozora-md-directive` wrapper, never bare in body.
     insta::assert_snapshot!("unknown_annotation", render("前［＃ほげふが］後"));
 }
