@@ -334,6 +334,32 @@ workflow after editing it with `dist generate`. Every PR runs the
 `plan` job (a `dist plan` dry-run) so a broken release config fails
 at review time; you can also run `dist plan` locally before tagging.
 
+`release.yml` is **generated, never hand-edited** — `dist plan`
+diffs it against the generator and fails on any drift, including the
+`actions/*` refs inside it. So `.github/dependabot.yml` excludes the
+file from the `github-actions` ecosystem (`exclude-paths`); every
+hand-written workflow stays under Dependabot.
+
+The refs are still commit-pinned, not left floating on a major tag:
+`[dist.github-action-commits]` in `dist-workspace.toml` maps each
+action to an immutable SHA, and the generator emits that instead of
+its own default. To move one forward, resolve the tag
+(`gh api repos/<owner>/<action>/git/ref/tags/<tag> --jq .object.sha`),
+update the entry and its `# v<x.y.z>` comment, run `dist generate`,
+and commit both files together. Same for `cargo-dist-version` itself.
+
+Two things do **not** happen automatically, by design:
+
+- `exclude-paths` is version-updates-only. A Dependabot *security*
+  PR can still rewrite `release.yml`; it will fail `dist plan`. Close
+  it and bump the pin in `dist-workspace.toml` instead.
+- Nothing else watches `dist-workspace.toml` — Dependabot's cargo
+  ecosystem reads `Cargo.toml`/`Cargo.lock` only. The weekly
+  `release-pins` workflow (`.github/workflows/release-pins.yml`,
+  also `workflow_dispatch`-able) fails when `cargo-dist-version`
+  trails the newest dist release or when a pinned action commit is no
+  longer the tip of its major tag, so the pins cannot freeze silently.
+
 **ADR-0002 scope exception**: release builds run on native GitHub
 Actions runners with the matching stable rustc, not inside the dev
 Docker image. The Docker-only rule applies to development and CI;
