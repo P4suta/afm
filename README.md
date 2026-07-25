@@ -73,8 +73,12 @@ assert!(rendered.html.contains("<ruby>"));
 ```
 
 The rendered HTML carries stable `aozora-md-*` CSS classes
-([ADR-0011](docs/adr/0011-brand-boundary-css-class-rewrite.md)); drop-in
-themes live in [`theme/`](./theme/). Full API docs are on
+([`AOZORA_MD_CLASSES`](https://docs.rs/aozora-flavored-markdown/latest/aozora_flavored_markdown/static.AOZORA_MD_CLASSES.html),
+[ADR-0011](docs/adr/0011-brand-boundary-css-class-rewrite.md)); the drop-in
+themes that style them ship as `theme::{HORIZONTAL_CSS, VERTICAL_CSS}` under
+the default-off `theme` feature, editable as plain CSS in
+[`crates/aozora-flavored-markdown/theme/`](./crates/aozora-flavored-markdown/theme/).
+Full API docs are on
 [docs.rs](https://docs.rs/aozora-flavored-markdown); runnable snippets live under
 [`crates/aozora-flavored-markdown/examples/`](./crates/aozora-flavored-markdown/examples/).
 

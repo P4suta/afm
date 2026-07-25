@@ -60,9 +60,9 @@ fn parse(src: &str) -> Snapshot {
         .expect("a fixture is never past the parser's span budget")
         .snapshot()
 }
-use aozora_flavored_markdown::Options;
 use aozora_flavored_markdown::html as md_html;
-use aozora_flavored_markdown_test_support::{AOZORA_MD_CLASSES, check_html_tag_balance};
+use aozora_flavored_markdown::{AOZORA_MD_CLASSES, Options};
+use aozora_flavored_markdown_test_support::check_html_tag_balance;
 
 /// Pure-青空文庫 documents: no CommonMark emphasis, headings, lists or code
 /// spans, so the only markup either side emits for them is 青空文庫 markup.

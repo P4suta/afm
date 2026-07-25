@@ -80,7 +80,8 @@ export default defineConfig(({ command }) => ({
     port: 5173,
     strictPort: true,
     fs: {
-      // theme/*.css lives one level above playground/. Vite's
+      // crates/aozora-flavored-markdown/theme/*.css lives outside
+      // playground/, in the crate that owns the classes. Vite's
       // default fs.allow restricts dev-server reads to the project root;
       // widen it so the theme `?url` imports in `src/styles/theme-urls.ts`
       // resolve. Production `build` does not consult this list.

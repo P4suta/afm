@@ -166,7 +166,6 @@ version = "0.1.0"
 dependencies = [
  "aozora",
  "aozora-flavored-markdown",
- "aozora-flavored-markdown-test-support",
  "chrono",
  "insta",
  "miette",
@@ -193,7 +192,6 @@ dependencies = [
 name = "aozora-flavored-markdown-test-support"
 version = "0.5.0"
 dependencies = [
- "aozora",
  "aozora-flavored-markdown",
  "proptest",
 ]

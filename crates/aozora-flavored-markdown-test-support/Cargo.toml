@@ -18,16 +18,13 @@ workspace = true
 [dependencies]
 # The test-support library carves up aozora-flavored-markdown's emitted HTML
 # without parsing the source itself. Its one production-side dependency is the
-# library whose output it checks — solely to single-source the PUA sentinel
-# set (`sentinels::ALL`) instead of re-hardcoding U+E001..U+E004. The edge is
-# dev-only in the other direction (the library reaches this crate through
-# `[dev-dependencies]`), so no cycle reaches a published build graph.
+# library whose output it checks, so the two contracts the predicates read —
+# the PUA sentinel set (`sentinels::ALL`) and the `aozora-md-*` class list
+# (`AOZORA_MD_CLASSES`) — come from the crate that owns them instead of being
+# re-hardcoded here. The edge is dev-only in the other direction (the library
+# reaches this crate through `[dev-dependencies]`), so no cycle reaches a
+# published build graph.
 aozora-flavored-markdown = { workspace = true }
-# The `aozora-md-*` class contract is the parser's own `AOZORA_CLASSES` under
-# this repo's brand (ADR-0011), so it is derived from that list rather than
-# hand-copied — a copy drifts silently at every bump and the drift lands in
-# the Tier G predicate the fuzz targets assert.
-aozora = { workspace = true }
 # Input strategies (`generators`) and the shared `ProptestConfig` (`config`)
 # live here because this crate is `publish = false` and reached only through
 # `[dev-dependencies]`. proptest therefore never enters the runtime graph of

@@ -8,6 +8,8 @@
 //! - [`serialize`] — aozora-md-source round-trip.
 //! - [`Options`] — configuration; [`Options::default`] enables the GFM
 //!   extensions aozora-flavored-markdown uses on top of CommonMark.
+//! - [`AOZORA_MD_CLASSES`] — every CSS class the rendered HTML can carry,
+//!   with matching stylesheets behind the default-off `theme` feature.
 //!
 //! ```
 //! use aozora_flavored_markdown::{Options, render};
@@ -45,6 +47,7 @@
 struct ReadmeDoctests;
 
 mod ast_splice;
+mod classes;
 mod code_block_mask;
 mod constructs;
 pub mod diagnostics;
@@ -52,6 +55,8 @@ mod fragment;
 pub mod html;
 pub mod ir;
 mod source_line_anchors;
+#[cfg(feature = "theme")]
+pub mod theme;
 
 /// PUA sentinel codepoints this crate substitutes for 青空文庫
 /// constructs before comrak parses.
@@ -90,6 +95,8 @@ pub mod sentinels {
     pub const ALL: [char; 4] = [INLINE, BLOCK_LEAF, BLOCK_OPEN, BLOCK_CLOSE];
 }
 
+#[doc(inline)]
+pub use classes::{AOZORA_MD_CLASSES, is_contract_class};
 #[doc(inline)]
 pub use diagnostics::{Diagnostic, DiagnosticSource, Severity, Span};
 

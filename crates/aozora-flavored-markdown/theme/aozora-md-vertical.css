@@ -1,0 +1,511 @@
+/*
+ * aozora-md-vertical.css — vertical-rl (tategaki) writing mode theme.
+ *
+ * Class contract: every `aozora-md-*` class token the renderer can emit
+ * MUST have at least one rule in this file, and this file must style
+ * nothing else. The integration test `css_class_contract.rs` walks both
+ * directions against AOZORA_MD_CLASSES (derived from the parser's own
+ * published list), so a renamed or added class fails CI rather than
+ * shipping unstyled.
+ *
+ * Difference from `aozora-md-horizontal.css`:
+ *   - Root sets `writing-mode: vertical-rl`.
+ *   - Bouten "right" side becomes visually ABOVE the base (over)
+ *     and "left" becomes BELOW (under) in the inline axis — which
+ *     is what `text-emphasis-position` already does for vertical
+ *     writing modes, so no override is needed.
+ *   - Indent / align-end swap from the horizontal axis to the
+ *     vertical axis (height / margin-bottom).
+ *   - The measures that bound a line (字詰め / 行長) bound the block's
+ *     height rather than its width.
+ *
+ * Keeping the class list IDENTICAL with `aozora-md-horizontal.css` is a
+ * hard contract — the `css_class_contract.rs` test walks both files.
+ */
+
+/* ----- Opt-in root ----------------------------------------------- */
+
+.aozora-md-root {
+  font-family: "Hiragino Mincho ProN", "Noto Serif JP", "Yu Mincho", serif;
+  line-height: 1.75;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+/* ----- Ruby ------------------------------------------------------ */
+
+.aozora-md-root ruby rt {
+  font-size: 0.5em;
+  line-height: 1;
+}
+
+/* 左ルビ — in tategaki the far side of the base text is its left. */
+.aozora-md-ruby-left {
+  ruby-position: under;
+}
+
+/* 傍注 — a note set beside the line, as <rt> inside <ruby> or as a <sup>. */
+.aozora-md-margin-note {
+  font-size: 0.6em;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+/* An editor's marker naming a ruby annotation, not part of the prose. */
+.aozora-md-ruby-note {
+  font-size: 0.6em;
+  opacity: 0.6;
+}
+
+/* 編者注 — the editor speaking, kept visually subordinate to the text. */
+.aozora-md-editor-note {
+  font-size: 0.7em;
+  opacity: 0.75;
+}
+
+/* ----- Bouten ---------------------------------------------------- */
+
+/*
+ * The base rule carries the default mark so a kind this theme has no
+ * rule for (an upstream addition, or the unknown-kind fallback) still
+ * renders as emphasis; the per-kind rules below override it.
+ */
+.aozora-md-bouten {
+  font-style: normal;
+  text-emphasis: filled sesame;
+}
+
+.aozora-md-bouten-goma         { text-emphasis: filled sesame; }
+.aozora-md-bouten-shirogoma    { text-emphasis: open sesame; }
+.aozora-md-bouten-maru         { text-emphasis: filled circle; }
+.aozora-md-bouten-shiromaru    { text-emphasis: open circle; }
+.aozora-md-bouten-nijumaru     { text-emphasis: filled double-circle; }
+.aozora-md-bouten-janome       { text-emphasis: open double-circle; }
+.aozora-md-bouten-batsu        { text-emphasis: "✕"; }
+.aozora-md-bouten-kurosankaku  { text-emphasis: filled triangle; }
+.aozora-md-bouten-shirosankaku { text-emphasis: open triangle; }
+
+/*
+ * The line kinds are rules drawn alongside the run rather than marks;
+ * in tategaki the underline runs down the right of the characters,
+ * which is where 傍線 is printed.
+ */
+.aozora-md-bouten-bosen     { text-decoration: underline; text-emphasis: none; }
+.aozora-md-bouten-nijubosen { text-decoration: underline double; text-emphasis: none; }
+.aozora-md-bouten-namisen   { text-decoration: underline wavy; text-emphasis: none; }
+.aozora-md-bouten-hasen     { text-decoration: underline dashed; text-emphasis: none; }
+.aozora-md-bouten-kusarisen { text-decoration: underline dotted; text-emphasis: none; }
+
+/*
+ * In vertical writing `over` points to the right side of each
+ * character (traditional furigana side) and `under` to the left.
+ * So the HTML class ordering lines up with Aozora semantics.
+ */
+.aozora-md-bouten-right { text-emphasis-position: over; }
+.aozora-md-bouten-left  { text-emphasis-position: under; }
+
+/* Marks on both sides: the second side falls back to a drawn rule. */
+.aozora-md-bouten-both {
+  text-emphasis-position: over;
+  text-decoration: underline;
+}
+
+/* ----- Combine-upright (縦中横) ----------------------------------- */
+
+.aozora-md-combine-upright {
+  text-combine-upright: all;
+}
+
+/* ----- Gaiji / accents / kaeriten / directives -------------------- */
+
+.aozora-md-gaiji {
+  font-style: normal;
+}
+
+/*
+ * Accented and dotted letters arrive already composed into their
+ * precomposed glyphs, so nothing needs restyling — the classes are
+ * hooks for a host that wants to mark reclaimed transliteration.
+ * Latin runs read upright in tategaki only if the host asks; the
+ * default `mixed` orientation rotates them, which is the print form.
+ */
+.aozora-md-accent,
+.aozora-md-accent-dot {
+  font-variant-ligatures: none;
+}
+
+/* 《…》 kept as literal text rather than read as a ruby delimiter. */
+.aozora-md-angle-quote {
+  font-style: normal;
+}
+
+.aozora-md-kaeriten {
+  font-size: 0.6em;
+  margin: 0 0.1em;
+  /*
+   * In vertical mode a superscript doesn't mean the same thing;
+   * position the kaeriten as a small inset against the base
+   * character.
+   */
+  vertical-align: super;
+}
+
+.aozora-md-directive {
+  display: none;
+}
+
+/* ----- Inline weight / face / size -------------------------------- */
+
+.aozora-md-futoji   { font-weight: bold; }
+.aozora-md-shatai   { font-style: italic; }
+.aozora-md-goshikku {
+  font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+  font-weight: normal;
+}
+
+.aozora-md-uwatsuki   { font-size: 0.75em; vertical-align: super; }
+.aozora-md-shitatsuki { font-size: 0.75em; vertical-align: sub; }
+
+/*
+ * 行右小書き / 行左小書き — small script set against one side of the
+ * line. In tategaki the inline axis runs top-to-bottom, so `super`
+ * lands on the right of the line and `sub` on its left, matching the
+ * two notations directly.
+ */
+.aozora-md-kogaki-right { font-size: 0.6em; vertical-align: super; }
+.aozora-md-kogaki-left  { font-size: 0.6em; vertical-align: sub; }
+
+/* 横組み — a run set across the column inside otherwise vertical text. */
+.aozora-md-yokogumi {
+  display: inline-block;
+  writing-mode: horizontal-tb;
+}
+
+/*
+ * Relative font size (`data-steps` carries the magnitude). One step is
+ * styled directly; the two- and three-step forms scale further.
+ */
+.aozora-md-font-larger  { font-size: 1.2em; }
+.aozora-md-font-smaller { font-size: 0.85em; }
+.aozora-md-font-larger[data-steps="2"]  { font-size: 1.44em; }
+.aozora-md-font-larger[data-steps="3"]  { font-size: 1.73em; }
+.aozora-md-font-smaller[data-steps="2"] { font-size: 0.72em; }
+.aozora-md-font-smaller[data-steps="3"] { font-size: 0.61em; }
+
+/* Absolute font size (特大 / 大 / 中 / 小文字). */
+.aozora-md-font-extra-large { font-size: 2em; }
+.aozora-md-font-large       { font-size: 1.5em; }
+.aozora-md-font-medium      { font-size: 1em; }
+.aozora-md-font-small       { font-size: 0.8em; }
+
+/* 分数 — <sup>numerator</sup> ⁄ <sub>denominator</sub>, read upright. */
+.aozora-md-bunsu {
+  white-space: nowrap;
+  text-combine-upright: all;
+}
+
+.aozora-md-bunsu sup,
+.aozora-md-bunsu sub {
+  font-size: 0.7em;
+}
+
+/* キャプション — a figure/plate caption, inline or as a block container. */
+.aozora-md-caption {
+  font-size: 0.9em;
+  opacity: 0.8;
+}
+
+/* ----- Enclosures ------------------------------------------------- */
+
+.aozora-md-keigakomi-inline,
+.aozora-md-keigakomi-box {
+  display: inline-block;
+  border: 1px solid currentColor;
+  padding: 0.15em 0;
+}
+
+.aozora-md-enclosure-circle,
+.aozora-md-enclosure-circle-dotted {
+  display: inline-block;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  padding: 0.25em 0.1em;
+  line-height: 1;
+}
+
+.aozora-md-enclosure-circle-dotted {
+  border-style: dotted;
+}
+
+.aozora-md-enclosure-double-rule {
+  display: inline-block;
+  border: 3px double currentColor;
+  padding: 0.15em 0;
+}
+
+/* ----- Headings --------------------------------------------------- */
+
+.aozora-md-heading {
+  font-weight: bold;
+  line-height: 1.4;
+}
+
+.aozora-md-heading-large  { font-size: 1.8em; }
+.aozora-md-heading-medium { font-size: 1.4em; }
+.aozora-md-heading-small  { font-size: 1.15em; }
+
+/* 同行見出し — the heading opens the line the body text continues on. */
+.aozora-md-heading-same-line {
+  display: inline;
+  margin: 0 0 0.5em 0;
+}
+
+/*
+ * 窓見出し — a heading set into a window inside the text block. The
+ * logical float keeps it at the head of the column in tategaki; a
+ * reader that ignores the keyword renders it inline instead.
+ */
+.aozora-md-heading-window {
+  float: inline-start;
+  margin: 0 0 1em 1em;
+}
+
+.aozora-md-heading-hint {
+  display: none;
+}
+
+/* ----- Block leaves: page / section break, body end, illustration -- */
+
+.aozora-md-body-end {
+  display: block;
+  margin: 0 3em 0 1em;
+  border-right: 1px solid currentColor;
+  opacity: 0.3;
+}
+
+.aozora-md-illustration {
+  display: block;
+  margin: auto 1.5em;
+  text-align: center;
+}
+
+.aozora-md-illustration img {
+  max-height: 100%;
+  width: auto;
+}
+
+.aozora-md-page-break {
+  display: block;
+  /* Swap to the block-axis dimension in vertical mode. */
+  margin: 0 3em;
+  border-right: 1px solid currentColor;
+  opacity: 0.2;
+  break-before: page;
+}
+
+.aozora-md-section-break {
+  display: block;
+  margin: 0 2em;
+  text-align: center;
+}
+
+.aozora-md-section-break::before {
+  content: "❦";
+  opacity: 0.5;
+}
+
+/* 改丁 — resume on the next recto; 改段 — next column; 改見開き — next spread. */
+.aozora-md-section-break-kaicho      { border-right: 3px double currentColor; break-before: recto; }
+.aozora-md-section-break-kaidan      { border-right: 1px solid currentColor; margin-right: 1em; break-before: column; }
+.aozora-md-section-break-kaimihiraki { break-before: left; }
+
+/* ----- Line-scope markers ----------------------------------------- */
+
+/*
+ * The renderer emits these as zero-width marker spans that name the
+ * line they open; the layout they ask for belongs to the block around
+ * them. `:has()` hands that block the rule where the reader supports
+ * it, and the marker stays invisible either way — so a reader without
+ * `:has()` renders plain prose rather than a stray glyph.
+ */
+.aozora-md-indent {
+  /* Indent in vertical mode runs down the inline axis. */
+  display: inline-block;
+  height: 1em;
+}
+
+.aozora-md-indent-1 { height: 1em; }
+.aozora-md-indent-2 { height: 2em; }
+.aozora-md-indent-3 { height: 3em; }
+.aozora-md-indent-4 { height: 4em; }
+.aozora-md-indent-5 { height: 5em; }
+.aozora-md-indent-6 { height: 6em; }
+.aozora-md-indent-7 { height: 7em; }
+.aozora-md-indent-8 { height: 8em; }
+
+/*
+ * 地付き / 地から N 字上げ. The marker is empty, so the alignment it
+ * names belongs to the block around it and `:has()` hands it there —
+ * styling the marker itself would only move a zero-width box.
+ *
+ * It stays out of the `display: none` group below because
+ * `［＃ここから2字下げ、地から3字上げ］` puts these classes on the *same*
+ * span as `.aozora-md-indent`, whose inline-block height is that line's
+ * head indent; hiding the marker would take the indent with it. That
+ * compound also asks for a narrower measure rather than end-alignment,
+ * which is what the `:not()` says. An empty inline span draws nothing,
+ * so the marker needs no rule of its own to stay invisible.
+ *
+ * Logical values, identical to the horizontal theme's rule: the end edge
+ * is the foot of the column here and the right margin there.
+ */
+p:has(> .aozora-md-align-end:not(.aozora-md-indent)) { text-align: end; }
+
+p:has(> .aozora-md-align-end-1) { padding-inline-end: 1em; }
+p:has(> .aozora-md-align-end-2) { padding-inline-end: 2em; }
+p:has(> .aozora-md-align-end-3) { padding-inline-end: 3em; }
+p:has(> .aozora-md-align-end-4) { padding-inline-end: 4em; }
+p:has(> .aozora-md-align-end-5) { padding-inline-end: 5em; }
+p:has(> .aozora-md-align-end-6) { padding-inline-end: 6em; }
+p:has(> .aozora-md-align-end-7) { padding-inline-end: 7em; }
+p:has(> .aozora-md-align-end-8) { padding-inline-end: 8em; }
+
+.aozora-md-center,
+.aozora-md-line-goshikku,
+.aozora-md-line-futoji,
+.aozora-md-line-font-extra-large,
+.aozora-md-line-font-large,
+.aozora-md-line-font-medium,
+.aozora-md-line-font-small {
+  display: none;
+}
+
+p:has(> .aozora-md-center) { text-align: center; }
+
+p:has(> .aozora-md-line-goshikku) {
+  font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+}
+
+p:has(> .aozora-md-line-futoji)           { font-weight: bold; }
+p:has(> .aozora-md-line-font-extra-large) { font-size: 2em; }
+p:has(> .aozora-md-line-font-large)       { font-size: 1.5em; }
+p:has(> .aozora-md-line-font-medium)      { font-size: 1em; }
+p:has(> .aozora-md-line-font-small)       { font-size: 0.8em; }
+
+/* ----- Paired block containers ----------------------------------- */
+
+.aozora-md-container {
+  display: block;
+  margin: 0 1em;
+}
+
+.aozora-md-container-indent {
+  margin-top: 2em;
+}
+
+.aozora-md-container-indent-1 { margin-top: 1em; }
+.aozora-md-container-indent-2 { margin-top: 2em; }
+.aozora-md-container-indent-3 { margin-top: 3em; }
+.aozora-md-container-indent-4 { margin-top: 4em; }
+.aozora-md-container-indent-5 { margin-top: 5em; }
+.aozora-md-container-indent-6 { margin-top: 6em; }
+.aozora-md-container-indent-7 { margin-top: 7em; }
+.aozora-md-container-indent-8 { margin-top: 8em; }
+
+/*
+ * 折り返して字下げ — wrapped lines take a deeper indent than the first.
+ * The head indent is the container's own margin, so the hanging step is
+ * expressed as a negative first-line indent.
+ */
+.aozora-md-container-wrap-indent {
+  text-indent: -1em;
+}
+
+.aozora-md-container-center {
+  text-align: center;
+}
+
+/*
+ * The container is a normal-flow block, so an `auto` end margin resolves
+ * to zero and would leave 地付き sitting where ordinary prose does. The
+ * alignment has to come from `text-align`, and the logical `end` keeps
+ * this rule identical to the horizontal theme's — the end edge is the
+ * foot of the column here and the right margin there.
+ */
+.aozora-md-container-align-end {
+  text-align: end;
+}
+
+.aozora-md-container-keigakomi {
+  border: 1px solid currentColor;
+  padding: 0.5em;
+}
+
+.aozora-md-container-futoji   { font-weight: bold; }
+.aozora-md-container-shatai   { font-style: italic; }
+.aozora-md-container-goshikku {
+  font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+}
+
+/* 横組み block — a passage set across the column, inside tategaki. */
+.aozora-md-container-yokogumi {
+  writing-mode: horizontal-tb;
+}
+
+/* 段組み — `data-columns` carries the count; two is the common case. */
+.aozora-md-container-columns { columns: 2; column-gap: 2em; }
+.aozora-md-container-columns[data-columns="3"] { columns: 3; }
+.aozora-md-container-columns[data-columns="4"] { columns: 4; }
+
+/*
+ * 表 — the source is plain lines, not table markup, so alignment is
+ * carried by preserved runs of spaces and tabular figures rather than
+ * by a table layout the renderer never emits.
+ */
+.aozora-md-container-table {
+  white-space: pre-wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 字詰め / 字組み — a measure counted in characters (`data-width`,
+ * `data-kumi-width`, `data-kumi-lines`). CSS cannot read the count, so
+ * the measure comes from a custom property the host can set per book;
+ * the fallback is a comfortable default. In tategaki the measure of a
+ * line is its height.
+ */
+.aozora-md-container-line-width,
+.aozora-md-container-line-kumi {
+  max-height: var(--aozora-md-line-width, 30em);
+}
+
+.aozora-md-container-line-kumi {
+  line-height: 2;
+}
+
+.aozora-md-container-font-larger  { font-size: 1.2em; }
+.aozora-md-container-font-smaller { font-size: 0.85em; }
+.aozora-md-container-font-larger[data-steps="2"]  { font-size: 1.44em; }
+.aozora-md-container-font-smaller[data-steps="2"] { font-size: 0.72em; }
+
+.aozora-md-container-warichu {
+  /*
+   * Legacy block warichu — vertical mode variant. See the
+   * container warichu rule in the horizontal theme for the
+   * deprecation note.
+   */
+  font-size: 0.85em;
+}
+
+.aozora-md-warichu {
+  /*
+   * Inline warichu in tategaki — pure-CSS attempts to reproduce
+   * the print convention (two short vertical mini-lines tightly
+   * packed inside one body-line's width, with surrounding
+   * parentheses hugging the block) always end up worse than the
+   * plain small-font baseline, so we keep it simple. Downstream
+   * applications that want the authentic 2-column layout can
+   * override this rule.
+   */
+  font-size: 0.85em;
+}

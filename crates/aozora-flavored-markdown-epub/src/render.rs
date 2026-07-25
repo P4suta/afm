@@ -98,48 +98,31 @@ fn escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    // The renderer's class contract, owned upstream by aozora-flavored-markdown
-    // (its `AOZORA_MD_CLASSES`). Consuming it here — instead of a hand-copied
-    // list — makes the theme-coverage test fail automatically the moment
-    // upstream emits a new class the vendored themes do not yet style. When
-    // afm next bumps its aozora dependency (e.g. the `double-ruby` →
-    // `angle-quote` rename), this surfaces the theme gap with no manual sync.
+    // The stylesheets this crate bundles come from the renderer's `theme`
+    // feature, and so does the class contract they answer, so whether they
+    // cover it is settled there — `css_class_contract.rs` sweeps both
+    // directions with a selector tokeniser (ADR-0020). Restating that here
+    // as a substring search would read as a second gate while passing on
+    // any prefix: `.aozora-md-font-large` is a substring of the unrelated
+    // `.aozora-md-font-larger` rule, and a fifth of the contract has a
+    // longer sibling like that. What is this crate's own to check is the
+    // wrapper it writes around the rendered HTML.
     use std::path::PathBuf;
 
-    use aozora_flavored_markdown_test_support::styled_classes;
+    use aozora_flavored_markdown::theme;
 
     use super::*;
 
-    const CSS_HORIZONTAL: &str = include_str!("../assets/aozora-md-horizontal.css");
-    const CSS_VERTICAL: &str = include_str!("../assets/aozora-md-vertical.css");
-
     /// The wrapper opts into the bundled theme via the `aozora-md-root`
-    /// body class and the `aozora-md.css` link; both theme files must
+    /// body class and the `aozora-md.css` link; both themes must
     /// define that root selector or the theme never applies.
     #[test]
     fn wrapper_opts_into_the_bundled_theme() {
         let xhtml = wrap_xhtml("title", "", "ja");
         assert!(xhtml.contains("<body class=\"aozora-md-root\">"), "{xhtml}");
         assert!(xhtml.contains("href=\"css/aozora-md.css\""), "{xhtml}");
-        assert!(CSS_HORIZONTAL.contains(".aozora-md-root"));
-        assert!(CSS_VERTICAL.contains(".aozora-md-root"));
-    }
-
-    /// Guards against CSS drift: every emitted class must be styled in
-    /// both vendored themes.
-    #[test]
-    fn vendored_themes_cover_every_emitted_class() {
-        for class in styled_classes() {
-            let selector = format!(".{class}");
-            assert!(
-                CSS_HORIZONTAL.contains(&selector),
-                "horizontal theme has no selector for {selector}"
-            );
-            assert!(
-                CSS_VERTICAL.contains(&selector),
-                "vertical theme has no selector for {selector}"
-            );
-        }
+        assert!(theme::HORIZONTAL_CSS.contains(".aozora-md-root"));
+        assert!(theme::VERTICAL_CSS.contains(".aozora-md-root"));
     }
 
     /// A `.sjis` source is decoded through the `Shift_JIS` branch:

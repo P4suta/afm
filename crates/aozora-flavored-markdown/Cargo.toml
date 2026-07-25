@@ -59,6 +59,13 @@ html = []
 # diagnostic `.d.ts` directly (ADR-0017). Off by default — host builds
 # never pull wasm-bindgen.
 tsify = ["dep:tsify", "dep:wasm-bindgen"]
+# The canonical `aozora-md-*` stylesheets as `pub const` strings
+# (`theme::{HORIZONTAL_CSS, VERTICAL_CSS}`), embedded from this crate's
+# `theme/` directory. Pure data, no dependencies — off by default so a
+# parser-only consumer doesn't carry ~20 KiB of CSS. Enabled by
+# aozora-flavored-markdown-epub, which bundles a theme into the EPUB it
+# writes instead of vendoring its own copy (ADR-0020).
+theme = []
 
 [package.metadata.cargo-shear]
 # `wasm-bindgen` is pulled by the `tsify` feature and used only by the code

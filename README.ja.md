@@ -73,8 +73,12 @@ assert!(rendered.html.contains("<ruby>"));
 ```
 
 出力 HTML は安定した `aozora-md-*` CSS クラスを持ちます
-([ADR-0011](docs/adr/0011-brand-boundary-css-class-rewrite.md))。
-drop-in なテーマは [`theme/`](./theme/) にあります。API リファレンスは
+([`AOZORA_MD_CLASSES`](https://docs.rs/aozora-flavored-markdown/latest/aozora_flavored_markdown/static.AOZORA_MD_CLASSES.html)、
+[ADR-0011](docs/adr/0011-brand-boundary-css-class-rewrite.md))。
+それを style する drop-in テーマは既定 off の `theme` feature で
+`theme::{HORIZONTAL_CSS, VERTICAL_CSS}` として公開しており、CSS の実体は
+[`crates/aozora-flavored-markdown/theme/`](./crates/aozora-flavored-markdown/theme/)
+にあります。API リファレンスは
 [docs.rs](https://docs.rs/aozora-flavored-markdown)、実行できるサンプルは
 [`crates/aozora-flavored-markdown/examples/`](./crates/aozora-flavored-markdown/examples/)
 にあります。
