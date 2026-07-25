@@ -6,9 +6,8 @@
 # before returning (cargo >= 1.66), so aozora-flavored-markdown-cli's resolution finds the
 # aozora-flavored-markdown version just uploaded — no manual `sleep` between steps.
 #
-# Members marked `publish = false` are intentionally absent: aozora-flavored-markdown-wasm (ships
-# via wasm-pack/npm), aozora-flavored-markdown-test-support and xtask (dev-only), and
-# aozora-flavored-markdown-book (the mdbook source, not a crate).
+# Members marked `publish = false` are intentionally absent: aozora-flavored-markdown-wasm
+# (ships via wasm-pack/npm), and aozora-flavored-markdown-test-support / xtask (dev-only).
 #
 # ADR-0002 scope exception: this runs on the native runner toolchain rather
 # than the dev image (like the `msrv` CI job). Publishing is a release

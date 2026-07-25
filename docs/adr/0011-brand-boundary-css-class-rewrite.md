@@ -7,12 +7,12 @@
 ## Context
 
 aozora-flavored-markdown composes two renderers: comrak (vanilla CommonMark/GFM HTML) and
-`aozora-render` (the borrowed-AST 青空文庫 renderer in the sibling `aozora`
-repo). aozora-render predates aozora-flavored-markdown and brands its CSS classes `aozora-*`
-(`aozora-ruby`, `aozora-bouten-goma`, …); the sibling mdbook theme,
-`aozora-tools`, and any standalone consumer expect that prefix. aozora-flavored-markdown's own public
-surface uses `aozora-md-*`, styled by the theme under `crates/aozora-flavored-markdown-book/theme/`. The
-two prefixes must be reconciled at the boundary.
+the 青空文庫 renderer in the sibling `aozora` repo. The upstream renderer
+predates aozora-flavored-markdown and brands its CSS classes `aozora-*`
+(`aozora-ruby`, `aozora-bouten-goma`, …); `aozora-tools` and any standalone
+consumer expect that prefix. aozora-flavored-markdown's own public surface uses
+`aozora-md-*`, styled by the themes under `theme/`. The two prefixes must be
+reconciled at the boundary.
 
 ## Decision
 

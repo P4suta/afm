@@ -1,14 +1,13 @@
 //! Aozora Flavored Markdown — CommonMark + GFM + 青空文庫記法.
 //!
-//! Layers `aozora-pipeline` (青空文庫記法 borrowed-AST lexer) onto a
-//! vendored verbatim comrak so a single [`render`] call
-//! turns aozora-flavored-markdown source into HTML. Public entry points:
+//! Layers the sibling `aozora` parser onto a vendored verbatim comrak so a
+//! single [`render`] call turns aozora-flavored-markdown source into HTML.
+//! Public entry points:
 //!
 //! - [`render`] — render aozora-flavored-markdown source straight to HTML.
-//! - [`serialize`] — aozora-md-source round-trip (delegates to
-//!   [`aozora::render::serialize::serialize`]).
-//! - [`Options`] — configuration; [`Options::default`] enables
-//!   the GFM extensions aozora-flavored-markdown uses on top of CommonMark.
+//! - [`serialize`] — aozora-md-source round-trip.
+//! - [`Options`] — configuration; [`Options::default`] enables the GFM
+//!   extensions aozora-flavored-markdown uses on top of CommonMark.
 //!
 //! ```
 //! use aozora_flavored_markdown::{Options, render};
@@ -20,28 +19,18 @@
 //! ## Pipeline
 //!
 //! ```text
-//! source                                   ── UTF-8 input
-//!   │
-//!   ▼ aozora::lex_into_arena      ── normalized text + Registry
-//!   │
-//!   ▼ comrak::parse_document               ── vanilla CommonMark + GFM
-//!   │   (PUA sentinels U+E001..U+E004 flow through as plain text)
-//!   │
-//!   ▼ comrak::format_html_with_options     ── HTML with sentinels
-//!   │
-//!   ▼ ast_splice::splice_into_ast          ── sentinel → aozora-render,
-//!   │   · INLINE_SENTINEL → NodeValue::Raw inline node
-//!   │   · BLOCK_LEAF paragraphs → NodeValue::Raw block node
-//!   │   · BLOCK_OPEN/CLOSE paragraphs → container open/close raws
-//!   │
-//!   ▼ comrak::format_html                  ── vanilla, sentinel-free AST
-//!   │
-//!   ▼
+//! source                             ── UTF-8 input
+//!   ▼ aozora parse                    ── 青空文庫 constructs + diagnostics
+//!   ▼ comrak::parse_document          ── vanilla CommonMark + GFM
+//!   │   (PUA sentinels flow through as plain text)
+//!   ▼ ast_splice::splice_into_ast     ── sentinel → 青空文庫 HTML fragment
+//!   ▼ comrak::format_html             ── vanilla, sentinel-free AST
 //! HTML
 //! ```
 //!
-//! Comrak is unmodified: the v0.52.0 verbatim tree carries no
-//! Aozora-aware code (ADR-0001 budget = 0).
+//! Comrak is unmodified: the v0.52.0 verbatim tree carries no Aozora-aware
+//! code (ADR-0001 budget = 0). The boundary with `aozora` is its public API
+//! only (ADR-0021).
 
 #![forbid(unsafe_code)]
 
@@ -61,12 +50,12 @@ pub mod ir;
 mod sentinel_stream;
 mod source_line_anchors;
 
-/// PUA sentinel codepoints embedded by `aozora_pipeline`.
+/// PUA sentinel codepoints embedded by the sibling parser.
 ///
-/// Re-exported here under aozora-md-side names so aozora-flavored-markdown's public API never
-/// names sibling crate constants — if the upstream renames or removes
-/// one of these, the change surfaces in this module instead of
-/// breaking every downstream consumer.
+/// Re-exported under aozora-md-side names so this crate's public API
+/// never names a sibling constant directly — if the upstream renames or
+/// removes one, the change surfaces in this module instead of breaking
+/// every downstream consumer.
 pub mod sentinels {
     /// Inline Aozora span (ruby / bouten / annotation / gaiji /
     /// TCY / kaeriten).
@@ -317,17 +306,15 @@ pub struct RenderedIr {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Largest source aozora-flavored-markdown will hand to the aozora lexer.
+/// Largest source this crate will hand to the sibling parser.
 ///
-/// The core lexer keys every span on a `u32` byte offset and asserts
-/// `source.len() <= u32::MAX` at entry (`aozora_pipeline`'s Phase 0 /
-/// `tokenize_in`). Under this workspace's `panic = "abort"` release
-/// profile that assert is a hard process abort, not a catchable panic —
-/// an in-scope crash per `SECURITY.md` for a >4 GiB hostile input. aozora-flavored-markdown's
-/// public entry points guard on this boundary *before* reaching the core
-/// so an oversized input degrades to a graceful empty render instead of
-/// aborting the host process. Mirrors `aozora-py`'s `PyValueError` guard
-/// (`source exceeds 4 GiB (u32::MAX) span limit`).
+/// That parser keys every span on a `u32` byte offset and asserts
+/// `source.len() <= u32::MAX` on the way in. Under this workspace's
+/// `panic = "abort"` release profile that assert is a hard process abort,
+/// not a catchable panic — an in-scope crash per `SECURITY.md` for a hostile
+/// input above 4 GiB. The public entry points here guard on the boundary
+/// *first*, so an oversized input degrades to a graceful empty render
+/// instead of aborting the host process.
 const MAX_SOURCE_BYTES: usize = u32::MAX as usize;
 
 /// `true` when a source of `len` bytes is within the lexer's
@@ -349,17 +336,11 @@ const fn source_within_span_budget(input: &str) -> bool {
 /// Render aozora-flavored-markdown source text to HTML.
 ///
 /// One-stop entry point for the typical caller (aozora-flavored-markdown CLI, aozora-flavored-markdown-epub).
-/// Internally:
-///
-/// 1. [`aozora::lex_into_arena`] turns the source into a normalized
-///    text (with PUA sentinels at every Aozora construct) plus a
-///    borrowed `Registry`.
-/// 2. `comrak::parse_document` parses the normalized text — sentinels flow
-///    through as plain text since they are not in CommonMark's escape set
-///    (`<`/`>`/`&`/`"`).
-/// 3. `ast_splice::splice_into_ast` replaces each sentinel in the comrak AST
-///    with the matching `aozora::render::render_node` output, then
-///    `comrak::format_html` renders the spliced AST.
+/// Internally: the source is scanned for 青空文庫 constructs and each is
+/// replaced by a PUA sentinel; `comrak::parse_document` parses the result
+/// (sentinels flow through as plain text, being outside CommonMark's escape
+/// set); `ast_splice::splice_into_ast` swaps each sentinel back for its
+/// rendered 青空文庫 HTML; `comrak::format_html` emits the spliced AST.
 ///
 /// # Examples
 ///
@@ -448,15 +429,13 @@ pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     }
 }
 
-/// Internal pipeline driver shared between `render` and
-/// `render_to_ir`.
+/// Internal pipeline driver shared between `render` and `render_to_ir`.
 ///
-/// Runs the full lex → comrak → format → post-process → unmask →
-/// anchors chain and threads the AST root + optional `BorrowedLexOutput`
-/// through `project` *before* HTML formatting starts. The closure
-/// returns whatever extra data the caller needs alongside the HTML
-/// (`()` for the plain renderer, an `IrDocument` for the IR
-/// renderer).
+/// Runs the full lex → comrak → format → post-process → unmask → anchors
+/// chain and threads the AST root + optional lexer output through `project`
+/// *before* HTML formatting starts. The closure returns whatever extra data
+/// the caller needs alongside the HTML (`()` for the plain renderer, an
+/// `IrDocument` for the IR renderer).
 fn drive_pipeline<F, T>(input: &str, options: &Options, project: F) -> (String, Vec<Diagnostic>, T)
 where
     F: for<'a> FnOnce(&'a AstNode<'a>, Option<&aozora::BorrowedLexOutput<'a>>, &str) -> T,
@@ -472,7 +451,7 @@ where
     }
 
     // Pre-process: hide aozora trigger characters that live inside a
-    // CommonMark fenced code block from the lexer. `aozora_pipeline` is
+    // CommonMark fenced code block from the lexer, which is
     // CommonMark-blind by design (ADR-0010), so this lives here. See
     // `code_block_mask` module docs for the masking scheme.
     let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
@@ -671,10 +650,9 @@ fn collect_rendered_blocks<'a>(
 /// Round-trip an aozora-flavored-markdown source through the lexer and back to canonical
 /// aozora-md-source text.
 ///
-/// Delegates to [`aozora::render::serialize::serialize`] — the
-/// borrowed-AST inverse of `lex_into_arena`. Plain CommonMark portions
-/// of the input pass through verbatim because the lexer leaves them
-/// untouched.
+/// Delegates to the upstream serializer — the inverse of the lexing pass.
+/// Plain CommonMark portions of the input pass through verbatim because the
+/// lexer leaves them untouched.
 ///
 /// # Examples
 ///

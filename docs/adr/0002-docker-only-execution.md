@@ -13,10 +13,10 @@ want the cost of environment setup to fall on the Docker image, not on each huma
 
 ## Decision
 
-Every development operation runs inside a container defined by `/Dockerfile` (stages:
-`dev`, `ci`, `book`, `browser`). The entry point is `/Justfile`; every target
-invokes `docker compose run …`. Host-level `cargo`, `mdbook`, `npm`, `playwright`
-invocations are forbidden.
+Every development operation runs inside a container defined by `/Dockerfile`
+(stages: `dev`, `fuzz`, `ci`). The entry point is `/Justfile`; every target
+invokes `docker compose run …`. Host-level `cargo` and `bun` invocations are
+forbidden.
 
 CI (`.github/workflows/ci.yml`) uses the same Justfile targets via
 `docker compose run --rm ci just <target>` — the CI environment is structurally
@@ -38,7 +38,7 @@ Harder:
 ## Alternatives considered
 
 - **Host toolchain + rust-toolchain.toml**: insufficient because non-Rust tooling
-  (mdbook, playwright, sccache) still drifts.
+  (bun, sccache, the lint/coverage binaries) still drifts.
 - **Nix flake**: powerful but the team hasn't invested in Nix knowledge, and Nix on
   WSL/Windows has friction.
 

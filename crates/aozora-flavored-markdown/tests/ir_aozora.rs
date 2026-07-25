@@ -549,8 +549,8 @@ fn gaiji_projects_with_description_and_codepoint() {
 #[test]
 fn indent_leaf_inline_sentinel_drops_quietly_from_ir() {
     // `［＃地から１字下げ］` (single-line, not paired) lands in the
-    // registry as an inline sentinel for `AozoraNode::Indent`. The
-    // current IR has no v0.2 inline variant for the leaf marker, so
+    // registry as an inline sentinel for a leaf indent marker. The
+    // current IR has no v0.2 inline variant for it, so
     // `project_inline` returns `None` and the surrounding text
     // continues to flow.
     let blocks = ir("前［＃地から１字下げ］後");

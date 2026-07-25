@@ -257,15 +257,15 @@ pub enum IrInline {
 // ---------------------------------------------------------------------
 // Aozora classification enums
 //
-// These mirror the upstream `aozora::syntax::*` enums but are owned by
-// aozora-flavored-markdown so the public IR surface is decoupled from upstream's
+// These mirror the sibling parser's own classifications but are owned
+// here, so the public IR surface is decoupled from upstream's
 // semver. Each `#[serde(rename_all = "camelCase")]` variant serializes to
 // the exact wire string the previous stringly-typed fields produced, so
 // the JSON is byte-identical. `#[non_exhaustive]` keeps them additive
 // (ADR-0013); `Unknown` is the wire value emitted when the upstream lexer
 // produces a variant aozora-flavored-markdown does not classify yet.
 
-/// Paired-container subtype, mirroring `aozora::syntax::ContainerKind`
+/// Paired-container subtype, mirroring the upstream container kind
 /// (minus the numeric payload, which rides in
 /// [`IrBlock::Container`]'s `indent_level`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -285,7 +285,7 @@ pub enum ContainerSubtype {
     Unknown,
 }
 
-/// Section-break subtype, mirroring `aozora::syntax::SectionKind`.
+/// Section-break subtype, mirroring the upstream section kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
@@ -301,7 +301,7 @@ pub enum SectionSubtype {
     Unknown,
 }
 
-/// Emphasis-dot / sideline style, mirroring `aozora::syntax::BoutenKind`.
+/// Emphasis-dot / sideline style, mirroring the upstream bouten kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
@@ -333,8 +333,8 @@ pub enum BoutenStyle {
     Unknown,
 }
 
-/// Which side of the text a bouten sits on, mirroring
-/// `aozora::syntax::BoutenPosition`.
+/// Which side of the text a bouten sits on, mirroring the upstream
+/// bouten position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
@@ -348,8 +348,8 @@ pub enum BoutenPosition {
     Unknown,
 }
 
-/// Resolved annotation classification, mirroring
-/// `aozora::syntax::AnnotationKind`.
+/// Resolved annotation classification, mirroring the upstream
+/// annotation kind.
 ///
 /// Carried as `Option` on [`IrInline::Annotation`]'s `resolved`: `None`
 /// means the upstream lexer produced a variant aozora-flavored-markdown

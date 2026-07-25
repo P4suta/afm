@@ -74,13 +74,13 @@ function cspInProd(): Plugin {
 // so keeping it would have meant re-adding esbuild for no benefit.)
 export default defineConfig(({ command }) => ({
   plugins: [wasm(), solid(), cspInProd()],
-  base: command === 'build' ? '/aozora-md/playground/' : '/',
+  base: command === 'build' ? '/aozora-flavored-markdown/playground/' : '/',
   server: {
     host: '0.0.0.0',
     port: 5173,
     strictPort: true,
     fs: {
-      // aozora-flavored-markdown-book/theme/*.css lives one level above playground/. Vite's
+      // theme/*.css lives one level above playground/. Vite's
       // default fs.allow restricts dev-server reads to the project root;
       // widen it so the theme `?url` imports in `src/styles/theme-urls.ts`
       // resolve. Production `build` does not consult this list.

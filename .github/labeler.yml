@@ -20,11 +20,6 @@
           - "crates/aozora-flavored-markdown-wasm/**"
           - "playground/**"
 
-"area: book":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "crates/aozora-flavored-markdown-book/**"
-
 "area: dev":
   - changed-files:
       - any-glob-to-any-file:

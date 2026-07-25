@@ -31,7 +31,7 @@ P4suta/aozora-tools/   authoring environment (LSP / fmt / VS Code)
         │ git tag
         ▼
 P4suta/aozora-flavored-markdown/            CommonMark+GFM+aozora Markdown dialect
-                       (aozora-flavored-markdown, aozora-flavored-markdown-cli, aozora-flavored-markdown-book, vendored comrak)
+                       (aozora-flavored-markdown, aozora-flavored-markdown-cli, vendored comrak)
         │ git tag
         ▼
 P4suta/aozora/         pure 青空文庫記法 parser

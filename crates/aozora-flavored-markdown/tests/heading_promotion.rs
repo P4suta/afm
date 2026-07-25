@@ -44,8 +44,8 @@ fn small_heading_is_rendered_as_h3() {
 #[test]
 fn heading_with_preceding_indent_marker_still_becomes_heading() {
     // The 罪と罰 fixture shape: `［＃２字下げ］第一篇［＃「第一篇」は大見出し］`.
-    // The post-process must strip the leading indent AozoraNode from
-    // the paragraph so it doesn't leak into the promoted heading.
+    // The post-process must strip the leading indent marker from the
+    // paragraph so it doesn't leak into the promoted heading.
     let out = html::render_to_string("［＃２字下げ］第一篇［＃「第一篇」は大見出し］");
     assert!(
         out.contains("<h1>第一篇</h1>"),

@@ -85,10 +85,9 @@ fn build_options(opts: RenderOptions) -> Options {
 }
 
 /// Largest input the aozora parser core accepts, in bytes. Its span
-/// offsets are `u32`, so a longer source trips a `u32::MAX` assert
-/// inside the lexer (`aozora-flavored-markdown` feeds the source through
-/// `aozora::lex_into_arena`). Under `panic = "abort"` that assert would
-/// abort the whole Wasm instance.
+/// offsets are `u32`, so a longer source trips a `u32::MAX` assert inside
+/// the lexer. Under `panic = "abort"` that assert would abort the whole
+/// Wasm instance.
 const MAX_SOURCE_BYTES: usize = u32::MAX as usize;
 
 /// `Ok(())` iff a source of `byte_len` UTF-8 bytes is within the parser
@@ -148,12 +147,12 @@ pub fn render(source: &str, options: Option<RenderOptions>) -> Result<RenderResu
 
 /// Render aozora-only inline text (no markdown re-parse).
 ///
-/// Routes through the full aozora-flavored-markdown pipeline with default options.
-/// The naming preserves an entry point that callers can target
-/// without committing to the `render` shape; the implementation
-/// is intentionally a thin wrapper because the `aozora-render`
-/// boundary lives in the sibling repo (ADR-0010) and aozora-flavored-markdown
-/// composes — never extends — its public API.
+/// Routes through the full aozora-flavored-markdown pipeline with default
+/// options. The naming preserves an entry point that callers can target
+/// without committing to the `render` shape; the implementation is
+/// intentionally a thin wrapper because the notation boundary lives in the
+/// sibling repo (ADR-0010) and this crate composes — never extends — its
+/// public API (ADR-0021).
 ///
 /// # Errors
 ///

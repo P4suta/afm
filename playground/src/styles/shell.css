@@ -3,7 +3,7 @@
  *
  * SCOPE — this file owns the toolbar, panes, splitter, drawer, and
  * editor surround. It MUST NOT style .aozora-md-* or .aozora-* classes;
- * those are owned by `crates/aozora-flavored-markdown-book/theme/aozora-md-{vertical,horizontal}.css`
+ * those are owned by `theme/aozora-md-{vertical,horizontal}.css`
  * (ADR-0011 brand boundary). If a rule reaches into a content class,
  * it is the wrong file for that rule.
  */
@@ -53,7 +53,7 @@
    * Font roles. Shared *role names* (ui / mono) with the sibling aozora
    * playground; values stay brand-specific (see aozora's styles.css).
    * No serif role here: the preview's serif face lives in the content theme
-   * (`crates/aozora-flavored-markdown-book/theme/aozora-md-{horizontal,vertical}.css`, `.aozora-md-root`),
+   * (`theme/aozora-md-{horizontal,vertical}.css`, `.aozora-md-root`),
    * which is a self-contained drop-in and must not depend on this `:root`.
    */
   --aozora-md-pg-font-ui: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Yu Gothic',

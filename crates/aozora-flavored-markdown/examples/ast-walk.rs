@@ -1,6 +1,5 @@
-//! Walk the lexer's borrowed-AST registry and report how often each
-//! `AozoraNode` variant appears, plus the number of lexer diagnostics
-//! for the input.
+//! Walk the lexer output and report how often each 青空文庫 construct
+//! kind appears, plus the number of lexer diagnostics for the input.
 //!
 //! Run:
 //!

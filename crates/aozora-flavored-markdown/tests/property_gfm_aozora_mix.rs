@@ -66,7 +66,7 @@ fn assert_mix_invariants(src: &str) {
 
 // ----------------------------------------------------------------------
 // Generators — local to this file because the shape (GFM container +
-// Aozora payload) is too task-specific to belong in `aozora-proptest`.
+// Aozora payload) is too task-specific for the shared generators.
 // ----------------------------------------------------------------------
 
 /// Aozora payloads that are short enough to live inside a GFM

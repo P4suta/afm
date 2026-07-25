@@ -1,20 +1,12 @@
 //! Class-contract test between renderer and themes.
 //!
-//! The aozora-flavored-markdown-book ships two CSS themes (`aozora-md-horizontal.css` and
+//! `theme/` ships two CSS themes (`aozora-md-horizontal.css` and
 //! `aozora-md-vertical.css`) whose class selectors must cover every
-//! class token the renderer can emit. Without this contract a
-//! renderer change (e.g. a new `aozora-md-bouten-foo` kind) silently
-//! ships unstyled markup — invisible in unit tests because the
-//! existing HTML assertions don't care about CSS.
+//! class token the renderer can emit. Without this contract a renderer
+//! change silently ships unstyled markup.
 //!
-//! The test reads both CSS files at runtime, extracts every
-//! `.aozora-md-*` selector, and asserts each pinned class token appears
-//! in both. If a renderer adds a class, the pinned list in this
-//! file flags the missing style at `cargo test` time.
-//!
-//! The pinned list is intentionally hand-curated (not derived by
-//! scraping `html.rs`) so that adding a new class forces an
-//! *explicit* update here — drive-by CSS gaps can't slip in.
+//! The pinned list (`AOZORA_MD_CLASSES`) is hand-curated so that adding
+//! a class forces an explicit update here.
 
 use core::str;
 use std::collections::HashSet;
@@ -24,13 +16,13 @@ use std::path::PathBuf;
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::{AOZORA_MD_CLASSES, check_css_class_contract};
 
-/// Absolute path to one of the theme CSS files. Resolving via
-/// `CARGO_MANIFEST_DIR` keeps the test stable regardless of the
+/// Absolute path to one of the repo-root `theme/` CSS files. Resolving
+/// via `CARGO_MANIFEST_DIR` keeps the test stable regardless of the
 /// runner's working directory.
 fn theme_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/aozora-flavored-markdown → crates/
-    p.push("aozora-flavored-markdown-book");
+    p.pop(); // crates/ → repo root
     p.push("theme");
     p.push(name);
     p
@@ -70,9 +62,8 @@ fn collect_class_selectors(css: &str) -> HashSet<String> {
 
 #[test]
 fn every_emitted_class_has_a_horizontal_theme_rule() {
-    let css = fs::read_to_string(theme_path("aozora-md-horizontal.css")).expect(
-        "aozora-md-horizontal.css must exist alongside aozora-flavored-markdown-book/theme/",
-    );
+    let css = fs::read_to_string(theme_path("aozora-md-horizontal.css"))
+        .expect("aozora-md-horizontal.css must exist under theme/");
     let selectors = collect_class_selectors(&css);
     let missing: Vec<&&str> = AOZORA_MD_CLASSES
         .iter()
@@ -87,7 +78,7 @@ fn every_emitted_class_has_a_horizontal_theme_rule() {
 #[test]
 fn every_emitted_class_has_a_vertical_theme_rule() {
     let css = fs::read_to_string(theme_path("aozora-md-vertical.css"))
-        .expect("aozora-md-vertical.css must exist alongside aozora-flavored-markdown-book/theme/");
+        .expect("aozora-md-vertical.css must exist under theme/");
     let selectors = collect_class_selectors(&css);
     let missing: Vec<&&str> = AOZORA_MD_CLASSES
         .iter()
@@ -151,8 +142,8 @@ fn collect_class_selectors_tolerates_trailing_hyphen() {
 //       a *stale* entry (e.g. `aozora-md-double-ruby` after an upstream
 //       rename) surfaces here — modulo the documented UNEXERCISED gaps.
 //
-// Sources are copied verbatim from existing passing tests / aozora-render's
-// own tests at the pinned SHA — none authored from memory.
+// Sources are copied verbatim from existing passing tests / the sibling
+// renderer's own tests at the pinned SHA — none authored from memory.
 // ---------------------------------------------------------------------------
 
 /// One verified source per class-emitting aozora construct.
@@ -194,8 +185,8 @@ const UNEXERCISED: &[&str] = &[
     // 割り注 renders inline (`aozora-md-warichu`); the deprecated block form
     // `［＃ここから割り注］…` is not pinned in this corpus.
     "aozora-md-container-warichu",
-    // The leaf indent span is emitted by `AozoraNode::Indent` only via a
-    // directly-constructed node — no source-string trigger is pinned. The
+    // The leaf indent span is emitted only via a directly-constructed
+    // indent node — no source-string trigger is pinned. The
     // *container* form (`aozora-md-container-indent`) is exercised above.
     "aozora-md-indent",
     // Kanbun 返り点: no verified source trigger surfaces it through the render

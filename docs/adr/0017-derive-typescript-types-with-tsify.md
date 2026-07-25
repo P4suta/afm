@@ -5,6 +5,13 @@
 - Deciders: @P4suta
 - Tags: ir, typescript, codegen, wasm, dx
 
+> **Pending re-statement (2026-07-25):** PR3 of the aozora 0.5.0
+> follow-through collapses the Aozora half of the IR, which changes the
+> tsify-derived `.d.ts` shape (a breaking change for TypeScript consumers).
+> The *decision* — derive, don't hand-write — is unaffected; the emitted
+> union described below is superseded at that point. See
+> [ADR-0021](0021-aozora-boundary-is-the-public-surface.md).
+
 ## Context
 
 The IR + wasm-envelope TypeScript surface (consumed by the playground and

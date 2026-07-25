@@ -28,8 +28,8 @@
       (ADR-0010); aozora-md-side follow-up is usually a one-line mapping in
       `aozora_flavored_markdown::ir` plus a test.
 - [ ] If this adds a renderer-emitted class: updated
-      `aozora-flavored-markdown-test-support`'s `AOZORA_MD_CLASSES` and both aozora-flavored-markdown-book
-      themes (`aozora-md-horizontal.css` / `aozora-md-vertical.css`).
+      `aozora-flavored-markdown-test-support`'s `AOZORA_MD_CLASSES` and both
+      `theme/` files (`aozora-md-horizontal.css` / `aozora-md-vertical.css`).
 
 ## Related
 

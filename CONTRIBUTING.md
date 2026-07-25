@@ -19,7 +19,7 @@ lands in the sibling repo, not here. aozora-md-side work falls into:
 2. **CLI** — `crates/aozora-flavored-markdown-cli/` (`aozora-flavored-markdown render` / `aozora-flavored-markdown check`).
 3. **WASM bridge** — `crates/aozora-flavored-markdown-wasm/` (aozora-flavored-markdown-obsidian / browser
    hosts).
-4. **Documentation** — `crates/aozora-flavored-markdown-book/` (mdbook site) and
+4. **Documentation** — the READMEs (introduction), rustdoc (API), and
    `docs/adr/` (Architecture Decision Records).
 
 Authoring tools (formatter / LSP / VS Code extension) live in a
@@ -29,9 +29,9 @@ per ADR-0009.
 
 ## Ground rules
 
-1. **Docker-only execution** (ADR-0002). Do not invoke `cargo`,
-   `mdbook`, or `playwright` on the host. Every automated step goes
-   through `just <target>`, which shells into the dev container.
+1. **Docker-only execution** (ADR-0002). Do not invoke `cargo` or
+   `bun` on the host. Every automated step goes through
+   `just <target>`, which shells into the dev container.
 2. **Vendored comrak is hands-off** (ADR-0001). The fork sits at
    `upstream/comrak/` with a **0-line diff budget** — any change
    would be a fork divergence and needs its own ADR. Composition
@@ -79,14 +79,13 @@ container with the toolchain already built.
 
 ```sh
 just watch                     # bacon watcher inside the dev container
-just lint                      # fmt + clippy pedantic+nursery + typos + strict-code
+just lint                      # fmt + clippy pedantic+nursery + typos + strict-code + comment-discipline
 just test                      # full workspace nextest
 just prop                      # property-based sweep (128 cases per block)
 just spec-commonmark           # CommonMark 0.31.2 (652 cases)
 just spec-gfm                  # GFM 0.29 spec
 just coverage                  # cargo llvm-cov, fails below _COV_FLOOR
 just upstream-diff             # verify upstream/comrak/ is still 0-line
-just book-build                # mdbook build into crates/aozora-flavored-markdown-book/book
 just ci                        # replica of the full CI pipeline
 
 # Before a release:
@@ -178,7 +177,7 @@ Most aozora-md-side changes are one of:
   new `aozora-*` class, update
   `aozora-flavored-markdown-test-support`'s `AOZORA_MD_CLASSES` (the brand
   is rewritten to `aozora-md-*` per ADR-0011) and the corresponding rule
-  in `crates/aozora-flavored-markdown-book/theme/aozora-md-{horizontal,vertical}.css`.
+  in `theme/aozora-md-{horizontal,vertical}.css`.
 - **Public API drift** — `Options::default` defaults, new
   entry points, diagnostic shape. Lives in
   `crates/aozora-flavored-markdown/src/lib.rs`. Bumping the IR schema is a
@@ -220,11 +219,11 @@ cargo xtask new-adr 'my new decision'
 ```
 
 Add a row to the index ([`docs/ADR_INDEX.md`](docs/ADR_INDEX.md)) and
-reference the ADR in the commit body. Look at
-`docs/adr/0008-MOVED.md` (and the canonical text in the sibling
-repo) for an example of a decision that fundamentally reshaped the
-pipeline; look at `docs/adr/0011-brand-boundary-css-class-rewrite.md`
-for an example of a small, scoped boundary decision.
+reference the ADR in the commit body.
+`docs/adr/0021-aozora-boundary-is-the-public-surface.md` is an
+example of a decision that reshapes a whole boundary;
+`docs/adr/0011-brand-boundary-css-class-rewrite.md` is an example of a
+small, scoped one.
 
 ## Commit style
 
@@ -233,9 +232,9 @@ for an example of a small, scoped boundary decision.
 hook enforces this. Accepted types: `feat`, `fix`, `docs`,
 `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
 `revert`. Scopes match the workspace shape — one of: `markdown`
-(aozora-flavored-markdown), `cli` (aozora-flavored-markdown-cli), `wasm` (aozora-flavored-markdown-wasm), `book`
-(aozora-flavored-markdown-book), `xtask`, `comrak` (touches under `upstream/comrak/`),
-`adr`, `release`, `dev`, `test`.
+(aozora-flavored-markdown), `cli` (aozora-flavored-markdown-cli), `wasm`
+(aozora-flavored-markdown-wasm), `epub`, `xtask`, `comrak` (touches under
+`upstream/comrak/`), `adr`, `release`, `dev`, `test`.
 
 A single commit should be a single logical change. Split unrelated
 edits.

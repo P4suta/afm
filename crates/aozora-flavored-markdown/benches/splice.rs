@@ -2,9 +2,8 @@
 //!
 //! Measures the cost that is *aozora-flavored-markdown's own* — comrak-wrap plus the
 //! AST-level Aozora sentinel splice (`ast_splice::splice_into_ast`) —
-//! rather than the hot 青空文庫 parse, which lives in the git-pinned
-//! `aozora` workspace and is benched there (`aozora-pipeline`'s
-//! `tokenize_compare` / `classify_kaeriten`).
+//! rather than the hot 青空文庫 parse, which lives in the sibling `aozora`
+//! workspace and is benched there.
 //!
 //! Both arms call the public [`aozora_flavored_markdown::render`] on the
 //! *same* aozora-flavored-markdown source. They differ only in `Options`:

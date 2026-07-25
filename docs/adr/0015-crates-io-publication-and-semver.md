@@ -33,7 +33,7 @@ is byte-identical to registry `comrak` v0.52.0 (ADR-0001's 0-line-diff gate).
 
 **Publishable set & order.** Only `aozora-flavored-markdown` then `aozora-flavored-markdown-cli` are published,
 in that topological order. `aozora-flavored-markdown-wasm` (npm/wasm-pack), `aozora-flavored-markdown-test-support`
-and `xtask` (dev-only) are `publish = false`; `aozora-flavored-markdown-book` is not a crate.
+and `xtask` (dev-only) are `publish = false`.
 
 **Automation.** `.github/workflows/publish-crates.yml` (manual
 `workflow_dispatch`, `dry_run` default true, resumable + rate-limit aware)

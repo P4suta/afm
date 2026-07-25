@@ -1,29 +1,23 @@
 //! Shared primitives for both [`crate::ast_splice`] (HTML splicer)
 //! and [`crate::ir`] (IR builder).
 //!
-//! Both downstream consumers walk the same sentinel-position stream
-//! produced by `aozora-pipeline`. They differ only in their emit
-//! target (string buffer vs. typed tree), not in how they sequence
-//! the registry. This module owns the sequencing primitives so the
-//! two walkers stay in lockstep automatically.
+//! Both downstream consumers walk the same sentinel-position stream. They
+//! differ only in their emit target (string buffer vs. typed tree), not in
+//! how they sequence it, so this module owns the sequencing primitives and
+//! the two walkers stay in lockstep automatically.
 //!
 //! Design notes:
 //!
-//! - The fast `is_sentinel_char` check is a single subtract-and-compare
-//!   on the codepoint (`ch as u32 - 0xE001 < 4`). Hotter than the
-//!   `matches!` chain it replaces because every paragraph-text walk
-//!   touches this predicate per char.
-//! - `SentinelCursor::from_lex_out_with_source` materialises the registry
-//!   into a `Vec` of `(NodeRef, source-text)` pairs in source order via
-//!   the registry's own ascending-key iterator (`iter_sorted`), zipped
-//!   with the parallel `source_nodes` span table. Both walkers consume
-//!   entries linearly and never look up by position at rewrite time — the
-//!   order alone is sufficient. That makes it `O(n_registry)` with no
-//!   re-scan of the normalized text.
-//! - `paragraph_sole_block_sentinel` walks a comrak paragraph node
-//!   directly with allocation-free semantics, returning the kind of
-//!   block sentinel iff the paragraph carries exactly one and no
-//!   other non-whitespace content.
+//! - `is_sentinel_char` is a single subtract-and-compare on the codepoint
+//!   (`ch as u32 - 0xE001 < 4`): every paragraph-text walk touches it per
+//!   char, so it is hotter than the `matches!` chain it replaces.
+//! - The cursor materialises the constructs into a `Vec` of
+//!   (construct, source-text) pairs in source order. Both walkers consume
+//!   entries linearly and never look up by position at rewrite time — order
+//!   alone is sufficient, so this is `O(n)` with no re-scan.
+//! - `paragraph_sole_block_sentinel` walks a comrak paragraph node directly,
+//!   allocation-free, returning the kind of block sentinel iff the paragraph
+//!   carries exactly one and no other non-whitespace content.
 
 use core::ops::ControlFlow;
 
@@ -225,15 +219,14 @@ where
     });
 }
 
-/// Cursor over an owned sentinel-ordered stream of `(NodeRef, literal)`
-/// pairs, where `literal` is the original source text the lexer
-/// collapsed into that sentinel.
+/// Cursor over an owned sentinel-ordered stream of (construct, literal)
+/// pairs, where `literal` is the original source text the lexer collapsed
+/// into that sentinel.
 ///
-/// Both [`crate::ast_splice`] and [`crate::ir`] consume the registry by
-/// materialising it into a `Vec` once, then walking it linearly. The
-/// cursor owns that `Vec` so callers don't have to thread a separate
-/// slice lifetime through every walker — a single `'src` (the
-/// borrowed-AST payload lifetime) is enough.
+/// Both [`crate::ast_splice`] and [`crate::ir`] materialise the stream into
+/// a `Vec` once, then walk it linearly. The cursor owns that `Vec` so
+/// callers don't have to thread a separate slice lifetime through every
+/// walker — a single `'src` is enough.
 ///
 /// The owned `literal` lets the splicer's literal-context paths render a
 /// sentinel that landed inside a markdown inline code span or a link
@@ -251,22 +244,20 @@ pub(crate) struct SentinelCursor<'src> {
 }
 
 impl<'src> SentinelCursor<'src> {
-    /// Materialise the registry *with* each entry's original source text,
-    /// sliced from `sanitized` via the parallel `source_nodes` table. Used
-    /// by the HTML splicer and IR builder so a sentinel that lands in a
-    /// literal markdown context (inline code, link URL) can be rewritten
+    /// Materialise the stream *with* each entry's original source text.
+    /// Used by the HTML splicer and IR builder so a sentinel that lands in
+    /// a literal markdown context (inline code, link URL) can be rewritten
     /// back to its original Aozora source instead of leaking the PUA char
     /// or rendering interpreted markup where it doesn't belong.
     ///
-    /// `sanitized` MUST be the lexer's Phase-0 sanitized source (see
-    /// `aozora::pipeline::lexer::sanitize`), because `source_span`
-    /// coordinates are in sanitized-source bytes — slicing the raw input
-    /// would misalign (or panic) on BOM / CRLF / accent-span inputs.
-    /// `registry.iter_sorted()` and `source_nodes` are parallel and both
-    /// source-ordered (pinned by `source_nodes_parallel_to_registry`), so
-    /// zipping pairs each node with its own span. The `get` guard keeps a
-    /// span that somehow falls outside `sanitized` from panicking — it
-    /// degrades to an empty literal rather than aborting the process.
+    /// `sanitized` MUST be the lexer's Phase-0 sanitized source, because
+    /// the span coordinates are in sanitized-source bytes — slicing the raw
+    /// input would misalign (or panic) on BOM / CRLF / accent-span inputs.
+    /// The two tables are parallel and both source-ordered (pinned by
+    /// `source_nodes_parallel_to_registry`), so zipping pairs each entry
+    /// with its own span. The `get` guard keeps a span that somehow falls
+    /// outside `sanitized` from panicking — it degrades to an empty literal
+    /// rather than aborting the process.
     pub(crate) fn from_lex_out_with_source(
         lex_out: Option<&BorrowedLexOutput<'src>>,
         sanitized: &str,
@@ -334,14 +325,13 @@ impl<'src> SentinelCursor<'src> {
     }
 }
 
-/// Single-descent paragraph profile: counts sentinel chars and
-/// remembers the registry's first `HeadingHint` payload.
+/// Single-descent paragraph profile: counts sentinel chars and remembers
+/// the first heading-hint payload.
 ///
-/// Both [`crate::ir`] and [`crate::ast_splice`] need this exact
-/// summary to dispatch a paragraph to either heading-hint promotion
-/// (Case 2) or ordinary inline processing (Case 3). Computing it here,
-/// once, keeps the two walkers in lockstep without duplicating the
-/// peek-and-count loop.
+/// Both [`crate::ir`] and [`crate::ast_splice`] need this exact summary to
+/// dispatch a paragraph to either heading-hint promotion (Case 2) or
+/// ordinary inline processing (Case 3). Computing it here, once, keeps the
+/// two walkers in lockstep without duplicating the peek-and-count loop.
 #[derive(Debug)]
 pub(crate) struct ParaScan<'src> {
     /// Total sentinel chars in the paragraph's text descendants.

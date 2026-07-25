@@ -16,7 +16,7 @@
 //! sentinels inside `Text` nodes verbatim — they are not in CommonMark's HTML
 //! escape set) and `comrak::format_html`. It mutates the AST in place: each
 //! sentinel character is replaced by a `NodeValue::Raw` node carrying the
-//! Aozora HTML produced by [`render_node::render`].
+//! rendered Aozora HTML.
 //!
 //! `Raw` is the right node kind: `comrak/src/nodes.rs` documents it
 //! as "inserted verbatim into CommonMark and HTML output", and the
@@ -31,7 +31,7 @@
 //!    the rendered output, then detach the paragraph. Paired open/close
 //!    use the container stack to keep the LIFO invariant.
 //! 2. **Heading-hint promotion** (`［＃「X」は大見出し］`): the first
-//!    inline sentinel in the paragraph is a `HeadingHint`. Mutate the
+//!    inline sentinel in the paragraph is a heading hint. Mutate the
 //!    paragraph's `NodeValue` to `Heading { level, setext: false }`
 //!    in place, replace its children with a single `Text(target)`,
 //!    and advance the cursor past every sentinel the paragraph would
@@ -67,14 +67,12 @@ use crate::sentinel_stream::{
 /// into the comrak AST. After this returns, the AST contains no PUA
 /// sentinel character: `comrak::format_html` will emit fully resolved
 /// HTML in a single verbatim pass.
-/// `sanitized` is the lexer's Phase-0 sanitized source (see
-/// `aozora::pipeline::lexer::sanitize`). The splicer slices it via the
-/// registry's parallel `source_nodes` table to recover a sentinel's
-/// original Aozora source for literal markdown contexts (inline code
-/// spans, link destinations), where the notation must render verbatim
-/// rather than as interpreted Aozora HTML. It must be the *sanitized*
-/// source, not the raw input, because `source_span` coordinates are in
-/// sanitized-source bytes.
+/// `sanitized` is the lexer's Phase-0 sanitized source. The splicer slices
+/// it via the parallel span table to recover a sentinel's original Aozora
+/// source for literal markdown contexts (inline code spans, link
+/// destinations), where the notation must render verbatim rather than as
+/// interpreted Aozora HTML. It must be the *sanitized* source, not the raw
+/// input, because the span coordinates are in sanitized-source bytes.
 pub(crate) fn splice_into_ast<'a, 'src>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
@@ -529,8 +527,8 @@ fn render_aozora_html(node: AozoraNode<'_>, entering: bool) -> String {
     let mut out = String::new();
     render_node::render(node, entering, &mut StringSink(&mut out))
         .expect("writing AozoraNode HTML to a String cannot fail");
-    // Brand boundary (ADR-0011): `aozora-render` emits classes under
-    // its own `aozora-*` brand; aozora-flavored-markdown's HTML uses `aozora-md-*`. The rewrite
+    // Brand boundary (ADR-0011): the sibling renderer emits classes under
+    // its own `aozora-*` brand; our HTML uses `aozora-md-*`. The rewrite
     // is local to the rendered fragment we are about to wrap in a
     // `Raw` node, so a single `replace` is enough — the fragment is
     // a self-contained tag/attribute soup with no body text that
@@ -554,9 +552,8 @@ fn push_html_escaped(out: &mut String, s: &str) {
     }
 }
 
-/// `fmt::Write` adapter over `&mut String` so
-/// `aozora::render::render_node::render` can write straight into the
-/// buffer that becomes a `Raw` node payload.
+/// `fmt::Write` adapter over `&mut String` so the upstream renderer can
+/// write straight into the buffer that becomes a `Raw` node payload.
 struct StringSink<'s>(&'s mut String);
 
 impl fmt::Write for StringSink<'_> {

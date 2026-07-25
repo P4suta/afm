@@ -32,5 +32,5 @@ the report.
 ## Scope
 
 This code of conduct applies to every aozora-flavored-markdown project space — the issue
-tracker, pull requests, discussions, documentation, mdbook site, and any
+tracker, pull requests, discussions, documentation, and any
 ancillary channel operated on the project's behalf.

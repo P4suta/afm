@@ -1,9 +1,8 @@
 //! Integration tests for paired-container AST wrap.
 //!
-//! `［＃ここから…］ … ［＃ここで…終わり］` brackets in the source
-//! surface as an `AozoraNode::Container(Container { kind })` block in
-//! the AST, with every block between the open and close moved under
-//! it as children. Rendering wraps the children in a
+//! `［＃ここから…］ … ［＃ここで…終わり］` brackets in the source surface
+//! as a container block in the AST, with every block between the open and
+//! close moved under it as children. Rendering wraps the children in a
 //! `<div class="aozora-md-container aozora-md-container-<slug>">` on enter and
 //! emits `</div>` on exit while comrak walks the children in between.
 //!

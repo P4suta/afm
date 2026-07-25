@@ -22,8 +22,7 @@
         "vadimcn.vscode-lldb",
         "EditorConfig.EditorConfig",
         "skellock.just",
-        "ms-azuretools.vscode-docker",
-        "ms-playwright.playwright"
+        "ms-azuretools.vscode-docker"
       ],
       "settings": {
         "editor.formatOnSave": true,

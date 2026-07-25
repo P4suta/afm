@@ -9,9 +9,9 @@
 //! footing. [`assert_invariants`] runs every predicate and aggregates
 //! their diagnostics.
 //!
-//! The matching *generator* strategies live in `aozora-proptest`
-//! (sibling repo) so `proptest` does not become a transitive runtime
-//! dependency of `aozora-flavored-markdown`.
+//! The matching *generator* strategies live in the sibling parser repo
+//! so `proptest` does not become a transitive runtime dependency of
+//! `aozora-flavored-markdown`.
 //!
 //! # Invariant catalog
 //!
@@ -63,10 +63,9 @@ use std::collections::HashSet;
 
 // The complete `aozora-md-*` CSS-class contract emitted by the renderer, pinned here
 // so `tests/css_class_contract.rs` can assert every emitted `class="aozora-md-…"`
-// token appears in this list. There is no `pub const` to import from
-// `aozora-render` (it writes the class names as string literals), so when that
-// test fails after an `aozora-*` bump, add the new class here and to the
-// matching rule in `crates/aozora-flavored-markdown-book/theme/aozora-md-{horizontal,vertical}.css`.
+// token appears in this list. When that test fails after an upstream bump, add
+// the new class here and to the matching rule in
+// `theme/aozora-md-{horizontal,vertical}.css`.
 pub const AOZORA_MD_CLASSES: &[&str] = &[
     "aozora-md-align-end",
     "aozora-md-annotation",
@@ -970,7 +969,7 @@ fn is_recognised_class(class: &str) -> bool {
     // (`aozora-md-indent-2`, `aozora-md-container-indent-3`, `aozora-md-align-end-1`)
     // and slug modifiers (`aozora-md-section-break-choho`,
     // `aozora-md-bouten-goma`, `aozora-md-section-break-dan`, …) emitted by
-    // aozora-render.
+    // the sibling renderer.
     if let Some(stem_end) = class.rfind('-') {
         let stem = &class[..stem_end];
         let suffix = &class[stem_end + 1..];
