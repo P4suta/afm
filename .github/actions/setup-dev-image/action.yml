@@ -41,7 +41,7 @@ runs:
     # Run compose containers as root on CI. The image defaults to non-root
     # (UID 1000) for host-owned bind-mount writes in local dev, but the
     # runner's checkout is owned by a different UID, so a non-root container
-    # can't write generated files (wasm pkg/, mdbook book/, dist/) into it.
+    # can't write generated files (wasm pkg/, dist/) into it.
     # Read by `user:` in docker-compose.yml via the AOZORA_MD_UID/AOZORA_MD_GID defaults.
     - name: Run compose containers as root on CI
       shell: bash

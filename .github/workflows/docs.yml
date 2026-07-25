@@ -1,7 +1,9 @@
-# Publish the aozora-flavored-markdown book + rustdoc to GitHub Pages.
+# Publish rustdoc + the browser playground to GitHub Pages.
 #
-# aozora-flavored-markdown publishes to docs.rs; this job also builds rustdoc locally
-# and layers it under the mdbook site at `/aozora-flavored-markdown/api/`.
+# aozora-flavored-markdown publishes to docs.rs; this job also builds rustdoc
+# locally and serves it at `/aozora-flavored-markdown/api/`, with the
+# playground at `/aozora-flavored-markdown/playground/`. The site root
+# redirects to the API reference.
 #
 # Docs builds use the native runner toolchain, not the dev Docker image:
 # the Pages deploy actions expect artefacts on the runner filesystem.
@@ -39,19 +41,12 @@ jobs:
         with:
           key: docs
 
-      - uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08  # v2.0.0
-        with:
-          mdbook-version: latest
-
       - name: Build rustdoc
         env:
           # Fail the deploy build on any rustdoc warning so a doc
           # regression can't ship even if ci.yml's `doc` gate is weakened.
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps --document-private-items
-
-      - name: Build mdbook
-        run: mdbook build crates/aozora-flavored-markdown-book
 
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
@@ -77,12 +72,12 @@ jobs:
       - name: Assemble site
         run: |
           set -euo pipefail
-          mkdir -p site
-          cp -r crates/aozora-flavored-markdown-book/book/. site/
-          mkdir -p site/api
+          mkdir -p site/api site/playground
           cp -r target/doc/. site/api/
-          mkdir -p site/playground
           cp -r playground/dist/. site/playground/
+          printf '%s\n' \
+            '<!doctype html><meta http-equiv="refresh" content="0; url=api/">' \
+            > site/index.html
           # Without this, Pages runs Jekyll and hides paths like `_sources`.
           touch site/.nojekyll
 

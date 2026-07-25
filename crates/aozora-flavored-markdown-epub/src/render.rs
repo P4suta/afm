@@ -1,10 +1,9 @@
 //! Phase 2 — render aozora-flavored-markdown sources into XHTML spine items.
 //!
-//! Each source is decoded (UTF-8, or SJIS via
-//! [`aozora_encoding::decode_sjis`] for `.sjis`/`.shift_jis`), rendered
-//! by [`aozora_flavored_markdown::render`], and wrapped in an XHTML (HTML5
-//! doctype) envelope carrying the manuscript language and a stylesheet
-//! link.
+//! Each source is decoded (UTF-8, or Shift_JIS for `.sjis` /
+//! `.shift_jis`), rendered by [`aozora_flavored_markdown::render`], and
+//! wrapped in an XHTML (HTML5 doctype) envelope carrying the manuscript
+//! language and a stylesheet link.
 
 use std::str;
 

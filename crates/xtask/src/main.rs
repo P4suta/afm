@@ -1,7 +1,7 @@
 //! Workspace automation.
 //!
-//! Every task invoked by the `Justfile` or by CI that isn't a direct
-//! cargo / mdbook invocation lives here. Sub-commands:
+//! Every task invoked by the `Justfile` or by CI that isn't a direct cargo
+//! invocation lives here. Sub-commands:
 //!
 //! - `upstream-diff` — assert the vendored comrak tree is still
 //!   pinned to the recorded SHA and that the ADR-0001 0-line diff
@@ -9,6 +9,8 @@
 //! - `upstream-sync` — replace `upstream/comrak/` with the source
 //!   tree at a given upstream tag. Pure tree-replace (ADR-0001): the
 //!   diff budget is 0, so there are no patches to re-apply.
+//! - `comment-discipline` — fail when a comment names a retired
+//!   upstream-internal path (ADR-0021).
 //! - `new-adr` — scaffold a new MADR file under `docs/adr/`.
 //! - `spec-refresh` — regenerate `spec/commonmark-*.json` /
 //!   `spec/gfm-*.json` from cmark-format `spec.txt` inputs. Network
@@ -56,6 +58,10 @@ enum Command {
         /// Upstream tag name (e.g. `v0.53.0`).
         tag: String,
     },
+    /// Fail if any comment under `crates/` names a retired
+    /// upstream-internal path. The boundary with the sibling parser is its
+    /// public API only (ADR-0021), and prose must not outlive it.
+    CommentDiscipline,
     /// Create a new Architecture Decision Record under `docs/adr/`.
     NewAdr { title: String },
     /// Convert cmark-format spec.txt inputs to fixture JSON. Pass one or more
@@ -95,6 +101,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::UpstreamDiff => upstream_diff(),
         Command::UpstreamSync { tag } => upstream_sync(&tag),
+        Command::CommentDiscipline => comment_discipline(Path::new("crates")),
         Command::NewAdr { title } => new_adr(&title),
         Command::SpecRefresh { input, output } => {
             let n = spec_refresh::refresh_one(&input, &output).with_context(|| {
@@ -206,6 +213,173 @@ fn sync_or_check(dest: &Path, content: &[u8], check: bool, drift: &mut Vec<Strin
         }
         fs::write(dest, content).with_context(|| format!("writing {}", dest.display()))?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// comment-discipline
+// ---------------------------------------------------------------------------
+
+/// Retired upstream-internal names, each with the reason it is banned.
+///
+/// The sibling parser publishes a small, deliberately curated API; everything
+/// listed here was an *internal* path this workspace once reached into and
+/// which no longer exists. A comment naming one is prose that has already
+/// rotted — it teaches a reader an import that cannot compile. The remedy is
+/// always the same: describe the behaviour, not the upstream internal that
+/// provides it (ADR-0021).
+///
+/// Entries are written in their manifest spelling; [`fold_separators`] makes
+/// each one match the `_` spelling too, so one row covers both.
+///
+/// Real code is out of scope: code that stops compiling is caught by the
+/// compiler, and this gate exists precisely for the class of drift the
+/// compiler cannot see.
+const RETIRED_UPSTREAM_PATHS: &[(&str, &str)] = &[
+    (
+        "aozora::pipeline",
+        "the pipeline module is private upstream",
+    ),
+    ("aozora::syntax", "the syntax module is private upstream"),
+    ("aozora::render", "the render module is private upstream"),
+    (
+        "aozora::encoding",
+        "the encoding module is private upstream",
+    ),
+    ("aozora-pipeline", "no longer a published crate"),
+    ("aozora-syntax", "no longer a published crate"),
+    ("aozora-render", "no longer a published crate"),
+    ("aozora-encoding", "no longer a published crate"),
+    ("aozora-proptest", "no longer a published crate"),
+    ("aozora-spec", "no longer a published crate"),
+    ("aozora-corpus", "no longer a published crate"),
+    ("lex_into_arena", "not on the public surface"),
+    ("BorrowedLexOutput", "not on the public surface"),
+    ("NormalizedOffset", "not on the public surface"),
+    ("node_at_normalized", "removed upstream"),
+    ("render_node", "not on the public surface"),
+    ("AozoraNode", "not on the public surface"),
+];
+
+/// One comment line that names a retired upstream path.
+#[derive(Debug, PartialEq, Eq)]
+struct CommentViolation {
+    line: usize,
+    needle: &'static str,
+    why: &'static str,
+    text: String,
+}
+
+/// Fold `_` into `-` so one banned entry matches either spelling of a name.
+///
+/// Rust writes the same crate two ways: hyphenated in a manifest, underscored
+/// in an intra-doc link. A list that knows only the manifest spelling misses
+/// every rustdoc reference — which is exactly where this drift accumulates,
+/// because an intra-doc link to a dependency that has gone away is what turns
+/// `just doc` red. Folding both the needle and the comment makes the two
+/// spellings indistinguishable to the gate.
+fn fold_separators(text: &str) -> String {
+    text.replace('_', "-")
+}
+
+/// Return every comment line in `src` that names a retired upstream path.
+///
+/// `///`, `//!` and plain `//` all count. Prose rots the same way whichever
+/// marker introduces it, and the compiler already owns everything else.
+fn scan_comments(src: &str) -> Vec<CommentViolation> {
+    let banned: Vec<(String, &str, &str)> = RETIRED_UPSTREAM_PATHS
+        .iter()
+        .map(|&(needle, why)| (fold_separators(needle), needle, why))
+        .collect();
+
+    let mut out = Vec::new();
+    for (idx, raw) in src.lines().enumerate() {
+        let trimmed = raw.trim_start();
+        if !trimmed.starts_with("//") {
+            continue;
+        }
+        let folded = fold_separators(trimmed);
+        for (folded_needle, needle, why) in &banned {
+            if folded.contains(folded_needle.as_str()) {
+                out.push(CommentViolation {
+                    line: idx + 1,
+                    needle,
+                    why,
+                    text: trimmed.to_owned(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Collect every `.rs` file under `dir`, skipping build-output directories.
+fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if path.is_dir() {
+            // `target/` is cargo output (including each fuzz crate's own) and
+            // `pkg/` is wasm-pack output. Neither is authored source.
+            if matches!(name.to_str(), Some("target" | "pkg" | "node_modules")) {
+                continue;
+            }
+            collect_rust_files(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(())
+}
+
+/// Fail when a comment under `root` names a retired upstream path.
+fn comment_discipline(root: &Path) -> Result<()> {
+    if !root.is_dir() {
+        bail!(
+            "comment-discipline: {} not found; run from the workspace root",
+            root.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    collect_rust_files(root, &mut files)?;
+
+    let mut total = 0usize;
+    for path in &files {
+        let src =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        for v in scan_comments(&src) {
+            if total == 0 {
+                println!("comment-discipline: comments naming retired upstream paths:");
+            }
+            total += 1;
+            println!(
+                "  {}:{}: `{}` ({})\n    {}",
+                path.display(),
+                v.line,
+                v.needle,
+                v.why,
+                v.text
+            );
+        }
+    }
+
+    if total > 0 {
+        bail!(
+            "comment-discipline: {total} comment reference(s) to retired upstream paths. \
+             The boundary is the sibling parser's public API only (ADR-0021) — describe the \
+             behaviour instead of naming an upstream internal."
+        );
+    }
+
+    println!(
+        "comment-discipline: clean ({} file(s), {} banned path(s) checked)",
+        files.len(),
+        RETIRED_UPSTREAM_PATHS.len()
+    );
     Ok(())
 }
 
@@ -572,4 +746,97 @@ fn aozora_bump(new_sha: &str) -> Result<()> {
     }
     println!("aozora-bump: Cargo.lock refreshed against {new_sha}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RETIRED_UPSTREAM_PATHS, fold_separators, scan_comments};
+
+    /// A banned entry that is spelled with a `-`, i.e. one whose intra-doc
+    /// spelling differs from its manifest spelling.
+    fn hyphenated_entry() -> &'static str {
+        RETIRED_UPSTREAM_PATHS
+            .iter()
+            .map(|&(needle, _)| needle)
+            .find(|needle| needle.contains('-'))
+            .expect("the banned list names at least one retired crate")
+    }
+
+    #[test]
+    fn flags_a_retired_path_in_an_inner_doc_comment() {
+        // Assembled at runtime so this test's own source stays clean.
+        let src = format!("//! Layers {} onto comrak.\n", RETIRED_UPSTREAM_PATHS[0].0);
+        let hits = scan_comments(&src);
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
+    }
+
+    #[test]
+    fn flags_a_retired_path_in_an_outer_doc_comment() {
+        let src = format!("    /// Delegates to {}.\n", RETIRED_UPSTREAM_PATHS[11].0);
+        let hits = scan_comments(&src);
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[11].0);
+    }
+
+    #[test]
+    fn flags_the_underscore_spelling_of_a_retired_crate() {
+        // The banned list is written in manifest spelling; an intra-doc link
+        // uses the underscored one. Both must fail, or rustdoc references
+        // outlive the crate they point at.
+        let hyphenated = hyphenated_entry();
+        let src = format!("/// Draws from [`{}`].\n", hyphenated.replace('-', "_"));
+        let hits = scan_comments(&src);
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, hyphenated);
+    }
+
+    #[test]
+    fn flags_a_retired_path_in_a_plain_comment() {
+        // Prose rots whichever marker introduces it.
+        let src = format!("    // Mirrors {}.\n", RETIRED_UPSTREAM_PATHS[0].0);
+        let hits = scan_comments(&src);
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
+    }
+
+    #[test]
+    fn ignores_code() {
+        // Real code is out of scope: an import that no longer resolves is the
+        // compiler's job, and this gate covers what the compiler cannot see.
+        let needle = RETIRED_UPSTREAM_PATHS[0].0;
+        let src = format!("use {needle}::thing;\nlet s = \"{needle}\";\n");
+        assert!(scan_comments(&src).is_empty());
+    }
+
+    #[test]
+    fn clean_comments_produce_no_violations() {
+        let src = "//! Layers the sibling parser onto comrak.\n/// Renders to HTML.\n";
+        assert!(scan_comments(src).is_empty());
+    }
+
+    #[test]
+    fn reports_every_offending_line() {
+        let needle = RETIRED_UPSTREAM_PATHS[0].0;
+        let src = format!("//! {needle}\nlet filler = 1;\n/// {needle}\n");
+        let hits = scan_comments(&src);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[1].line, 3);
+    }
+
+    #[test]
+    fn banned_list_has_no_duplicates() {
+        // Compared after folding: `a-b` and `a_b` are one entry to the gate,
+        // so listing both would be a silent duplicate.
+        let mut names: Vec<String> = RETIRED_UPSTREAM_PATHS
+            .iter()
+            .map(|&(n, _)| fold_separators(n))
+            .collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "duplicate entry in the banned list");
+    }
 }

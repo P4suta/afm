@@ -1,6 +1,6 @@
 # aozora-flavored-markdown workspace task runner.
 # The ONE entry point for every development operation. Every target runs inside Docker;
-# never invoke cargo, mdbook, or playwright on the host directly.
+# never invoke cargo or bun on the host directly.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
@@ -112,10 +112,12 @@ prop-seed SEED TARGET="property_*":
     {{_dev}} bash -c 'AOZORA_PROPTEST_SEED={{SEED}} cargo nextest run --workspace --all-features --test "{{TARGET}}" --run-ignored default'
 
 # Run every `invariant_unit_` predicate test — narrow regression target
-# that skips the full proptest sweep.
+# that skips the full proptest sweep. Scoped to `--workspace` rather than one
+# package: the predicates live in aozora-flavored-markdown-test-support today,
+# and a package-pinned filter silently selected zero tests once already.
 [group('test')]
 invariants:
-    {{_dev}} cargo nextest run --package aozora-flavored-markdown --lib -E 'test(invariant_unit_)'
+    {{_dev}} cargo nextest run --workspace --lib -E 'test(invariant_unit_)'
 
 # CommonMark 0.31.2 spec compliance (652 cases, pass = 652/652)
 [group('test')]
@@ -354,9 +356,18 @@ coverage-branch:
 
 # --- lint / static analysis ---------------------------------------------------
 
-# Run all lints (fmt + clippy + typos + strict-code)
+# Run all lints (fmt + clippy + typos + strict-code + comment-discipline)
 [group('lint')]
-lint: fmt-check clippy typos strict-code
+lint: fmt-check clippy typos strict-code comment-discipline
+
+# Comment drift gate. Fails when a `//` / `///` / `//!` comment names a path
+# that used to exist inside the sibling parser but is no longer on its public
+# API (ADR-0021). The compiler catches the same drift in *code*; comments rot
+# silently, so they get their own gate. The banned list lives in
+# `crates/xtask/src/main.rs` (RETIRED_UPSTREAM_PATHS).
+[group('lint')]
+comment-discipline:
+    {{_dev}} cargo run --package xtask --quiet -- comment-discipline
 
 # Forbid patterns that hide bugs or introduce unstable/unsafe surface in our
 # own crates. upstream/comrak is excluded (ADR-0001 keeps vendored tree
@@ -689,22 +700,6 @@ spec-refresh:
 
 # --- docs ---------------------------------------------------------------------
 
-# Build the mdbook documentation site. The dev/ci image ships mdbook, so inside
-# a container we build directly; on the host we use the dedicated `book` service.
-[group('docs')]
-book-build:
-    {{ if _in == "1" { "cd crates/aozora-flavored-markdown-book && mdbook build" } else { "docker compose run --rm book mdbook build" } }}
-
-# Serve the mdbook site at http://localhost:3000
-[group('docs')]
-book-serve:
-    {{ if _in == "1" { "cd crates/aozora-flavored-markdown-book && mdbook serve --hostname 0.0.0.0 --port 3000" } else { "docker compose up book" } }}
-
-# Check documentation links
-[group('docs')]
-book-linkcheck:
-    {{ if _in == "1" { "cd crates/aozora-flavored-markdown-book && mdbook-linkcheck" } else { "docker compose run --rm book mdbook-linkcheck" } }}
-
 # New Architecture Decision Record (MADR template)
 [group('docs')]
 adr TITLE:
@@ -732,14 +727,6 @@ dist-assets:
 dist-assets-check:
     {{_dev}} cargo build --package aozora-flavored-markdown-cli --quiet
     {{_dev}} cargo run --package xtask --quiet -- gen-dist-assets --check
-
-# --- end-to-end (M3 onward) --------------------------------------------------
-
-# Playwright browser tests (Chromium + WebKit)
-[group('e2e')]
-e2e *ARGS:
-    docker compose run --rm browser \
-        bash -c 'cd crates/aozora-flavored-markdown-book && npm ci && npx playwright test {{ARGS}}'
 
 # --- playground (browser try-it-online) --------------------------------------
 
@@ -821,13 +808,14 @@ ci:
     #     share ONE cargo target dir, so they contend on its build lock and
     #     CANNOT truly run in parallel — they stay sequential, ordered
     #     cheap-to-expensive so a failure surfaces fast.
-    #   * deny / audit / book-build invoke NO rustc and take no build lock (and
+    #   * deny / shear / audit invoke NO rustc and take no build lock (and
     #     spawn no sccache server, so no multi-server churn on the shared cache),
     #     so a BACKGROUND lane overlaps them onto the compile lane for free.
     #   * `check` is dropped: clippy + build both compile --all-targets, so the
-    #     bare `cargo check` pass was redundant. The text gates `lint` bundles
-    #     (fmt-check/typos/strict-code) run once on their own instead of a second
-    #     time inside `lint`; only `clippy` is left to run from `lint`.
+    #     bare `cargo check` pass was redundant. The gates `lint` bundles
+    #     (fmt-check/typos/strict-code/comment-discipline) run once on their own
+    #     instead of a second time inside `lint`; only `clippy` is left to run
+    #     from `lint`.
     #   * playground-build (wasm-pack + the in-repo playground's tsc/vite) runs
     #     LAST in the foreground lane: wasm-pack invokes rustc and shares the
     #     target dir. It mirrors CI's `wasm-build` job, so a wasm / IR /
@@ -844,10 +832,10 @@ ci:
                    "$(date +%T)" "$1" "$2" "$3"; }
 
     # --- background lane: slow gates that take no cargo build lock ----------
-    # deny / shear / audit / book-build overlap the compile lane. Output is
-    # buffered to a log and only replayed on failure so the terminal stays
-    # readable. (shear is syn-based, so it takes no cargo build lock either.)
-    bg_steps=(deny shear audit book-build)
+    # deny / shear / audit overlap the compile lane. Output is buffered to a
+    # log and only replayed on failure so the terminal stays readable.
+    # (shear is syn-based, so it takes no cargo build lock either.)
+    bg_steps=(deny shear audit)
     declare -A bg_pid
     for step in "${bg_steps[@]}"; do
         # Each job records its own (exit-code, duration) so the reap below can
@@ -863,8 +851,9 @@ ci:
     # --- foreground lane: instant text gates first (fail-fast in seconds),
     # --- then the compile pipeline (sequential — shared target dir). ---------
     fg_steps=(typos fmt-check strict-code verify-version-pins \
-              upstream-diff clippy build dist-assets-check test test-doc prop \
-              spec-commonmark spec-gfm doc coverage udeps playground-build)
+              upstream-diff comment-discipline clippy build dist-assets-check \
+              test test-doc prop spec-commonmark spec-gfm doc coverage udeps \
+              playground-build)
     halted=""
     for step in "${fg_steps[@]}"; do
         start=$(date +%s)
@@ -881,7 +870,7 @@ ci:
     done
 
     # --- reap background lane (wait so no container is orphaned on failure) --
-    banner "background gates (deny / audit / book-build)"
+    banner "background gates (deny / shear / audit)"
     for step in "${bg_steps[@]}"; do
         wait "${bg_pid[$step]}"
         read -r brc bdur < "$bg_dir/$step.meta"

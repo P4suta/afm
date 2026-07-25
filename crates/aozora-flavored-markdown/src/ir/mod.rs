@@ -44,7 +44,7 @@
 //!
 //! - `types` — public IR enum/struct definitions (`IrDocument`,
 //!   `IrBlock`, `IrInline`, `Range`, ...).
-//! - `projection` — pure helpers that convert `AozoraNode`
+//! - `projection` — pure helpers that convert upstream construct
 //!   variants into IR values plus the enum→string mappers and the
 //!   sourcepos→range bridge. No walker state.
 //! - This file (`mod.rs`) — the stateful walker (`IrWalker`,
@@ -56,11 +56,10 @@
 //!
 //! The walker is built from three small primitives:
 //!
-//! 1. `crate::sentinel_stream::SentinelCursor` — the shared registry-stream
+//! 1. `crate::sentinel_stream::SentinelCursor` — the shared construct-stream
 //!    cursor. The HTML splicer (`crate::ast_splice`) and this
 //!    builder both consume the same source-order sequence of
-//!    `NodeRef` entries; the cursor abstraction keeps them in
-//!    lockstep.
+//!    entries; the cursor abstraction keeps them in lockstep.
 //! 2. `ParaScan` — single-descent paragraph profile. One walk per
 //!    paragraph computes both the sole-block-sentinel test and the
 //!    heading-hint lookahead at once, eliminating the two-scan
@@ -189,10 +188,9 @@ impl<'src> StreamingIrBuilder<'src> {
 /// orphan-close drain at end-of-document. They differ only in the
 /// emit target (rewritten comrak AST vs. tree of `Vec<IrBlock>`).
 ///
-/// Lifetime: `'src` is the arena/source lifetime that every
-/// borrowed [`aozora::syntax::borrowed::AozoraNode`] payload references — shared with the
-/// owned-cursor's `NodeRef` payloads and the `HeadingHint` borrows
-/// in [`ParagraphAction::HeadingHint`].
+/// Lifetime: `'src` is the arena/source lifetime every borrowed upstream
+/// payload references — shared with the owned cursor's payloads and the
+/// heading-hint borrows in [`ParagraphAction::HeadingHint`].
 ///
 /// The comrak AST's own lifetime is **independent** (it lives in a
 /// different `comrak::Arena`) and elided through `&AstNode<'_>` in

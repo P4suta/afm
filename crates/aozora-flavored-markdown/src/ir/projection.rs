@@ -1,11 +1,10 @@
-//! `AozoraNode` → IR projection helpers + sourcepos / table-align /
+//! Construct → IR projection helpers + sourcepos / table-align /
 //! enum-tag mappers.
 //!
-//! Every helper here is **pure**: a function of its arguments alone,
-//! no walker / cursor state. The walker (`IrWalker` in
-//! `crate::ir`) composes these to produce `IrBlock` /
-//! `IrInline` values from the borrowed-AST nodes that
-//! `aozora_pipeline` hands back via the registry.
+//! Every helper here is **pure**: a function of its arguments alone, no
+//! walker / cursor state. The walker (`IrWalker` in `crate::ir`) composes
+//! these to produce `IrBlock` / `IrInline` values from the upstream
+//! constructs.
 //!
 //! ## Non-exhaustive enum guards
 //!

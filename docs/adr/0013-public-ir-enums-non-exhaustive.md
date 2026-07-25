@@ -10,6 +10,13 @@
 > when the IR↔TS codegen moved to `tsify` derives. The `#[non_exhaustive]`
 > decision itself stands unchanged; only the witness / codegen mechanism this
 > ADR mentions is superseded.
+>
+> **Pending supersession (2026-07-25):** PR3 of the aozora 0.5.0
+> follow-through collapses the Aozora half of the IR to a single
+> `Aozora { kind, span, html }` variant per level, so the "every new notation
+> is a new variant" premise stops holding for Aozora constructs (it still
+> holds for the Markdown half). `#[non_exhaustive]` is retained; this ADR is
+> re-stated at that point. See [ADR-0021](0021-aozora-boundary-is-the-public-surface.md).
 
 ## Context
 

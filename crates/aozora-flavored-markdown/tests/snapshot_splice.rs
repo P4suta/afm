@@ -1,10 +1,10 @@
 //! Snapshot the post-splice HTML for a curated set of aozora-flavored-markdown sources.
 //!
-//! Sibling to `aozora-render`'s `snapshot_html_golden.rs` — that test
-//! pins the *standalone* renderer's `aozora-*` output; this one pins
-//! what aozora-flavored-markdown actually ships: comrak-wrapped HTML with the Aozora
-//! sentinels spliced in and the brand rewrite (`aozora-` → `aozora-md-`,
-//! ADR-0011) applied. A renderer or post-splice regression surfaces
+//! Sibling to the upstream renderer's own golden snapshots — those pin the
+//! *standalone* renderer's `aozora-*` output; this one pins what
+//! aozora-flavored-markdown actually ships: comrak-wrapped HTML with the
+//! Aozora sentinels spliced in and the brand rewrite (`aozora-` →
+//! `aozora-md-`, ADR-0011) applied. A renderer or post-splice regression surfaces
 //! here as a one-test `cargo insta` diff instead of an opaque
 //! `assert_eq!` mismatch buried in the integration suite.
 //!

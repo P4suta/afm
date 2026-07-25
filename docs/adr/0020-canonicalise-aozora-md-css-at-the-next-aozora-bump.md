@@ -1,15 +1,22 @@
 # 0020. Canonicalise the aozora-md CSS at the next aozora bump
 
-- Status: proposed
+- Status: proposed (scheduled — executed in the aozora 0.5.0 follow-through, PR7)
 - Date: 2026-06-22
 - Deciders: @P4suta
 - Tags: architecture, epub, css, deferred
+
+> **Scheduling note (2026-07-25):** the "next aozora bump" is 0.5.0. Steps 1–3
+> below land in PR7 of the 0.5.0 follow-through (see [ADR-0021](0021-aozora-boundary-is-the-public-surface.md));
+> `AOZORA_CLASSES` there grew from 19 to 80+ entries and includes the
+> `aozora-double-ruby` → `aozora-angle-quote` rename this ADR anticipated.
+> Step 4 is already done: the mdbook site was retired and the canonical themes
+> now live at the repo-root `theme/`.
 
 ## Context
 
 The EPUB generator vendors its own copy of the two `aozora-md-*` themes
 (`crates/aozora-flavored-markdown-epub/assets/aozora-md-{horizontal,vertical}.css`),
-while `aozora-flavored-markdown-book/theme/` ships a near-identical canonical
+while the repo-root `theme/` ships a near-identical canonical
 pair. That is byte duplication of CSS that must track the renderer's emitted
 classes. The ideal is a single owner: the crate that emits the classes also owns
 their stylesheet, and the EPUB generator consumes it through a normal crate
@@ -48,7 +55,7 @@ Defer CSS canonicalisation to the next `aozora` dependency bump. At that bump:
 3. Have `aozora-flavored-markdown-epub` (and any future PDF crate) enable
    `features = ["theme"]` and embed the consts, deleting its vendored
    `assets/*.css` copy.
-4. Re-point `aozora-flavored-markdown-book` at the same canonical source.
+4. Keep the repo-root `theme/` as that same canonical source (done).
 
 Until then (against published `aozora` 0.4.1), the EPUB crate keeps its vendored
 CSS copy — necessary for publishability regardless — guarded by a theme-coverage

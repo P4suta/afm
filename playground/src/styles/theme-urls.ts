@@ -1,11 +1,11 @@
 // Vite ?url imports resolve at build time to hashed asset URLs. The two
-// theme files live in the mdbook site (single source of truth — no
-// copy). Swapping `<link id="aozora-md-theme">.href` between them flips
-// the preview between vertical (tategaki) and horizontal layout
-// without re-running the wasm pipeline.
+// theme files live in the repo-root `theme/` directory (single source of
+// truth — no copy). Swapping `<link id="aozora-md-theme">.href` between
+// them flips the preview between vertical (tategaki) and horizontal
+// layout without re-running the wasm pipeline.
 
-import horizontalUrl from '../../../crates/aozora-flavored-markdown-book/theme/aozora-md-horizontal.css?url';
-import verticalUrl from '../../../crates/aozora-flavored-markdown-book/theme/aozora-md-vertical.css?url';
+import horizontalUrl from '../../../theme/aozora-md-horizontal.css?url';
+import verticalUrl from '../../../theme/aozora-md-vertical.css?url';
 
 export const THEME_URLS = {
   vertical: verticalUrl,

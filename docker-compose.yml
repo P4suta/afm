@@ -4,8 +4,6 @@
 #   dev        — interactive development (stable Rust only; no nightly)
 #   fuzz       — dev + nightly + cargo-fuzz + cargo-udeps
 #   ci         — fuzz superset; everything every recipe might invoke
-#   book       — mdbook serve / build
-#   browser    — Playwright (Chromium + WebKit) for M3+ browser tests
 #   playground — Vite dev server for the browser playground (port 5173)
 #
 # Volumes are named so cargo registry + target + sccache persist between runs.
@@ -112,7 +110,7 @@ services:
       - sccache:/cargo/sccache
 
   # VS Code devcontainer / GitHub Codespaces target. Same image as `ci` (every
-  # tool, incl. nightly + mdbook) so the in-container `just` path runs the full
+  # tool, incl. nightly) so the in-container `just` path runs the full
   # gate set directly — but with interactive settings and WITHOUT `CI=true`, so
   # it behaves like a dev box, not a CI runner. `AOZORA_MD_IN_CONTAINER=1` (baked into
   # the image) flips the Justfile to its no-docker-nesting mode.
@@ -135,38 +133,9 @@ services:
     tty: true
     stdin_open: true
 
-  book:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: book
-    image: aozora-flavored-markdown-book:local
-    working_dir: /workspace/crates/aozora-flavored-markdown-book
-    user: "${AOZORA_MD_UID:-1000}:${AOZORA_MD_GID:-1000}"  # see `dev` service
-    volumes:
-      - .:/workspace:cached
-    ports:
-      - "3000:3000"
-
-  browser:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: browser
-    image: aozora-md-browser:local
-    working_dir: /workspace
-    environment:
-      <<: *common-env
-      CI: "true"
-    volumes:
-      - .:/workspace:cached
-      - cargo-registry:/cargo/home/registry
-      - cargo-git:/cargo/home/git
-      - cargo-target:/cargo/target
-
   # Vite dev / preview server for the playground. Reuses the `dev` image
-  # (Node 22 + wasm-pack); `node_modules` lives in a named volume to avoid
-  # dragging npm's tree across the bind-mount boundary (slow on WSL).
+  # (bun + wasm-pack); `node_modules` lives in a named volume to avoid
+  # dragging the dependency tree across the bind-mount boundary (slow on WSL).
   playground:
     build:
       context: .

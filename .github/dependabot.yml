@@ -30,7 +30,7 @@ updates:
       - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: docker
-    # Bumps Dockerfile FROM pins (node, playwright). The `rust` base is
+    # Bumps Dockerfile FROM pins. The `rust` base is
     # pinned to the MSRV (= rust-toolchain.toml = 1.96.0); auto-bumping it
     # would silently advance the MSRV, so it is ignored — bump it in a
     # deliberate PR alongside rust-toolchain.toml / Cargo `rust-version`.

@@ -1,27 +1,25 @@
-//! Differential test — `aozora_flavored_markdown` vs `aozora-render`.
+//! Differential test — this crate's HTML vs the upstream renderer's.
 //!
-//! Both pipelines consume the same lexer output (`aozora::pipeline::lex_into_arena`)
-//! and the same per-node renderer (`aozora::render::render_node`), so on
-//! pure-青空文庫 input the *count and presence* of every `aozora-md-*` class
-//! token must match. Block structure differs (aozora-flavored-markdown wraps paragraphs
-//! through comrak; aozora-render emits its own `<p>` tags), so the
-//! differential is on histograms, not on byte equality.
+//! Both pipelines consume the same lexer output and the same per-construct
+//! renderer, so on pure-青空文庫 input the *count and presence* of every
+//! `aozora-md-*` class token must match. Block structure differs (this crate
+//! wraps paragraphs through comrak; upstream emits its own `<p>` tags), so
+//! the differential is on histograms, not on byte equality.
 //!
 //! What this differential catches:
 //!
-//! - **Drift between the two front doors.** A regression that flips a
-//!   class name in `aozora-render` breaks both sides in tandem; one
-//!   that only edits the aozora-md-side post-process surfaces as an
-//!   asymmetry.
+//! - **Drift between the two front doors.** A regression that flips a class
+//!   name upstream breaks both sides in tandem; one that only edits the
+//!   aozora-md-side post-process surfaces as an asymmetry.
 //! - **Class contract leakage.** Both renderers source their `aozora-md-*`
 //!   classes from the same pinned list (`AOZORA_MD_CLASSES` in
 //!   `aozora_flavored_markdown_test_support`). A renderer that emits an
 //!   unregistered class shows up here.
 //! - **Tier-A / Tier-B consistency.** Both renderers must satisfy the
 //!   no-bare-bracket and no-PUA-leak contracts on lexer-clean input.
-//! - **Serializer equivalence.** `aozora_flavored_markdown::serialize` is a thin
-//!   delegate to `aozora::render::serialize::serialize`; on the same
-//!   source they must produce identical bytes.
+//! - **Serializer equivalence.** `aozora_flavored_markdown::serialize` is a
+//!   thin delegate to the upstream serializer; on the same source they must
+//!   produce identical bytes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +57,7 @@ fn pure_aozora_fixtures() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// Render `src` through `aozora-render::html` (pure-aozora pipeline).
+/// Render `src` through the upstream HTML renderer (pure-aozora pipeline).
 fn aozora_only_render(src: &str) -> String {
     let arena = Arena::new();
     let lex_out = lex_into_arena(src, &arena);
@@ -68,9 +66,9 @@ fn aozora_only_render(src: &str) -> String {
 
 /// Tally every class token starting with `prefix` in `html`. The
 /// histogram key is the **stem** (the substring after `prefix`), so
-/// the `aozora-*` brand surface from `aozora-render` and the
-/// `aozora-md-*` brand from `aozora-flavored-markdown` can be compared shape-for-shape
-/// despite the different prefixes.
+/// the upstream `aozora-*` brand surface and the `aozora-md-*` brand from
+/// this crate can be compared shape-for-shape despite the different
+/// prefixes.
 fn class_stem_histogram(html: &str, prefix: &str) -> HashMap<String, usize> {
     let mut hist = HashMap::new();
     for token_run in html.split("class=\"").skip(1) {
@@ -115,9 +113,9 @@ fn both_renderers_agree_on_class_histogram_for_pure_aozora_input() {
 #[test]
 fn every_emitted_class_is_in_the_pinned_contract() {
     // The pinned list (`AOZORA_MD_CLASSES`) tracks the `aozora-md-*` stems
-    // aozora-flavored-markdown emits. The `aozora-*` brand from `aozora-render`
-    // is checked against the same stems with a `aozora-` prefix
-    // strip — same family of stems, different brand prefix.
+    // this crate emits. The `aozora-*` brand from the sibling renderer is
+    // checked against the same stems with a `aozora-` prefix strip — same
+    // family of stems, different brand prefix.
     let known: HashSet<&'static str> = AOZORA_MD_CLASSES.iter().copied().collect();
     let mut violations = Vec::new();
     for (label, src) in pure_aozora_fixtures() {
@@ -195,9 +193,9 @@ fn both_renderers_satisfy_tier_b_no_pua_leak() {
 
 #[test]
 fn aozora_flavored_markdown_serialize_matches_aozora_render_serialize() {
-    // aozora_flavored_markdown::serialize is a thin delegate to
-    // aozora::render::serialize::serialize, so the two must produce
-    // identical bytes for the same source.
+    // `aozora_flavored_markdown::serialize` is a thin delegate to the
+    // sibling serializer, so the two must produce identical bytes for the
+    // same source.
     for (label, src) in pure_aozora_fixtures() {
         let arena = Arena::new();
         let lex_out = lex_into_arena(src, &arena);

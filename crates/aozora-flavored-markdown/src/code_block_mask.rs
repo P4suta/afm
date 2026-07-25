@@ -3,16 +3,16 @@
 //!
 //! ## Why this exists
 //!
-//! `aozora_pipeline` recognises every `｜` / `《` / `》` / `［` / `］` /
+//! The sibling parser recognises every `｜` / `《` / `》` / `［` / `］` /
 //! `※` / `〔` / `〕` / `「` / `」` as a candidate trigger and rewrites
 //! it into a PUA sentinel before comrak ever sees the source. That is
 //! exactly what we want for prose; it is exactly what we *don't* want
 //! inside a fenced code block, where every byte should flow through
 //! to `<pre><code>` literally.
 //!
-//! `aozora_pipeline` is intentionally CommonMark-blind (ADR-0010),
-//! so the responsibility for teaching it about code-block context
-//! lives here. The pass:
+//! That parser is intentionally CommonMark-blind (ADR-0010), so the
+//! responsibility for teaching it about code-block context lives
+//! here. The pass:
 //!
 //! 1. Scans the source line-by-line and tracks fenced-code-block
 //!    state with the [`Phase`] machine below (CommonMark info-string
@@ -42,9 +42,9 @@
 //!
 //! ## Why not collide with `MASK_CHAR`?
 //!
-//! `aozora_pipeline`'s Phase 0 already scans for source-supplied
-//! PUA characters and emits a `Diagnostic::SourceContainsPua` for
-//! any encountered. We pre-scan for [`MASK_CHAR`] in the *original*
+//! The sibling parser already scans for source-supplied PUA
+//! characters and emits a `Diagnostic::SourceContainsPua` for any
+//! encountered. We pre-scan for [`MASK_CHAR`] in the *original*
 //! source and skip masking entirely if any is present, returning
 //! the source as a borrowed `Cow` and an empty originals list —
 //! that preserves the lexer's diagnostic on the user's pristine
@@ -54,15 +54,15 @@ use core::cmp::min;
 use std::borrow::Cow;
 
 /// Private-use code point used to stand in for an Aozora trigger
-/// character that lives inside a fenced code block. Distinct from
-/// `aozora::pipeline::INLINE_SENTINEL` (U+E001) and the three block
-/// sentinels (U+E002..U+E004), so the masking pass cannot collide
-/// with the lexer's own sentinels.
+/// character that lives inside a fenced code block. Distinct from the
+/// inline sentinel (U+E001) and the three block sentinels
+/// (U+E002..U+E004), so the masking pass cannot collide with the lexer's
+/// own sentinels.
 const MASK_CHAR: char = '\u{E000}';
 
-/// Every char `aozora_pipeline` treats as a recogniser trigger.
-/// Mirrors the upstream Phase 1 event tokeniser; if the upstream
-/// list grows, this list must follow.
+/// Every char the sibling parser treats as a recogniser trigger.
+/// Mirrors its tokeniser; if the upstream list grows, this one must
+/// follow.
 const AOZORA_TRIGGERS: &[char] = &['｜', '《', '》', '［', '］', '※', '〔', '〕', '「', '」'];
 
 /// Mask every Aozora trigger character that appears inside a fenced
@@ -280,8 +280,8 @@ mod tests {
     fn pre_existing_mask_char_disables_masking() {
         // If the source already contains MASK_CHAR, we cannot
         // distinguish a masked trigger from a literal PUA char on the
-        // unmask side, so we bail out and leave aozora-pipeline's own
-        // PUA-collision diagnostic in charge.
+        // unmask side, so we bail out and leave the sibling parser's
+        // own PUA-collision diagnostic in charge.
         let src = "\u{E000}\n```\n｜trigger\n```";
         let (cow, originals) = mask_code_block_triggers(src);
         assert!(matches!(cow, Cow::Borrowed(_)));
@@ -361,9 +361,9 @@ mod proptests {
     //! The unit tests above pin a finite list of hand-curated shapes
     //! (fenced code, tilde fence, indented fence, CRLF, pre-existing
     //! mask char). Property tests close the gap by drawing arbitrary
-    //! Aozora-shaped and CommonMark-adversarial input from
-    //! [`aozora_proptest`] and asserting four cross-cutting invariants
-    //! that must hold *regardless* of the input's shape:
+    //! Aozora-shaped and CommonMark-adversarial input from the shared
+    //! generators and asserting four cross-cutting invariants that
+    //! must hold *regardless* of the input's shape:
     //!
     //! 1. **No-fence identity** — when the source contains neither
     //!    backticks nor tildes, masking is a no-op (returns

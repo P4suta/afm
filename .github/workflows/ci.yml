@@ -35,7 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      book: ${{ steps.filter.outputs.book }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
@@ -44,7 +43,6 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
-              - '!crates/aozora-flavored-markdown-book/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -57,14 +55,6 @@ jobs:
               - 'upstream/**'
               - 'playground/**'
               - '.github/**'
-            book:
-              # The CI `book` job builds the book content with mdbook inside the
-              # cached `ci` image. Its inputs are the book crate, the Dockerfile
-              # (the ci image carries mdbook), and this workflow's own book job —
-              # NOT a pure rust source change. Keep in sync with the `book` job `if`.
-              - 'crates/aozora-flavored-markdown-book/**'
-              - 'Dockerfile'
-              - '.github/workflows/ci.yml'
 
   msrv:
     # Verify that the pinned MSRV (1.96.0, see `rust-toolchain.toml`)
@@ -171,7 +161,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fmt-check, clippy, typos, strict-code]
+        target: [fmt-check, clippy, typos, strict-code, comment-discipline]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: ./.github/actions/setup-dev-image
@@ -256,22 +246,6 @@ jobs:
       - uses: ./.github/actions/setup-dev-image
       - run: just ${{ matrix.target }}
 
-  book:
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.book == 'true'
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: ./.github/actions/setup-dev-image
-      # Build the book through the cached `ci` image (it carries mdbook,
-      # copied from the cargo-tools stage), instead of building the lean
-      # `book` image from scratch — that rebuilt cargo-tools (`cargo install`
-      # of cargo-binstall + bacon from source) on every run, ~34 min. This
-      # also actually validates the book *content* compiles, not just that
-      # the image builds. setup-dev-image already sets AOZORA_MD_UID/GID=0 so
-      # mdbook can write `book/` into the runner-owned checkout.
-      - run: docker compose run --rm --no-TTY ci sh -c 'cd crates/aozora-flavored-markdown-book && mdbook build'
-
   # Aggregate gate. Branch protection requires only this job (plus the CodeQL
   # contexts), so adding / removing / renaming a job above never needs a branch
   # protection settings change. Fails iff a job that actually RAN failed or was
@@ -294,7 +268,6 @@ jobs:
       - spec
       - coverage
       - audit
-      - book
     runs-on: ubuntu-latest
     steps:
       - name: Gate on CI job results

@@ -1,4 +1,4 @@
-//! Fuzz target — `aozora::encoding::decode_sjis` + full render pipeline.
+//! Fuzz target — Shift_JIS decoding + full render pipeline.
 //!
 //! Arbitrary bytes are fed into `decode_sjis`. Failures (non-SJIS
 //! input) skip this iteration. Successful decodes are pushed through

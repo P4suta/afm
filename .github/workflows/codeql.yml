@@ -17,8 +17,8 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 
-# Scans Rust (the workspace) and TypeScript/JavaScript (aozora-flavored-markdown-wasm + the
-# aozora-flavored-markdown-book theme). Vendored comrak is excluded via codeql-config.yml.
+# Scans Rust (the workspace) and TypeScript/JavaScript (aozora-flavored-markdown-wasm
+# + the playground). Vendored comrak is excluded via codeql-config.yml.
 jobs:
   codeql:
     name: codeql (${{ matrix.language }})

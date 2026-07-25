@@ -3,8 +3,8 @@
 # image; the host toolchain is never invoked. Layered so upstream-sync /
 # dependency bumps rebuild a minimal surface.
 #
-# Base images (rust, playwright) are pinned by immutable digest; Dependabot
-# bumps tag + digest together weekly. Refresh by hand with
+# The base image is pinned by immutable digest; Dependabot bumps tag +
+# digest together weekly. Refresh by hand with
 # `docker buildx imagetools inspect <tag>`. NODE_VERSION is an ARG, not a
 # pinned FROM — it only parameterises an apt source URL in the node-base stage.
 ARG NODE_VERSION=22
@@ -68,8 +68,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Tier A — yearly-churn tools (longest-cached layer).
 RUN cargo binstall --no-confirm --locked --root /usr/local \
-        mdbook \
-        mdbook-linkcheck \
         typos-cli
 
 # Tier B — quarterly-churn test infrastructure.
@@ -125,8 +123,7 @@ RUN curl -fsSL \
         "wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack"
 
 # bun — JavaScript runtime + package manager for the playground (TS edits,
-# Vite dev server, production build). Node 22 stays in the dev image for
-# the book/playwright services that still consume npm tooling. The pin
+# Vite dev server, production build). The pin
 # below must agree with `playground/package.json` "packageManager" and
 # `.github/workflows/docs.yml` setup-bun `bun-version:` — `just verify-
 # version-pins` is the mechanical gate that catches drift.
@@ -140,7 +137,7 @@ RUN curl -fsSL \
     && rm -rf /tmp/bun.zip /tmp/bun-linux-x64
 
 ########################################################################
-# Stage: node — Node.js 22 for mdbook plugins & Playwright (used by book/browser)
+# Stage: node — Node.js 22, the JS runtime the dev image builds on
 ########################################################################
 FROM toolchain AS node-base
 
@@ -229,33 +226,3 @@ USER dev
 # jobs) carries every tool every recipe might invoke.
 ########################################################################
 FROM fuzz AS ci
-
-########################################################################
-# Stage: book — lean image for mdbook build / serve
-########################################################################
-FROM node-base AS book
-
-COPY --from=cargo-tools /usr/local/bin/mdbook /usr/local/bin/mdbook
-COPY --from=cargo-tools /usr/local/bin/mdbook-linkcheck /usr/local/bin/mdbook-linkcheck
-
-# Non-root `dev` user (book is FROM node-base, so it recreates it) — keeps
-# mdbook output in the bind mount host-owned.
-ARG UID=1000
-ARG GID=1000
-RUN groupadd --gid "${GID}" dev \
-    && useradd --uid "${UID}" --gid "${GID}" --create-home --shell /bin/bash dev
-ENV HOME=/home/dev
-
-WORKDIR /workspace/crates/aozora-flavored-markdown-book
-USER dev
-EXPOSE 3000
-CMD ["mdbook", "serve", "--hostname", "0.0.0.0", "--port", "3000"]
-
-########################################################################
-# Stage: browser — Playwright with Chromium + WebKit. Digest-pinned (see header).
-########################################################################
-# mcr.microsoft.com/playwright:v1.61.0-jammy (digest pinned; tag kept for humans / Dependabot)
-FROM mcr.microsoft.com/playwright:v1.61.0-jammy@sha256:264136758e43332108f6420f82c47f639f619ca65301065ceade677763f477ec AS browser
-
-WORKDIR /workspace
-CMD ["bash"]
