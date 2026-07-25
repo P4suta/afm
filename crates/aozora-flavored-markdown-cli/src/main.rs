@@ -1,12 +1,9 @@
-//! `aozora-flavored-markdown` — command-line interface.
+//! `aozora-flavored-markdown` — command-line interface. `--help` lists the
+//! sub-commands.
 //!
-//! Sub-commands:
-//!   - `aozora-flavored-markdown render <input>`: render an aozora-flavored-markdown (.md) file to HTML on stdout.
-//!   - `aozora-flavored-markdown check <input>`:  parse and surface diagnostics only; no rendering.
-//!
-//! `<input>` is a file path, or `-` to read from standard input. Input bytes may
-//! be UTF-8 (default) or Shift_JIS (with `--encoding sjis`) to read original
-//! Aozora Bunko .txt distributions without pre-conversion.
+//! Input is a file path or `-` for stdin, decoded as UTF-8 or — with
+//! `--encoding sjis` — Shift_JIS, so original Aozora Bunko `.txt`
+//! distributions need no pre-conversion.
 
 #![forbid(unsafe_code)]
 
@@ -112,9 +109,9 @@ enum DiagFormat {
     Json,
 }
 
-/// Where a stream of diagnostics is written. `render` owns stdout (HTML), so
-/// its JSON diagnostics go to stderr; `check` has no stdout payload, so its
-/// JSON goes to stdout where `jq` can reach it. Human-format always uses stderr.
+/// `render` owns stdout (the HTML), so its JSON diagnostics go to stderr;
+/// `check` has no stdout payload, so its JSON goes where `jq` can reach it.
+/// Human format always uses stderr.
 #[derive(Copy, Clone, Debug)]
 enum DiagStream {
     Stdout,
@@ -130,8 +127,7 @@ impl DiagStream {
     }
 }
 
-/// Where rendered HTML goes. Resolved from `--output`; `None` and `-` both
-/// mean stdout.
+/// Resolved from `--output`; `None` and `-` both mean stdout.
 #[derive(Debug)]
 enum OutputSink {
     Stdout,
@@ -147,9 +143,8 @@ impl OutputSink {
     }
 }
 
-/// Resolved inputs for one render/check pass. Carrying these in a struct
-/// (rather than a fistful of positional args) keeps the shared pipeline under
-/// clippy's argument-count and bool-parameter limits as more flags land.
+/// A struct rather than positional args, so the shared pipeline stays under
+/// clippy's argument-count and bool-parameter limits as flags land.
 #[derive(Debug)]
 struct PipelineArgs {
     input: PathBuf,
@@ -161,9 +156,8 @@ struct PipelineArgs {
     format: DiagFormat,
 }
 
-/// The `aozora-md.diagnostics.v1` envelope — the stable JSON contract for tooling.
-/// See ADR-0012. Fields are additive-only within `v1`; a breaking change bumps
-/// the `schema` discriminant.
+/// The stable JSON contract for tooling (ADR-0012). Additive-only within
+/// `v1`; a breaking change bumps the `schema` discriminant.
 #[derive(Debug, serde::Serialize)]
 struct DiagnosticReport {
     schema: &'static str,
@@ -172,19 +166,14 @@ struct DiagnosticReport {
 
 #[derive(Debug, serde::Serialize)]
 struct DiagnosticJson {
-    /// Stable machine-readable code string.
     code: &'static str,
-    /// `error` / `warning` / `note` (serialised from [`Severity`]).
     severity: Severity,
-    /// `source` (user input) / `internal` (pipeline bug).
     source: DiagnosticSource,
-    /// Human-readable message. Not part of the stability contract.
+    /// **Not** part of the stability contract.
     message: String,
-    /// Byte-offset span into the (decoded) source.
     span: Span,
-    /// 1-based line of `span.start`.
     line: u32,
-    /// 1-based character column of `span.start`.
+    /// 1-based, and a *character* column.
     column: u32,
 }
 
@@ -214,18 +203,17 @@ impl DiagnosticReport {
     }
 }
 
-/// CLI-local adapter that renders an aozora-flavored-markdown [`Diagnostic`] through miette's
-/// graphical handler. The orphan rule forbids `impl miette::Diagnostic` on the
-/// foreign aozora-flavored-markdown type directly, so we carry the data miette needs here.
+/// The orphan rule forbids `impl miette::Diagnostic` on the library's own
+/// type, so this carries what miette's graphical handler needs.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 struct CliDiagnostic {
     code: &'static str,
     severity: Severity,
     message: String,
-    /// The labelled source. `None` for `internal` diagnostics or when the span
-    /// is degenerate / out of bounds — those render as a header + message with
-    /// no snippet (and avoid materialising a huge source, e.g. `source_too_large`).
+    /// `None` for an `internal` diagnostic or a degenerate span: those render
+    /// as header + message, which also avoids materialising a huge source for
+    /// something like `source_too_large`.
     source_code: Option<miette::NamedSource<String>>,
     /// `(start, len)` byte range of the caret, present iff `source_code` is.
     label: Option<(usize, usize)>,
@@ -321,8 +309,7 @@ fn run() -> Result<ExitCode> {
     run_pipeline(&args)
 }
 
-/// Write a shell completion script for `shell` to stdout. The script is
-/// generated from the canonical `Cli` definition, so it never drifts.
+/// Generated from the canonical `Cli` definition, so it cannot drift.
 fn generate_completions(shell: clap_complete::Shell) -> ExitCode {
     let mut cmd = Cli::command();
     clap_complete::generate(
@@ -334,8 +321,7 @@ fn generate_completions(shell: clap_complete::Shell) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Write the roff man page to stdout. Driven by the canonical `Cli` so the
-/// packaging step (`cargo xtask gen-man`) renders from a single source.
+/// Also driven by `Cli`, so packaging renders from one source.
 fn render_man() -> Result<ExitCode> {
     clap_mangen::Man::new(Cli::command())
         .render(&mut io::stdout())
@@ -344,8 +330,7 @@ fn render_man() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Configure the tracing subscriber. An explicit `RUST_LOG` always wins;
-/// otherwise the `-v`/`-q` count picks a default level.
+/// An explicit `RUST_LOG` always wins over `-v` / `-q`.
 fn init_tracing(verbose: u8, quiet: u8) {
     let filter = if env::var_os("RUST_LOG").is_some() {
         tracing_subscriber::EnvFilter::from_default_env()
@@ -358,8 +343,7 @@ fn init_tracing(verbose: u8, quiet: u8) {
         .init();
 }
 
-/// Map the net `-v`/`-q` count to a tracing level. Default (0) stays `warn`,
-/// matching the historical behaviour.
+/// The default (0) stays `warn`.
 fn verbosity_level(verbose: u8, quiet: u8) -> &'static str {
     match i16::from(verbose) - i16::from(quiet) {
         ..=-1 => "error",
@@ -370,9 +354,8 @@ fn verbosity_level(verbose: u8, quiet: u8) -> &'static str {
     }
 }
 
-/// Decide whether to colorize diagnostics. An explicit `--color always`/`never`
-/// wins; under `auto` we honor `NO_COLOR`, then `CLICOLOR_FORCE`, then whether
-/// stderr is a terminal.
+/// Under `auto`: `NO_COLOR`, then `CLICOLOR_FORCE`, then whether stderr is a
+/// terminal.
 fn resolve_color(choice: ColorChoice) -> bool {
     match choice {
         ColorChoice::Always => true,
@@ -389,8 +372,8 @@ fn resolve_color(choice: ColorChoice) -> bool {
     }
 }
 
-/// Install the miette report hook so error reports honor the resolved color
-/// choice instead of miette's own TTY auto-detection.
+/// So error reports honour the resolved colour choice rather than miette's
+/// own TTY detection.
 fn install_diagnostic_hook(color: bool) -> Result<()> {
     miette::set_hook(Box::new(move |_| {
         Box::new(miette::MietteHandlerOpts::new().color(color).build())
@@ -398,9 +381,8 @@ fn install_diagnostic_hook(color: bool) -> Result<()> {
     .map_err(|e| miette::miette!("診断フォーマッタを初期化できません: {e}"))
 }
 
-/// Read → render → report. Shared by `render` and `check`; the only difference
-/// is whether HTML reaches the output sink on success. Returns exit code 2 when
-/// `--strict` promotes a lexer diagnostic to an error, otherwise 0.
+/// Shared by `render` and `check`, which differ only in whether HTML reaches
+/// the sink. Exit code 2 when `--strict` promotes a diagnostic to an error.
 fn run_pipeline(args: &PipelineArgs) -> Result<ExitCode> {
     let source = read_input(&args.input, args.encoding)?;
     let options = Options::default();
@@ -441,7 +423,7 @@ fn run_pipeline(args: &PipelineArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Map a byte offset into `source` to a 1-based (line, character-column) pair.
+/// A 1-based (line, character-column) pair.
 fn byte_offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
     let offset = offset as usize;
     let mut line = 1u32;
@@ -473,8 +455,7 @@ fn write_html(sink: &OutputSink, html: &str) -> Result<()> {
     }
 }
 
-/// Read the input as raw bytes — from a file path, or from standard input when
-/// `input` is `-`. Encoding-agnostic; `read_input` performs the decode.
+/// Bytes only; `read_input` performs the decode.
 fn read_bytes(input: &Path) -> Result<Vec<u8>> {
     if input == Path::new("-") {
         let mut buf = Vec::new();
@@ -501,24 +482,15 @@ fn read_input(input: &Path, encoding: InputEncoding) -> Result<String> {
     }
 }
 
-/// The decoded source plus a display name, used to label diagnostics.
 #[derive(Copy, Clone, Debug)]
 struct Input<'a> {
-    /// Display name for the source (`<stdin>` or the file path).
+    /// `<stdin>` or the file path, for labelling diagnostics.
     name: &'a str,
-    /// The decoded source text.
     text: &'a str,
 }
 
-/// Emit diagnostics in the requested format on the chosen stream.
-///
-/// Human format renders each diagnostic graphically via miette (severity, code,
-/// message, and a source snippet with a caret), honoring the resolved `--color`
-/// choice; nothing is printed when there are none. JSON format always prints the
-/// stable `aozora-md.diagnostics.v1` envelope (an empty array on clean input) so
-/// tooling can rely on parseable output. Either way the stable `aozora::…` codes
-/// let language servers and CI gates key on identifiers rather than free-form
-/// messages.
+/// Human format prints nothing on clean input; JSON always prints the
+/// envelope, empty array included, so tooling can rely on parseable output.
 fn emit_diagnostics(
     diagnostics: &[Diagnostic],
     input: Input<'_>,

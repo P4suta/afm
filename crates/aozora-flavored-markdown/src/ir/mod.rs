@@ -23,51 +23,17 @@
 //! assert!(ruby_rendered);
 //! ```
 //!
-//! # Coverage
+//! Two context rules follow the HTML splicer rather than the notation: a
+//! heading hint (`［＃「X」は大見出し］`) promotes its host paragraph to
+//! [`IrBlock::Heading`] at any nesting depth, and an annotation inside a
+//! heading body is dropped because the splicer drops it (Tier C).
 //!
-//! - **Markdown side**: paragraphs, headings, lists, blockquotes,
-//!   fenced code, tables, thematic breaks, images. Inline runs
-//!   preserve `Strong`, `Emphasis`, `Link`, `Image`, `Code`,
-//!   `LineBreak`, and verbatim `Text`.
-//! - **Aozora side**: every notation, as [`IrInline::Aozora`] or
-//!   [`IrBlock::Aozora`] carrying its tag, source span, and HTML fragment.
-//!   Two context rules follow the HTML splicer rather than the notation:
-//!   a heading hint (`［＃「X」は大見出し］`) promotes its host paragraph
-//!   to [`IrBlock::Heading`] — at any nesting depth, so a hint inside a
-//!   blockquote promotes there too — and an annotation inside a heading
-//!   body is dropped, because the splicer drops it (Tier C).
-//!
-//! # Module map
-//!
-//! - `types` — public IR enum/struct definitions (`IrDocument`,
-//!   `IrBlock`, `IrInline`, `Range`, ...).
-//! - This file (`mod.rs`) — the stateful walker (`IrWalker`,
-//!   `StreamingIrBuilder`) plus the single-descent `ParaScan` dispatch,
-//!   the notation-tag mapping, and the public entry points (`build_ir`,
-//!   `StreamingIrBuilder::walk_block`).
-//!
-//! # Architecture
-//!
-//! The walker is built from two small primitives:
-//!
-//! 1. `crate::constructs::ConstructCursor` — the shared cursor over the
-//!    replacement table. The HTML splicer (`crate::ast_splice`) and this
-//!    builder both consume the same source-order sequence of
-//!    constructs; the cursor abstraction keeps them in lockstep.
-//! 2. `ParaScan` — single-descent paragraph profile. One walk per
-//!    paragraph computes both the sole-block-sentinel test and the
-//!    heading-hint lookahead at once, eliminating the two-scan
-//!    redundancy that a naive translation of the HTML splicer would
-//!    have.
-//!
-//! Both walkers read each notation's fragment off the same construct
-//! table, so the IR's `html` and the document's HTML cannot drift apart on
-//! what a notation *renders to*.
-//! Whether a notation renders at all is the other half of that agreement,
-//! and it is context-dependent (heading-hint promotion, Tier-C suppression
-//! inside headings); this walker reproduces those decisions, and
-//! `tests/ir_aozora.rs` pins the result by looking for every projected
-//! fragment in the rendered document.
+//! Both walkers read each notation's fragment off the same construct table,
+//! so the IR's `html` and the document's HTML cannot drift apart on what a
+//! notation renders to. Whether it renders *at all* is the other half of
+//! that agreement, and is context-dependent; this walker reproduces the
+//! splicer's decisions, and `tests/ir_aozora.rs` pins the result by looking
+//! for every projected fragment in the rendered document.
 
 mod types;
 
@@ -91,18 +57,11 @@ use crate::constructs::{
 // Walker entry points
 // ===================================================================
 
-/// Walk a comrak AST root and project it to [`IrDocument`].
-///
-/// `constructs` is the source-coordinate replacement table. Every PUA
-/// sentinel in the comrak text is projected to an [`IrBlock::Aozora`] /
-/// [`IrInline::Aozora`]; an empty table degrades to markdown-only
-/// behaviour (used by `Options::aozora_enabled = false`).
+/// An empty `constructs` table degrades to markdown-only projection.
 ///
 /// A sentinel that landed in a literal markdown context (inline code,
 /// link/image destination) projects back to its original Aozora source
-/// instead of leaking the PUA char and desyncing the cursor. A construct
-/// carries its source range only when the table could show that range
-/// addresses the caller's own text.
+/// instead of leaking the PUA char and desyncing the cursor.
 pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> IrDocument {
     let mut walker = IrWalker::new(constructs.cursor(), Vec::new());
     walker.walk_root(root);
@@ -113,38 +72,22 @@ pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> Ir
 
 /// Stateful per-block IR builder for streaming mode.
 ///
-/// Builds the construct table once at construction time and threads a
-/// cursor position across successive `walk_block` calls so multi-block
-/// inputs preserve the source order. The position lives in
-/// this struct (not in the walker) so individual `walk_block` calls
-/// can be issued lazily — aozora-flavored-markdown-obsidian's chunked-cancellation path
-/// (ADR-0009) uses this to checkpoint between blocks.
-///
-/// The open-container stack threads across calls too, so a container that
-/// opens in one top-level block and closes in a later one still emits a
-/// matched open/close pair. A container the source never closes is drained
-/// by [`StreamingIrBuilder::finish`], which the caller invokes when it runs
-/// out of blocks — the streaming analogue of the whole-document walker's
-/// end-of-document pass. Skipping it leaves the emitted `html` fragments
-/// with an unmatched opening tag.
+/// The cursor position and open-container stack live here rather than in the
+/// walker, so `walk_block` calls can be issued lazily — the obsidian
+/// chunked-cancellation path (ADR-0009) checkpoints between blocks — while a
+/// container that opens in one block and closes in a later one still emits a
+/// matched pair.
 #[derive(Debug)]
 pub struct StreamingIrBuilder {
     constructs: Constructs,
-    /// How many constructs the previous `walk_block` calls consumed.
     consumed: usize,
-    /// The markup each container the blocks walked so far left open closes
-    /// with, innermost last.
+    /// Closing markup for each still-open container, innermost last.
     open: Vec<String>,
 }
 
 impl StreamingIrBuilder {
-    /// Parse `source` and build the construct table once.
-    ///
-    /// `source` is the text handed to the parser: the constructs' byte
-    /// ranges are measured against it, and it is where a literal-context
-    /// sentinel (inline code, link/image URL) reads back the 青空文庫
-    /// source the author wrote. The spans this builder emits are therefore
-    /// offsets into `source` (see [`crate::ir`]).
+    /// `source` is the text handed to the parser, so the spans this builder
+    /// emits are offsets into it.
     #[must_use]
     pub fn new(source: &str) -> Self {
         Self {
@@ -154,19 +97,15 @@ impl StreamingIrBuilder {
         }
     }
 
-    /// The construct table this builder walks. The in-crate streaming
-    /// driver reads the text comrak should parse from it, and hands it to
-    /// the HTML splicer, so one table serves both outputs of a call.
+    /// The in-crate streaming driver hands this same table to the HTML
+    /// splicer, so one table serves both outputs of a call.
     pub(crate) fn constructs(&self) -> &Constructs {
         &self.constructs
     }
 
-    /// The text a caller must hand to `comrak::parse_document`: the source
-    /// with every 青空文庫 construct replaced by one sentinel.
-    ///
-    /// Walking blocks of any other parse would step the cursor out of
-    /// lockstep with the table, so this is the only text this builder
-    /// projects against.
+    /// The text a caller must hand to `comrak::parse_document`. Walking
+    /// blocks of any other parse would step the cursor out of lockstep with
+    /// the table.
     #[must_use]
     pub fn text(&self) -> &str {
         self.constructs.text()
@@ -174,11 +113,6 @@ impl StreamingIrBuilder {
 
     /// Walk a single comrak block, advancing the shared cursor.
     pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
-        // Resume the cursor where the previous call left it and move the
-        // open-container count into a freshly-constructed walker for the
-        // duration of this call, then take both back. The walker's `top`
-        // buffer is scoped per-call; the cursor position and the count are
-        // the state that threads across calls.
         let cursor = self.constructs.cursor_at(self.consumed);
         let mut walker = IrWalker::new(cursor, mem::take(&mut self.open));
         walker.walk_top(node);
@@ -188,15 +122,11 @@ impl StreamingIrBuilder {
         blocks
     }
 
-    /// End-of-document drain: one synthesised close block per container the
-    /// source left open, outermost last (LIFO), matching what the HTML
-    /// splicer appends to the document in the same situation.
-    ///
-    /// Call it after the last [`Self::walk_block`]. Without it the emitted
-    /// fragments carry an opening `<div>` with no `</div>`, so a consumer
-    /// concatenating them — aozora-flavored-markdown-obsidian's
-    /// chunked-cancellation path (ADR-0009) inserts them one by one — would
-    /// leave the container swallowing everything that follows.
+    /// End-of-document drain, matching what the HTML splicer appends in the
+    /// same situation. **Call it after the last [`Self::walk_block`]** —
+    /// without it the emitted fragments carry an opening `<div>` with no
+    /// `</div>`, and a consumer concatenating them leaves the container
+    /// swallowing everything that follows.
     #[must_use]
     pub fn finish(self) -> Vec<IrBlock> {
         drain_open_containers(self.open)
@@ -207,54 +137,31 @@ impl StreamingIrBuilder {
 // Walker
 // ===================================================================
 
-/// Tree builder that consumes comrak nodes plus a sentinel cursor and
-/// emits `IrBlock`s.
+/// Mirrors `crate::ast_splice`'s splicer state — same cursor, same
+/// balanced-container model, same orphan-close drain — differing only in the
+/// emit target (`Vec<IrBlock>` vs. a rewritten comrak AST).
 ///
-/// The state mirrors `crate::ast_splice`'s splicer for the HTML
-/// side: same cursor, same balanced-container model, same
-/// orphan-close drain at end-of-document. They differ only in the
-/// emit target (rewritten comrak AST vs. `Vec<IrBlock>`).
-///
-/// Lifetime: `'src` is the arena/source lifetime every borrowed upstream
-/// payload references — shared with the owned cursor's payloads and the
-/// heading-hint borrows in [`ParagraphAction::HeadingHint`].
-///
-/// The comrak AST's own lifetime is **independent** (it lives in a
-/// different `comrak::Arena`) and elided through `&AstNode<'_>` in
-/// every method signature, so a per-method `<'a>` does not have to
-/// shadow the struct's `'src`.
+/// The comrak AST's lifetime is independent of `'t` (it lives in a different
+/// arena) and stays elided, so a per-method `<'a>` need not shadow it.
 struct IrWalker<'t> {
     cursor: ConstructCursor<'t>,
-    /// Blocks gathered so far, in document order.
     top: Vec<IrBlock>,
-    /// The markup each currently-open container closes with, innermost
-    /// last — see the splicer's `open_containers`, which this mirrors.
+    /// Closing markup for each still-open container, innermost last.
     open: Vec<String>,
-    /// Number of `Heading` ancestors the walker is currently inside —
-    /// the mirror of the splicer's `in_heading_depth`, and used for the
-    /// same reason: annotation-shaped notations are dropped from a
-    /// heading body (Tier C), so the IR must drop them too or it would
-    /// carry a fragment the rendered HTML does not have.
+    /// Annotation-shaped notations are dropped from a heading body
+    /// (Tier C), so the IR must drop them too or carry a fragment the
+    /// rendered HTML does not have.
     in_heading: u32,
-    /// Current block/inline nesting depth, bounded by [`MAX_AST_DEPTH`]
-    /// so pathologically deep input cannot overflow the recursive
-    /// `collect_blocks` / `collect_inlines` descent.
     depth: usize,
 }
 
-/// Maximum IR block/inline nesting depth.
-///
 /// comrak can emit arbitrarily deep trees from a small input (nested
-/// blockquotes — `handle_blockquote` carries no cap — nested list items,
-/// nested inline emphasis), and the IR builder's `collect_blocks` /
-/// `collect_inlines` recurse over them. Without a bound a crafted input
-/// would overflow the call stack and abort the process under the release
-/// profile's `panic = "abort"` — a crash on untrusted input that
-/// `SECURITY.md` scopes IN as a vulnerability. 256 is far beyond any real
-/// document (comrak itself caps list nesting at 100) while leaving the OS
-/// stack comfortable; beyond it the IR truncates the over-deep subtree.
-/// The HTML splice path is iterative ([`crate::ast_splice`]) and stays
-/// complete regardless.
+/// blockquotes carry no cap), and `collect_blocks` / `collect_inlines`
+/// recurse over them. Without a bound a crafted input overflows the call
+/// stack and aborts under `panic = "abort"` — a crash on untrusted input
+/// `SECURITY.md` scopes IN. 256 is far beyond any real document (comrak caps
+/// list nesting at 100); past it the IR truncates the over-deep subtree. The
+/// HTML splice path is iterative and stays complete regardless.
 const MAX_AST_DEPTH: usize = 256;
 
 impl<'t> IrWalker<'t> {
@@ -268,18 +175,15 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    /// Close any container the source left open (mirror of the HTML
-    /// splicer's end-of-document orphan-close pass) and return the
-    /// document blocks. Used by `build_ir`.
+    /// Whole-document exit: drains what the source left open.
     fn finish(mut self) -> Vec<IrBlock> {
         let drained = drain_open_containers(mem::take(&mut self.open));
         self.top.extend(drained);
         self.top
     }
 
-    /// Return the blocks plus the cursor and open-container count, so a
-    /// streaming caller can thread them into the next per-block walk.
-    /// Used by [`StreamingIrBuilder`].
+    /// Streaming exit: hands back the state [`StreamingIrBuilder`] threads
+    /// into the next per-block walk.
     fn into_parts(self) -> (Vec<IrBlock>, ConstructCursor<'t>, Vec<String>) {
         (self.top, self.cursor, self.open)
     }
@@ -296,9 +200,8 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    /// Run a single descent over `node`'s text descendants, returning
-    /// the most specific paragraph action (sole block sentinel or
-    /// heading hint promotion) supported by the registry lookahead.
+    /// One descent over the text descendants, returning the most specific
+    /// action the lookahead supports.
     fn classify_paragraph<'a>(&self, node: &'a AstNode<'a>) -> Option<ParagraphAction> {
         if let Some(kind) = paragraph_sole_block_sentinel(node) {
             return Some(ParagraphAction::BlockSentinel(kind));
@@ -557,13 +460,8 @@ impl<'t> IrWalker<'t> {
         out
     }
 
-    /// A code block's text, with any sentinel in it written back to the
-    /// source the author typed.
-    ///
-    /// Literal markdown, like an inline code span: the notation projects as
-    /// its own source and consumes its table entry, so later sentinels stay
-    /// in lockstep with the splice. Only an indented block can reach this —
-    /// a fenced one is masked before the lexer runs (ADR-0010).
+    /// Only an *indented* block reaches this — a fenced one is masked
+    /// before the lexer runs (ADR-0010).
     fn code_block_value(&mut self, literal: String) -> String {
         if literal.chars().any(is_sentinel_char) {
             return self.rewrite_literal_context(&literal);
@@ -647,12 +545,10 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    /// Rewrite each sentinel in `s` to the original Aozora source the
-    /// lexer collapsed into it, leaving non-sentinel chars untouched, and
-    /// advancing the cursor once per sentinel so later entries stay in
-    /// lockstep. Used for literal markdown contexts (inline code, link /
-    /// image URLs) where a notation must surface as its source text rather
-    /// than an interpreted IR node. Mirrors
+    /// Literal markdown contexts (inline code, link / image URLs), where a
+    /// notation must surface as its source text rather than an interpreted
+    /// IR node. Consumes one table entry per sentinel so later entries stay
+    /// in lockstep with the splice. Mirrors
     /// `crate::ast_splice::AstSplicer::rewrite_literal_context`.
     fn rewrite_literal_context(&mut self, s: &str) -> String {
         if !s.chars().any(is_sentinel_char) {
@@ -734,12 +630,8 @@ impl<'t> IrWalker<'t> {
     }
 }
 
-/// One close block per container the source left open. Shared by both
-/// drains ([`IrWalker::finish`] for the whole document,
-/// [`StreamingIrBuilder::finish`] for the per-block path) so the two cannot
-/// describe the same situation differently — and so a document that closed
-/// everything it opened, which is nearly all of them, never asks what a
-/// close renders to.
+/// Shared by both drains so the whole-document and per-block paths cannot
+/// describe the same situation differently.
 fn drain_open_containers(open: Vec<String>) -> Vec<IrBlock> {
     // Innermost first, so the tags nest the way the source opened them.
     open.into_iter()
@@ -797,12 +689,9 @@ enum ParagraphAction {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the pure helpers the walker composes.
-    //!
     //! The notation-tag map is exercised against the real lexer rather than
-    //! synthesised nodes: what matters is that the tag a reader sees in the
-    //! IR matches the notation they typed, and only the lexer can say which
-    //! construct a given piece of source resolves to.
+    //! synthesised nodes: only the lexer can say which construct a given
+    //! piece of source resolves to.
 
     use super::*;
     use comrak::nodes::LineColumn;

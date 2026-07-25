@@ -39,12 +39,9 @@ fn main() -> miette::Result<()> {
     run(Cli::parse())
 }
 
-/// Dispatch a parsed [`Cli`] to the library.
-///
 /// # Errors
 ///
-/// Propagates any [`aozora_flavored_markdown_epub::Error`] raised while
-/// building the EPUB.
+/// Propagates whatever the library raises while building.
 fn run(cli: Cli) -> miette::Result<()> {
     match cli.cmd {
         Cmd::Build {

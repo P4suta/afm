@@ -1,26 +1,17 @@
-//! The canonical `aozora-md-*` stylesheets, as embedded strings.
+//! The canonical `aozora-md-*` stylesheets, embedded from the crate's
+//! `theme/` directory.
 //!
-//! The crate that emits the classes owns their CSS (ADR-0020): a
-//! downstream packager — the EPUB generator here, a PDF one later — embeds
-//! these constants instead of vendoring a copy that has to track
-//! [`AOZORA_MD_CLASSES`](crate::AOZORA_MD_CLASSES) by hand.
+//! The crate that emits the classes owns their CSS (ADR-0020), so a
+//! downstream packager embeds these constants instead of vendoring a copy it
+//! must track by hand. Both stylesheets define the same class set — writing
+//! mode is the only difference — and apply under the `aozora-md-root` opt-in
+//! class, so a host swaps one for the other without touching its markup.
 //!
-//! Pure data behind the default-off `theme` feature, so a parser-only
-//! consumer pays nothing for it and the sources stay editable as plain
-//! `.css` files under the crate's `theme/` directory.
-//!
-//! Both stylesheets define the same class set — the writing mode is the
-//! only difference — so a host page can swap one for the other without
-//! touching its markup. Styling applies under the `aozora-md-root` opt-in
-//! class, which the host puts on the element wrapping the rendered HTML.
-//!
-//! The coverage these files owe [`AOZORA_MD_CLASSES`](crate::AOZORA_MD_CLASSES)
-//! is tested against the parser this crate was released with, and the
-//! dependency on it is a caret range. A semver-compatible parser release that
-//! adds a class will reach the rendered HTML before these stylesheets have a
-//! rule for it, so that class renders unstyled until this crate bumps
-//! (ADR-0020). Host CSS of your own is the way to cover the gap in the
-//! meantime.
+//! Coverage is tested against the parser this crate was released with, and
+//! that dependency is a caret range: a semver-compatible parser release that
+//! adds a class reaches the rendered HTML before these files have a rule for
+//! it, and that class renders unstyled until this crate bumps. Host CSS
+//! covers the gap in the meantime.
 
 /// The horizontal (left-to-right) writing-mode theme.
 ///

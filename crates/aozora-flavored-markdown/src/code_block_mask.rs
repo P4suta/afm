@@ -1,86 +1,39 @@
-//! Pre-/post-process pass that hides 青空文庫 trigger characters
-//! inside CommonMark fenced code blocks.
+//! Hides 青空文庫 trigger characters inside CommonMark fenced code blocks.
 //!
-//! ## Why this exists
+//! The sibling parser rewrites every candidate trigger into a sentinel
+//! before comrak sees the source — right for prose, wrong inside a fence
+//! where every byte must reach `<pre><code>` literally. The parser is
+//! CommonMark-blind by design (ADR-0010), so teaching it about code-block
+//! context lives here: mask each trigger inside a fence with [`MASK_CHAR`],
+//! record the original in source order, and restore after
+//! `comrak::format_html` (whose escape pass touches only `<>&"`, leaving the
+//! mask alone).
 //!
-//! The sibling parser recognises every `｜` / `《` / `》` / `［` / `］` /
-//! `※` / `〔` / `〕` / `「` / `」` as a candidate trigger and rewrites
-//! it into a PUA sentinel before comrak ever sees the source. That is
-//! exactly what we want for prose; it is exactly what we *don't* want
-//! inside a fenced code block, where every byte should flow through
-//! to `<pre><code>` literally.
+//! **Indented code blocks (CommonMark §4.4) are deliberately not masked.**
+//! Their boundaries depend on paragraph context a pre-pass would need a
+//! mini-parser to reproduce, and real 青空文庫 sources use fenced syntax. A
+//! notation inside one becomes a sentinel, and `crate::ast_splice` writes it
+//! back the way it does for an inline code span, so both spellings read the
+//! same even though only one is masked here.
 //!
-//! That parser is intentionally CommonMark-blind (ADR-0010), so the
-//! responsibility for teaching it about code-block context lives
-//! here. The pass:
-//!
-//! 1. Scans the source line-by-line and tracks fenced-code-block
-//!    state with the [`Phase`] machine below (CommonMark info-string
-//!    fence: a run of three or more backticks or three or more
-//!    tildes after at most three leading spaces, closed by a
-//!    same-character run of at least the same length).
-//! 2. Replaces each Aozora trigger inside a fence with [`MASK_CHAR`]
-//!    (U+E000 — Private Use Area, distinct from the four sentinels
-//!    U+E001..U+E004) and records the original char in source order.
-//! 3. After `comrak::format_html`, restores the original chars by
-//!    walking the recorded list in the same order. comrak's HTML
-//!    escape only touches `<`, `>`, `&`, `"`; `MASK_CHAR` survives
-//!    untouched.
-//!
-//! ## What's deliberately out of scope
-//!
-//! **Indented code blocks** (CommonMark §4.4) — `    code` — are
-//! NOT masked. They start and end based on paragraph context that
-//! the lexer pre-pass would need a full mini-parser to reproduce
-//! (blank-line boundaries, list-item interleaving, etc.). In every
-//! Aozora Bunko source we've seen, code-shaped runs use fenced
-//! syntax; the pinned test
-//! `tests::indent_of_four_spaces_disables_the_fence` codifies the
-//! current behaviour.
-//!
-//! A notation inside one therefore reaches the lexer and becomes a
-//! sentinel, and the reader still has to see what the author typed.
-//! `crate::ast_splice` writes it back there, the same way it does
-//! for an inline code span, so the two spellings of a code block
-//! read the same even though only one of them is masked here.
-//!
-//! ## Why not collide with `MASK_CHAR`?
-//!
-//! The sibling parser already scans for source-supplied PUA
-//! characters and emits a `Diagnostic::SourceContainsPua` for any
-//! encountered. We pre-scan for [`MASK_CHAR`] in the *original*
-//! source and skip masking entirely if any is present, returning
-//! the source as a borrowed `Cow` and an empty originals list —
-//! that preserves the lexer's diagnostic on the user's pristine
-//! input and avoids ambiguity-of-origin in [`unmask_html`].
+//! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
+//! returning a borrowed `Cow` and no originals. That keeps the parser's own
+//! `SourceContainsPua` diagnostic meaningful on the user's pristine input,
+//! and avoids ambiguity of origin in [`unmask_html`].
 
 use core::cmp::min;
 use std::borrow::Cow;
 
-/// Private-use code point used to stand in for an Aozora trigger
-/// character that lives inside a fenced code block. Distinct from the
-/// inline sentinel (U+E001) and the three block sentinels
-/// (U+E002..U+E004), so the masking pass cannot collide with the lexer's
-/// own sentinels.
+/// Distinct from the four construct sentinels (U+E001..U+E004), so masking
+/// cannot collide with them.
 const MASK_CHAR: char = '\u{E000}';
 
-/// Every char the sibling parser treats as a recogniser trigger.
-/// Mirrors its tokeniser; if the upstream list grows, this one must
-/// follow.
+/// Mirrors the sibling tokeniser; if the upstream list grows, so must this.
 const AOZORA_TRIGGERS: &[char] = &['｜', '《', '》', '［', '］', '※', '〔', '〕', '「', '」'];
 
-/// Mask every Aozora trigger character that appears inside a fenced
-/// code block. Returns the (possibly borrowed) source plus the list
-/// of original characters that were replaced (for use by
-/// [`unmask_html`]).
-///
-/// Returns `(Cow::Borrowed(source), Vec::new())` and skips masking
-/// when:
-/// - the source already contains [`MASK_CHAR`] (see module docs), or
-/// - the source has no fenced code block at all.
-///
-/// Otherwise allocates a single owned `String` and returns
-/// `(Cow::Owned(masked), originals)`.
+/// Returns the replaced characters in source order, for [`unmask_html`].
+/// Borrows without allocating when the source has no fence at all, or
+/// already contains [`MASK_CHAR`].
 #[must_use]
 pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>) {
     if source.contains(MASK_CHAR) || !source.contains(['`', '~']) {
@@ -126,13 +79,9 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
     }
 }
 
-/// Reverse the masking. For every [`MASK_CHAR`] in `html`, take the
-/// next entry from `originals` (in source-scan order, which matches
-/// the order they appear in the rendered HTML).
-///
-/// If `originals` runs short, remaining `MASK_CHAR`s flow through
-/// unchanged — that is benign because they would render as a PUA
-/// glyph in the browser and never collide with body text.
+/// Source-scan order matches the order the masks appear in the rendered
+/// HTML. If `originals` runs short the remaining masks flow through
+/// unchanged, which is benign: a PUA glyph never collides with body text.
 #[must_use]
 pub(crate) fn unmask_html<'a>(html: &'a str, originals: &[char]) -> Cow<'a, str> {
     if originals.is_empty() || !html.contains(MASK_CHAR) {
@@ -151,9 +100,7 @@ pub(crate) fn unmask_html<'a>(html: &'a str, originals: &[char]) -> Cow<'a, str>
     Cow::Owned(out)
 }
 
-/// Line-state of the masking scan. CommonMark fenced code blocks are
-/// the only construct we recognise; indented code blocks are out of
-/// scope (see module docs).
+/// Line-state of the masking scan.
 #[derive(Debug, Clone, Copy)]
 enum Phase {
     Outside,
@@ -162,15 +109,12 @@ enum Phase {
 
 #[derive(Debug, Clone, Copy)]
 struct FenceOpen {
-    /// Backtick or tilde — the fence character chosen on the open line.
+    /// Backtick or tilde, as chosen on the open line.
     marker: u8,
-    /// Number of consecutive marker chars in the opening fence.
     width: usize,
 }
 
-/// Recognise the opening of a fenced code block on this line.
 /// CommonMark allows up to 3 leading spaces before the fence run.
-/// Returns the fence shape if `line` is a valid open fence.
 fn parse_fence_open(line: &str) -> Option<FenceOpen> {
     let stripped = trim_leading_indent(line, 3);
     let bytes = stripped.as_bytes();
@@ -185,10 +129,8 @@ fn parse_fence_open(line: &str) -> Option<FenceOpen> {
     })
 }
 
-/// Recognise a closing fence: same marker as `open`, at least
-/// `open.width` repetitions, optional leading indent up to 3 spaces,
-/// nothing but whitespace (including the trailing CRLF / LF) after
-/// the run.
+/// Same marker as `open`, at least as wide, up to 3 spaces of indent, and
+/// nothing but whitespace after the run.
 fn is_fence_close(line: &str, open: FenceOpen) -> bool {
     let stripped = trim_leading_indent(line, 3);
     let bytes = stripped.as_bytes();
@@ -201,13 +143,10 @@ fn is_fence_close(line: &str, open: FenceOpen) -> bool {
         .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
-/// Strip up to `max` leading ASCII spaces from `line`. Tabs are
-/// deliberately not expanded — CommonMark allows them inside the
-/// indent budget but our masking pass is a pre-pass, not a
-/// conformance check; tabs flow through untouched and the
-/// fence-detector simply fails on lines that lead with a tab. That is
-/// a strict subset of valid fences but matches every real-world aozora-flavored-markdown
-/// source we have seen.
+/// Tabs are deliberately not expanded. CommonMark counts them in the indent
+/// budget, but this is a pre-pass rather than a conformance check, so a line
+/// leading with a tab simply fails fence detection — a strict subset of
+/// valid fences, and one that covers every real-world source seen.
 fn trim_leading_indent(line: &str, max: usize) -> &str {
     let bytes = line.as_bytes();
     let cap = min(bytes.len(), max);
@@ -360,32 +299,8 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    //! Property tests for the masking pass.
-    //!
-    //! The unit tests above pin a finite list of hand-curated shapes
-    //! (fenced code, tilde fence, indented fence, CRLF, pre-existing
-    //! mask char). Property tests close the gap by drawing arbitrary
-    //! Aozora-shaped and CommonMark-adversarial input from the shared
-    //! generators and asserting four cross-cutting invariants that
-    //! must hold *regardless* of the input's shape:
-    //!
-    //! 1. **No-fence identity** — when the source contains neither
-    //!    backticks nor tildes, masking is a no-op (returns
-    //!    `Cow::Borrowed`) and `originals` is empty.
-    //! 2. **PUA fast-path** — when the source already contains
-    //!    [`MASK_CHAR`] (U+E000), masking is short-circuited to
-    //!    `Cow::Borrowed` and `originals` is empty (regardless of
-    //!    fence presence). The lexer's own `SourceContainsPua`
-    //!    diagnostic must not be sabotaged by us mutating the bytes.
-    //! 3. **Mask + unmask is identity** — for any input, replaying the
-    //!    masked output through `unmask_html` with the recorded
-    //!    `originals` reconstructs the source byte-for-byte. This is
-    //!    the core round-trip property the masking pass exists to
-    //!    provide.
-    //! 4. **Outside-fence triggers are preserved verbatim** — masking
-    //!    only touches the fence interior; any Aozora trigger glyph
-    //!    that appears *outside* a fenced code block must survive the
-    //!    pass unchanged.
+    //! The unit tests above pin hand-curated shapes; these close the gap
+    //! with arbitrary Aozora-shaped and CommonMark-adversarial input.
 
     use super::*;
     use aozora_flavored_markdown_test_support::config::default_config;
@@ -394,16 +309,13 @@ mod proptests {
     };
     use proptest::prelude::*;
 
-    /// Combined input strategy — Aozora fragments mixed with CommonMark
-    /// adversarial constructs (which include fenced code blocks).
+    /// Aozora fragments mixed with CommonMark-adversarial constructs.
     fn aozora_or_commonmark() -> impl Strategy<Value = String> {
         prop_oneof![aozora_fragment(40), commonmark_adversarial()]
     }
 
-    /// Substring of `s` that lies *outside* every fenced code block.
-    /// Mirrors the fence-state machine in [`mask_code_block_triggers`]
-    /// so we count exactly the characters the masking pass leaves
-    /// alone.
+    /// Mirrors the fence-state machine in [`mask_code_block_triggers`], so
+    /// the count covers exactly the characters masking leaves alone.
     fn outside_fences(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         let mut phase = Phase::Outside;
@@ -427,7 +339,6 @@ mod proptests {
         out
     }
 
-    /// Count occurrences of every Aozora trigger char in a string.
     fn count_triggers(s: &str) -> usize {
         s.chars().filter(|c| AOZORA_TRIGGERS.contains(c)).count()
     }
@@ -435,8 +346,7 @@ mod proptests {
     proptest! {
         #![proptest_config(default_config())]
 
-        /// (1) No-fence identity — sources without `` ` `` or `~` round-trip
-        /// untouched.
+        /// Sources without `` ` `` or `~` round-trip untouched.
         #[test]
         fn no_fence_input_is_borrowed_with_no_originals(s in aozora_fragment(40)) {
             let scrubbed: String = s.chars().filter(|c| *c != '`' && *c != '~').collect();
@@ -446,9 +356,8 @@ mod proptests {
             prop_assert_eq!(&*masked, &scrubbed);
         }
 
-        /// (2) PUA fast-path — sources already carrying [`MASK_CHAR`] short
-        /// circuit to a borrowed Cow with empty originals so the lexer's
-        /// SourceContainsPua diagnostic stays meaningful.
+        /// A source already carrying [`MASK_CHAR`] short-circuits, so the
+        /// parser's `SourceContainsPua` diagnostic stays meaningful.
         #[test]
         fn pre_existing_mask_char_short_circuits(s in aozora_fragment(40)) {
             let mut with_mask = String::with_capacity(s.len() + 1);
@@ -460,8 +369,7 @@ mod proptests {
             prop_assert_eq!(&*masked, &with_mask);
         }
 
-        /// (3) Mask + unmask is identity. The fundamental round-trip
-        /// invariant — without this, the entire masking pass is broken.
+        /// The round-trip the whole pass exists to provide.
         #[test]
         fn mask_then_unmask_is_identity(src in aozora_or_commonmark()) {
             let (masked, originals) = mask_code_block_triggers(&src);
@@ -469,10 +377,8 @@ mod proptests {
             prop_assert_eq!(&*restored, &src);
         }
 
-        /// (4) Outside-fence triggers survive masking — only the fence
-        /// interior gets [`MASK_CHAR`]-substituted. We count triggers in
-        /// the fence-exterior projection of the source and assert the
-        /// masked output retains at least that many.
+        /// Only the fence interior is substituted, so the masked output
+        /// keeps at least as many triggers as the exterior projection has.
         #[test]
         fn outside_fence_triggers_are_preserved(src in aozora_or_commonmark()) {
             let outside_count = count_triggers(&outside_fences(&src));

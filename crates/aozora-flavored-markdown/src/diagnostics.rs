@@ -1,42 +1,34 @@
-//! aozora-flavored-markdown's own diagnostic surface.
-//!
-//! Two kinds of observation flow out of a render: lexer diagnostics from
-//! the upstream `aozora` parser, and host-level ones that aozora-flavored-markdown raises before
-//! the lexer ever runs (e.g. oversized input). This module is the single
-//! serde-friendly shape both flatten into — the one type the CLI's
+//! The one serde-friendly shape both upstream lexer diagnostics and this
+//! crate's own host-level ones flatten into — what the CLI's
 //! `aozora-md.diagnostics.v1` envelope and the wasm bridge serialise.
 //!
-//! Owning the public diagnostic type here (rather than re-exporting
-//! `aozora`'s) keeps aozora-flavored-markdown's API decoupled from `aozora`'s `SemVer`, the same
-//! way the IR enums and `sentinels` module shield consumers from upstream
-//! churn. `aozora::Diagnostic` is mapped in via [`From`].
+//! Owning the type rather than re-exporting `aozora::Diagnostic` decouples
+//! this crate's API from the parser's `SemVer`, as the IR enums and
+//! `sentinels` do. Upstream maps in via [`From`].
 
 use serde::Serialize;
 
-/// How strictly a host should treat a [`Diagnostic`]. Serialises to the
-/// lowercase wire string (`"error"` / `"warning"` / `"note"`).
+/// Serialises to `"error"` / `"warning"` / `"note"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 pub enum Severity {
-    /// Genuine error; the parse should be treated as suspect.
+    /// The parse should be treated as suspect.
     Error,
-    /// Recoverable observation; the parse continues and output is kept.
+    /// The parse continues and its output is kept.
     Warning,
-    /// Informational note; does not affect build / CI status.
+    /// Does not affect build / CI status.
     Note,
 }
 
-/// Origin axis of a [`Diagnostic`]: a user-input issue versus a
-/// library-internal invariant violation. Serialises to `"source"` /
-/// `"internal"`.
+/// Serialises to `"source"` / `"internal"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 pub enum DiagnosticSource {
-    /// The problem traces back to the user-provided source text.
+    /// Traces back to the user-provided source text.
     Source,
-    /// A pipeline-internal invariant failed — indicates a library bug.
+    /// A pipeline invariant failed — a library bug.
     Internal,
 }
 
@@ -52,33 +44,26 @@ pub struct Span {
 }
 
 /// A non-fatal observation about a render.
-///
-/// Carries the two routing axes ([`Severity`], [`DiagnosticSource`]), a
-/// stable machine-readable [`code`](Self::code) (`aozora::lex::…` for
-/// upstream lexer diagnostics, `aozora-md::…` for aozora-flavored-markdown host-level ones), a
-/// human-readable `message`, and the byte [`Span`] it refers to. Construct
-/// from an upstream diagnostic via [`From`]; consumers read the fields.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Diagnostic {
-    /// Routing severity.
+    /// How strictly a host should treat this.
     pub severity: Severity,
-    /// Whether the issue is user-source or library-internal.
+    /// Whether it blames the user's text or this library.
     pub source: DiagnosticSource,
-    /// Stable machine-readable identifier.
+    /// Stable identifier: `aozora::lex::…` upstream, `aozora-md::…` here.
     pub code: &'static str,
-    /// Human-readable message. Not part of the stability contract.
+    /// **Not** part of the stability contract.
     pub message: String,
     /// Byte range in the source text this crate was handed.
     pub span: Span,
 }
 
 impl Diagnostic {
-    /// aozora-flavored-markdown host-level diagnostic: the input exceeds the lexer's `u32`
-    /// span budget (~4 GiB), so nothing was rendered. Raised by the public
-    /// entry points before the core lexer is invoked.
+    /// Raised by the public entry points, before the core lexer would
+    /// assert on the same boundary and abort.
     #[must_use]
     pub(crate) fn source_too_large(bytes: usize) -> Self {
         Self {
@@ -93,18 +78,10 @@ impl Diagnostic {
         }
     }
 
-    /// aozora-flavored-markdown host-level diagnostic: `count` constructs
-    /// were recognised but their source text could not be located, so they
-    /// were left out of the output.
-    ///
-    /// This crate renders a construct by handing its source run back to the
-    /// parser (see `crate::fragment`). On a document the parser rewrites
-    /// before lexing — a decorative rule gaining a blank line, an accent
-    /// digraph combining — the ranges it reports address that rewritten
-    /// text rather than the caller's, and a run that cannot be recovered
-    /// from the caller's own source is dropped rather than guessed at.
-    /// Document-scoped: the ranges that would locate the losses are the
-    /// ones that could not be trusted in the first place.
+    /// `count` constructs were recognised but could not be located in the
+    /// caller's own text, so they were dropped rather than guessed at — see
+    /// `crate::fragment`. Document-scoped, because the ranges that would
+    /// locate the losses are exactly the ones that could not be trusted.
     #[must_use]
     pub(crate) fn constructs_unresolved(count: usize) -> Self {
         Self {

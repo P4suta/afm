@@ -1,23 +1,13 @@
 //! Phase 4 — package the bundle into a `.epub` ZIP.
 //!
-//! ## Specifications consumed
+//! [OCF §3.4](https://www.w3.org/TR/epub-33/#sec-container-abstract) makes
+//! the entry order and compression load-bearing: `mimetype` must be *first*,
+//! Stored (method 0) with no extra fields, holding exactly the 20 bytes
+//! `application/epub+zip`. `META-INF/container.xml` follows, Deflated like
+//! everything after it per OCF §3.5.
 //!
-//! - **OCF abstract container layout** — [EPUB 3 OCF §3.4](https://www.w3.org/TR/epub-33/#sec-container-abstract).
-//!   The `mimetype` file must be the *first* entry in the ZIP, stored
-//!   uncompressed (no extra fields allowed), with byte content
-//!   exactly `application/epub+zip` (20 bytes, no trailing newline).
-//! - **ZIP file format** — [PKWARE APPNOTE 6.3.10 §4.4](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
-//!   The local file header for `mimetype` carries
-//!   `compression method = 0` (Stored). Subsequent entries are
-//!   compressed with method 8 (Deflate) per OCF §3.5.
-//! - **`META-INF/container.xml`** is the second entry (still
-//!   Deflated); `OEBPS/package.opf` is the OPF root referenced by
-//!   container.xml's `<rootfile full-path="OEBPS/package.opf">`.
-//!
-//! The `zip` crate is invoked with `default-features = false +
-//! deflate`, so it neither pulls in `time` (its default-on
-//! `_deflate-any` companion) nor brings in alternative compressors
-//! we don't need.
+//! `zip` is pulled with `default-features = false` + `deflate`, so it brings
+//! in neither `time` nor compressors nothing here uses.
 
 use std::fs;
 use std::io::{BufWriter, Seek, Write};

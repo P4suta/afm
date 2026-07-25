@@ -9,25 +9,18 @@
 
 use std::sync::LazyLock;
 
-/// The parser's brand (ADR-0011).
-///
-/// Shared with [`crate::fragment`], which performs the rewrite these two
-/// spellings describe: a second copy there could be changed on its own and
-/// leave the emitted classes disagreeing with the contract derived here.
+/// Shared with [`crate::fragment`], which performs the rewrite: a second
+/// copy there could change on its own and leave the emitted classes
+/// disagreeing with the contract derived here.
 pub(crate) const BRAND: &str = "aozora-";
-/// This crate's brand, the one [`BRAND`] is rewritten to.
 pub(crate) const REBRAND: &str = "aozora-md-";
 
 /// Every `aozora-md-*` CSS class the HTML renderer can emit.
 ///
-/// Open-ended numeric variants appear as their stem — `aozora-md-indent-2`
-/// is in the contract as `aozora-md-indent` — so a consumer matching a
-/// class token should accept a trailing `-<n>` on a listed stem;
-/// [`is_contract_class`] answers the exact-spelling question.
-///
-/// The canonical stylesheets — `theme::HORIZONTAL_CSS` and
-/// `theme::VERTICAL_CSS`, behind the default-off `theme` feature — style
-/// every entry, which the class-contract tests hold them to.
+/// Open-ended numeric variants appear as their stem, so a consumer matching
+/// a class token should accept a trailing `-<n>` on a listed stem. The
+/// `theme` stylesheets style every entry, which the class-contract tests
+/// hold them to.
 ///
 /// ```
 /// use aozora_flavored_markdown::AOZORA_MD_CLASSES;
@@ -49,11 +42,8 @@ pub static AOZORA_MD_CLASSES: LazyLock<Vec<String>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Whether `class` is a class the renderer can emit, exactly as spelled.
-///
-/// Exact membership, so the numeric variants of an open-ended family
-/// (`aozora-md-indent-2`) answer `false` — their stem is what the
-/// contract carries.
+/// Exact membership, so a numeric variant of an open-ended family answers
+/// `false` — the contract carries its stem.
 ///
 /// ```
 /// use aozora_flavored_markdown::is_contract_class;

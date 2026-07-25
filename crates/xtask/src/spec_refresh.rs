@@ -1,39 +1,12 @@
-//! Convert a CommonMark- or GFM-style `spec.txt` into the JSON fixture format
-//! consumed by `aozora-flavored-markdown`'s spec conformance tests
-//! (`crates/aozora-flavored-markdown/tests/commonmark_spec.rs` and
-//! `crates/aozora-flavored-markdown/tests/gfm_spec.rs`).
+//! Convert a cmark-format `spec.txt` into the JSON fixture the spec
+//! conformance tests read.
 //!
-//! Input format (cmark convention):
-//!
-//! ~~~text
-//! # Section heading
-//!
-//! ... prose ...
-//!
-//! ```````````````````````````````` example
-//! <markdown source>
-//! .
-//! <expected html>
-//! ````````````````````````````````
-//! ~~~
-//!
-//! The fence width is always 32 backticks. The `example` keyword follows the
-//! opening fence. A lone `.` on its own line separates the source from the
-//! expected HTML. Examples are numbered sequentially across the whole file and
-//! are grouped under the most recently seen ATX heading.
-//!
-//! Output format:
-//!
-//! ```json
-//! [
-//!   { "example": 1, "section": "Tabs", "markdown": "…", "html": "…" },
-//!   …
-//! ]
-//! ```
+//! The input convention: a 32-backtick fence followed by the `example`
+//! keyword opens a case, a lone `.` separates source from expected HTML, and
+//! cases are numbered across the whole file under the last ATX heading seen.
 //!
 //! The output is canonical-formatted (sorted keys, 2-space indent, trailing
-//! newline) so `spec-refresh` is byte-identical on re-run and CI diffs remain
-//! meaningful.
+//! newline) so a re-run is byte-identical and CI diffs stay meaningful.
 
 use std::fs;
 use std::path::Path;
@@ -48,8 +21,7 @@ struct SpecExample {
     pub section: String,
     pub markdown: String,
     pub html: String,
-    /// GFM spec annotates some examples with an extension tag (`example table`,
-    /// `example strikethrough`, …). `None` for pure CommonMark examples.
+    /// The extension a GFM example exercises. `None` for pure CommonMark.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
 }
@@ -58,18 +30,13 @@ const FENCE: &str = "````````````````````````````````"; // 32 backticks
 const FENCE_EXAMPLE_PREFIX: &str = "```````````````````````````````` example";
 const SEPARATOR: &str = ".";
 
-/// Classification of an example-opening fence line.
 #[derive(Debug, PartialEq, Eq)]
 enum ExampleOpening {
-    /// Bare `example` — CommonMark convention.
     Bare,
-    /// `example <tag>` — GFM annotates some examples with the extension they
-    /// exercise (e.g. `example table`, `example strikethrough`).
     Tagged(String),
 }
 
-/// Match an example-opening fence line.
-/// Returns `None` if the line isn't an example opening.
+/// `None` if the line does not open an example.
 fn parse_example_opening(line: &str) -> Option<ExampleOpening> {
     let rest = line.strip_prefix(FENCE_EXAMPLE_PREFIX)?;
     let tag = rest.trim_start();
@@ -80,13 +47,10 @@ fn parse_example_opening(line: &str) -> Option<ExampleOpening> {
     }
 }
 
-/// Convert `input_path` (a spec.txt) to a JSON fixture at `output_path`.
-///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read, the format is malformed
-/// (orphan fence, missing separator, unterminated example block), or the JSON
-/// output cannot be written.
+/// Unreadable input, malformed format (orphan fence, missing separator,
+/// unterminated block), or an unwritable output.
 pub(crate) fn refresh_one(input_path: &Path, output_path: &Path) -> Result<usize> {
     let raw = fs::read_to_string(input_path)
         .with_context(|| format!("reading spec source {}", input_path.display()))?;
@@ -100,18 +64,10 @@ pub(crate) fn refresh_one(input_path: &Path, output_path: &Path) -> Result<usize
     Ok(examples.len())
 }
 
-/// Parse a spec.txt into an ordered list of examples.
-///
-/// Linear single-pass over lines, tracking:
-/// - the current section (last seen ATX-1 heading)
-/// - the current example number (monotonically increasing)
-/// - the parse state: outside, inside-markdown, inside-html
-///
 /// # Errors
 ///
-/// Returns an error on malformed input: an `example` fence that never sees a
-/// separator `.` or a closing fence; a closing fence that isn't preceded by an
-/// opening one.
+/// An `example` fence that never sees its separator or closing fence, or a
+/// closing fence with no opening one.
 fn parse(source: &str) -> Result<Vec<SpecExample>> {
     let mut out = Vec::new();
     let mut section = String::new();

@@ -1,16 +1,5 @@
 //! Aozora Flavored Markdown — CommonMark + GFM + 青空文庫記法.
 //!
-//! Layers the sibling `aozora` parser onto a vendored verbatim comrak so a
-//! single [`render`] call turns aozora-flavored-markdown source into HTML.
-//! Public entry points:
-//!
-//! - [`render`] — render aozora-flavored-markdown source straight to HTML.
-//! - [`serialize`] — aozora-md-source round-trip.
-//! - [`Options`] — configuration; [`Options::default`] enables the GFM
-//!   extensions aozora-flavored-markdown uses on top of CommonMark.
-//! - [`AOZORA_MD_CLASSES`] — every CSS class the rendered HTML can carry,
-//!   with matching stylesheets behind the default-off `theme` feature.
-//!
 //! ```
 //! use aozora_flavored_markdown::{Options, render};
 //!
@@ -18,23 +7,12 @@
 //! assert!(rendered.html.contains("<ruby>"));
 //! ```
 //!
-//! ## Pipeline
-//!
-//! ```text
-//! source                             ── UTF-8 input
-//!   ▼ aozora parse                    ── 青空文庫 constructs + diagnostics
-//!   ▼ constructs::build               ── one PUA sentinel per construct,
-//!   │                                    substituted in source coordinates
-//!   ▼ comrak::parse_document          ── vanilla CommonMark + GFM
-//!   │   (PUA sentinels flow through as plain text)
-//!   ▼ ast_splice::splice_into_ast     ── sentinel → 青空文庫 HTML fragment
-//!   ▼ comrak::format_html             ── vanilla, sentinel-free AST
-//! HTML
-//! ```
-//!
-//! Comrak is unmodified: the v0.52.0 verbatim tree carries no Aozora-aware
-//! code (ADR-0001 budget = 0). The boundary with `aozora` is its public API
-//! only (ADR-0021).
+//! The pipeline substitutes one PUA sentinel per 青空文庫 construct
+//! (`constructs`), lets a *verbatim* comrak parse the result as vanilla
+//! CommonMark + GFM, then splices each sentinel back into the AST as a
+//! rendered fragment (`ast_splice`) before formatting. Nothing Aozora-aware
+//! lives in vendored comrak (ADR-0001 budget = 0), and the boundary with the
+//! sibling `aozora` parser is its public API only (ADR-0021).
 
 #![forbid(unsafe_code)]
 
@@ -58,33 +36,25 @@ mod source_line_anchors;
 #[cfg(feature = "theme")]
 pub mod theme;
 
-/// PUA sentinel codepoints this crate substitutes for 青空文庫
-/// constructs before comrak parses.
+/// PUA sentinel codepoints substituted for 青空文庫 constructs before
+/// comrak parses.
 ///
-/// Owned here rather than re-exported from the sibling parser, so this
-/// crate's public API never republishes a constant it does not control —
-/// the substitution is ours to make (see `crate::constructs`), and these
-/// are the four codepoints a consumer will see if it ever inspects the
-/// intermediate text.
+/// Owned here rather than re-exported from the sibling parser: the
+/// substitution is ours to make, so the constant is ours to keep stable.
 pub mod sentinels {
     use crate::constructs;
 
-    /// Inline Aozora span (ruby / bouten / annotation / gaiji /
-    /// TCY / kaeriten).
+    /// Ruby / bouten / annotation / gaiji / TCY / kaeriten.
     pub const INLINE: char = constructs::INLINE_SENTINEL;
-    /// Block-leaf Aozora line (page break, section break, leaf
-    /// indent, sashie).
+    /// Page break, section break, leaf indent, sashie.
     pub const BLOCK_LEAF: char = constructs::BLOCK_LEAF_SENTINEL;
     /// Paired-container open line (e.g. `［＃ここから字下げ］`).
     pub const BLOCK_OPEN: char = constructs::BLOCK_OPEN_SENTINEL;
     /// Paired-container close line (e.g. `［＃ここで字下げ終わり］`).
     pub const BLOCK_CLOSE: char = constructs::BLOCK_CLOSE_SENTINEL;
 
-    /// Every sentinel this crate substitutes, in declaration order.
-    ///
-    /// A leak check reads the set from here rather than re-listing the
-    /// codepoints, so a sentinel added later is checked without the
-    /// checker being edited.
+    /// Read by the leak checks instead of re-listing codepoints, so a
+    /// sentinel added later is covered without editing the checker.
     ///
     /// ```
     /// use aozora_flavored_markdown::sentinels;
@@ -108,47 +78,22 @@ use crate::constructs::Constructs;
 
 /// Parse-time configuration for [`render`] and friends.
 ///
-/// `comrak::Options` is held with a `'static` lifetime: aozora-flavored-markdown doesn't
-/// install URL rewriters or broken-link callbacks (which are the
-/// only comrak fields that need a non-`'static` lifetime), so the
-/// borrow parameter would be dead weight in our public API.
+/// `comrak::Options` is held `'static`: we install neither URL rewriters nor
+/// broken-link callbacks — comrak's only non-`'static` fields — so a borrow
+/// parameter would be dead weight in the public API.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Options {
     comrak: comrak::Options<'static>,
-    /// When `true`, run the aozora lex pre-pass and HTML
-    /// post-processing. When `false`, the input flows straight into
-    /// vanilla `comrak::parse_document` + `format_html` — used by the
-    /// CommonMark / GFM spec conformance runners to verify the wrapper
-    /// does not perturb upstream behaviour.
-    ///
-    /// Private: read via [`Options::aozora_enabled`], set via
-    /// [`Options::with_aozora_enabled`].
     aozora_enabled: bool,
-    /// When `true`, the HTML renderer adds `data-aozora-md-source-line="N"`
-    /// (1-based) to every top-level block element it emits. The
-    /// aozora-flavored-markdown-obsidian document-mode adapter (Pillar 6 of the plan)
-    /// uses these anchors to map per-block post-processor calls back
-    /// to slices of the rendered fragment without re-parsing.
-    ///
-    /// Defaults to `false`. Cost when enabled: one extra walk over
-    /// comrak's top-level AST children + a streaming insert pass on
-    /// the produced HTML. Both are O(blocks).
-    ///
-    /// Private: read via [`Options::source_line_anchors`], set via
-    /// [`Options::with_source_line_anchors`].
     source_line_anchors: bool,
 }
 
 impl Default for Options {
-    /// The recommended aozora-flavored-markdown dialect configuration:
-    /// GFM extensions on (strikethrough, table, autolink, tasklist),
-    /// hardbreaks on so each Aozora source newline becomes a `<br>`
-    /// (verse / dialogue boundaries are load-bearing in 青空文庫 source),
-    /// and the Aozora pre-pass enabled. Raw-HTML passthrough stays off
-    /// (`render.unsafe = false`), so this is XSS-safe on untrusted input.
-    ///
-    /// # Examples
+    /// GFM extensions on, plus hardbreaks so each source newline becomes a
+    /// `<br>` — verse and dialogue boundaries are load-bearing in 青空文庫
+    /// source. Raw-HTML passthrough stays off, so this is XSS-safe on
+    /// untrusted input.
     ///
     /// ```
     /// use aozora_flavored_markdown::Options;
@@ -174,26 +119,15 @@ impl Default for Options {
 }
 
 impl Options {
-    /// Plain CommonMark (no GFM, no Aozora) with comrak's raw-HTML
-    /// passthrough **enabled** (`render.unsafe = true`). Spec-conformance
-    /// scaffolding only — it exists so the CommonMark 0.31.2 runner can
-    /// verify the wrapper does not perturb comrak's CommonMark behaviour
-    /// against a spec whose expected output includes raw HTML.
-    ///
-    /// Hidden from the published API surface (`#[doc(hidden)]`): this is
-    /// not a production configuration. Use [`Options::default`] (which
-    /// keeps `render.unsafe = false`) or a hand-built [`Options`] for any
-    /// real workload.
+    /// Plain CommonMark, for the CommonMark 0.31.2 conformance runner.
     ///
     /// # Security
     ///
-    /// **Raw-HTML passthrough — never use on untrusted input.** This adds
-    /// no Rust `unsafe`, but it is a security footgun: it turns on
-    /// comrak's raw-HTML passthrough (`render.unsafe = true`), so comrak
-    /// emits raw HTML verbatim and passes through unsanitized URLs
-    /// (`javascript:` schemes included). Feeding attacker-controlled
-    /// source through these `Options` is an XSS sink. Reach for
-    /// [`Options::default`] instead, which leaves raw HTML escaped.
+    /// **Never use on untrusted input.** The spec's expected output contains
+    /// raw HTML, so this turns on comrak's passthrough
+    /// (`render.unsafe = true`): raw HTML is emitted verbatim and URLs go
+    /// unsanitized, `javascript:` included. That is an XSS sink, hence
+    /// `#[doc(hidden)]`. Production callers want [`Options::default`].
     #[doc(hidden)]
     #[must_use]
     pub fn commonmark_only() -> Self {
@@ -206,24 +140,12 @@ impl Options {
         }
     }
 
-    /// Pure-GFM extension set (no Aozora) with comrak's raw-HTML
-    /// passthrough **enabled** (`render.unsafe = true`). Spec-conformance
-    /// scaffolding only — it backs the GFM 0.29 conformance runner.
-    ///
-    /// Hidden from the published API surface (`#[doc(hidden)]`): this is
-    /// not a production configuration. Use [`Options::default`] (which
-    /// keeps `render.unsafe = false`) or a hand-built [`Options`] for any
-    /// real workload.
+    /// Pure GFM, for the GFM 0.29 conformance runner.
     ///
     /// # Security
     ///
-    /// **Raw-HTML passthrough — never use on untrusted input.** This adds
-    /// no Rust `unsafe`, but it is a security footgun: it turns on
-    /// comrak's raw-HTML passthrough (`render.unsafe = true`), so comrak
-    /// emits raw HTML verbatim and passes through unsanitized URLs
-    /// (`javascript:` schemes included). Feeding attacker-controlled
-    /// source through these `Options` is an XSS sink. Reach for
-    /// [`Options::default`] instead, which leaves raw HTML escaped.
+    /// Same raw-HTML XSS sink as [`Options::commonmark_only`], for the same
+    /// reason. Never use on untrusted input.
     #[doc(hidden)]
     #[must_use]
     pub fn gfm_only() -> Self {
@@ -241,8 +163,11 @@ impl Options {
         }
     }
 
-    /// Builder-style toggle for source-line anchors. Returns a new
-    /// `Options` with `source_line_anchors = on`.
+    /// Tag every top-level block with `data-aozora-md-source-line="N"`
+    /// (1-based). The obsidian adapter maps per-block post-processor calls
+    /// back to slices of the rendered fragment without re-parsing. Off by
+    /// default; costs one extra AST walk plus a streaming insert, both
+    /// O(blocks).
     ///
     /// ```
     /// use aozora_flavored_markdown::Options;
@@ -255,10 +180,9 @@ impl Options {
         self
     }
 
-    /// Builder-style toggle for the Aozora pre-pass. Returns a new
-    /// `Options` with `aozora_enabled = on`. When `false`, the input
-    /// flows straight through comrak with no Aozora lexing or HTML
-    /// post-processing.
+    /// With `false`, the input flows straight through comrak with no Aozora
+    /// lexing or HTML post-processing — how the spec-conformance runners
+    /// check that this wrapper does not perturb upstream behaviour.
     ///
     /// ```
     /// use aozora_flavored_markdown::Options;
@@ -271,38 +195,31 @@ impl Options {
         self
     }
 
-    /// Whether the Aozora lex pre-pass / HTML post-pass is enabled
-    /// (see [`Options::with_aozora_enabled`]).
+    /// See [`Options::with_aozora_enabled`].
     #[must_use]
     pub fn aozora_enabled(&self) -> bool {
         self.aozora_enabled
     }
 
-    /// Whether the renderer tags top-level blocks with
-    /// `data-aozora-md-source-line` anchors
-    /// (see [`Options::with_source_line_anchors`]).
+    /// See [`Options::with_source_line_anchors`].
     #[must_use]
     pub fn source_line_anchors(&self) -> bool {
         self.source_line_anchors
     }
 
-    /// Read access to the underlying [`comrak::Options`]. The standard
-    /// dialect configuration is set by [`Options::default`]; reach for
-    /// this only to inspect a comrak knob directly.
+    /// Inspect a comrak knob directly. The dialect is configured by
+    /// [`Options::default`].
     #[must_use]
     pub fn comrak(&self) -> &comrak::Options<'static> {
         &self.comrak
     }
 
-    /// Mutable escape hatch to the underlying [`comrak::Options`] for
-    /// advanced comrak tuning beyond what the first-class builders cover.
+    /// Escape hatch for comrak tuning the `with_*` builders do not cover.
     ///
     /// # Stability
     ///
-    /// This re-exposes comrak's own option surface, which is **not**
-    /// covered by aozora-flavored-markdown's `SemVer` guarantee: a comrak
-    /// major bump may change these fields. Prefer the `with_*` builders
-    /// for anything they already cover.
+    /// Comrak's option surface is **not** covered by this crate's `SemVer`
+    /// guarantee — a comrak major bump may change these fields.
     pub fn comrak_mut(&mut self) -> &mut comrak::Options<'static> {
         &mut self.comrak
     }
@@ -314,17 +231,14 @@ impl Options {
 pub struct Rendered {
     /// HTML output, with every Aozora sentinel substituted.
     pub html: String,
-    /// Non-fatal lexer observations (unclosed pairs, PUA collisions,
-    /// stray triggers, …). Empty on the happy path.
+    /// Non-fatal lexer observations. Empty on the happy path.
     pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Output of [`render_to_ir`].
 ///
-/// The IR projection alongside the HTML and diagnostics. Used by the
-/// `aozora-flavored-markdown-wasm` bridge so the JS-side renderer can pick its own output
-/// target (DOM fragment, `CodeMirror` `RangeSet`, semantic tokens, …)
-/// from a single source.
+/// The IR lets the wasm bridge's JS renderer pick its own output target (DOM
+/// fragment, `CodeMirror` `RangeSet`, semantic tokens, …) from one call.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RenderedIr {
@@ -335,39 +249,25 @@ pub struct RenderedIr {
 
 /// Largest source this crate will hand to the sibling parser.
 ///
-/// That parser keys every span on a `u32` byte offset and asserts
+/// That parser keys spans on `u32` byte offsets and asserts
 /// `source.len() <= u32::MAX` on the way in. Under this workspace's
-/// `panic = "abort"` release profile that assert is a hard process abort,
-/// not a catchable panic — an in-scope crash per `SECURITY.md` for a hostile
-/// input above 4 GiB. The public entry points here guard on the boundary
-/// *first*, so an oversized input degrades to a graceful empty render
-/// instead of aborting the host process.
+/// `panic = "abort"` profile that assert is a hard process abort — an
+/// in-scope crash per `SECURITY.md` for a hostile 4 GiB input. Every public
+/// entry point guards on the boundary *first* and degrades to an empty
+/// render instead.
 const MAX_SOURCE_BYTES: usize = u32::MAX as usize;
 
-/// `true` when a source of `len` bytes is within the lexer's
-/// addressable `u32` span budget.
-///
-/// Split out from [`source_within_span_budget`] so the boundary
-/// arithmetic is unit-testable at `u32::MAX` / `u32::MAX + 1` without
-/// allocating a multi-gigabyte `String`.
+/// Split out from [`source_within_span_budget`] so the boundary arithmetic
+/// is testable at `u32::MAX` / `u32::MAX + 1` without allocating gigabytes.
 const fn len_within_span_budget(len: usize) -> bool {
     len <= MAX_SOURCE_BYTES
 }
 
-/// `true` when `input` is within the lexer's addressable `u32` span
-/// budget. `false` inputs must not be handed to the core.
 const fn source_within_span_budget(input: &str) -> bool {
     len_within_span_budget(input.len())
 }
 
 /// Render aozora-flavored-markdown source text to HTML.
-///
-/// One-stop entry point for the typical caller (aozora-flavored-markdown CLI, aozora-flavored-markdown-epub).
-/// Internally: the source is scanned for 青空文庫 constructs and each is
-/// replaced by a PUA sentinel; `comrak::parse_document` parses the result
-/// (sentinels flow through as plain text, being outside CommonMark's escape
-/// set); `ast_splice::splice_into_ast` swaps each sentinel back for its
-/// rendered 青空文庫 HTML; `comrak::format_html` emits the spliced AST.
 ///
 /// # Examples
 ///
@@ -379,19 +279,12 @@ const fn source_within_span_budget(input: &str) -> bool {
 /// assert!(rendered.diagnostics.is_empty());
 /// ```
 ///
-/// # Oversized input
-///
-/// If `input` exceeds `MAX_SOURCE_BYTES` (4 GiB − 1, the lexer's `u32`
-/// span budget) this returns an empty [`Rendered`] (`html: ""`, no
-/// diagnostics) **without** invoking the core lexer — the core would
-/// otherwise `assert!` and abort the process under `panic = "abort"`.
-/// See `MAX_SOURCE_BYTES` for the rationale.
+/// Input past `MAX_SOURCE_BYTES` yields an empty `html` and one
+/// `source_too_large` diagnostic rather than reaching the lexer.
 ///
 /// # Panics
 ///
-/// Panics if `comrak::format_html` fails to write into the internal
-/// `String` sink — `String` cannot fail as a `fmt::Write`, so this
-/// branch is unreachable in normal use.
+/// Never in practice: `String` cannot fail as a `fmt::Write` sink.
 #[must_use]
 pub fn render(input: &str, options: &Options) -> Rendered {
     if !source_within_span_budget(input) {
@@ -406,19 +299,12 @@ pub fn render(input: &str, options: &Options) -> Rendered {
 
 /// Render aozora-flavored-markdown source to a structured IR + HTML + diagnostics.
 ///
-/// Mirrors [`render`] but additionally walks comrak's AST
-/// to emit a typed [`ir::IrDocument`]. The IR is the canonical
-/// contract between aozora-flavored-markdown-wasm and aozora-flavored-markdown-obsidian's TS renderers.
-///
-/// The Markdown side is typed (paragraph, heading, blockquote, list,
-/// code, thematic break, table, image). Every 青空文庫 notation lands as
-/// one `IrBlock::Aozora` / `IrInline::Aozora` carrying its tag, source
-/// span, and HTML fragment — except where the notation changes the
-/// *shape* of the document rather than its content: a heading hint
+/// Notation that changes the document's *shape* rather than its content is
+/// reflected in the IR structure, not as an `Aozora` node: a heading hint
 /// (`［＃「X」は大見出し］`) promotes its host paragraph to
 /// `IrBlock::Heading`, and an annotation inside a heading body drops out.
-/// Both mirror what the HTML renderer does, so the IR and the HTML of one
-/// call describe the same document.
+/// Both mirror the HTML renderer, so one call's IR and HTML describe the
+/// same document.
 ///
 /// # Examples
 ///
@@ -430,17 +316,11 @@ pub fn render(input: &str, options: &Options) -> Rendered {
 /// assert!(matches!(rendered.ir.blocks.first(), Some(IrBlock::Heading { .. })));
 /// ```
 ///
-/// # Oversized input
-///
-/// If `input` exceeds `MAX_SOURCE_BYTES` this returns an empty
-/// [`RenderedIr`] (empty IR document, `html: ""`, no diagnostics)
-/// without invoking the core lexer. See `MAX_SOURCE_BYTES`.
+/// Oversized input degrades as in [`render`].
 ///
 /// # Panics
 ///
-/// Panics if `comrak::format_html` fails to write into the internal
-/// `String` sink — `String` cannot fail as a `fmt::Write`, so this
-/// branch is unreachable in normal use.
+/// Never in practice: `String` cannot fail as a `fmt::Write` sink.
 #[must_use]
 pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     if !source_within_span_budget(input) {
@@ -458,13 +338,8 @@ pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     }
 }
 
-/// Internal pipeline driver shared between `render` and `render_to_ir`.
-///
-/// Runs the full lex → tile → comrak → format → post-process → unmask →
-/// anchors chain and threads the AST root + the construct table through
-/// `project` *before* HTML formatting starts. The closure returns whatever
-/// extra data the caller needs alongside the HTML (`()` for the plain
-/// renderer, an `IrDocument` for the IR renderer).
+/// `project` runs against the AST *before* splicing, so an IR walker sees
+/// the same sentinel-bearing tree the splicer is about to consume.
 fn drive_pipeline<F, T>(input: &str, options: &Options, project: F) -> (String, Vec<Diagnostic>, T)
 where
     F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
@@ -500,33 +375,18 @@ where
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, constructs.text(), &options.comrak);
 
-    // IR projection sees the AST *before* sentinel splicing — it
-    // walks the same Text-with-sentinel-char pre-mutation tree the
-    // splicer is about to consume. Both walkers cursor over the same
-    // construct table (each with its own cursor) so they stay in lockstep
-    // without serial coupling.
+    // Both walkers cursor over the same construct table, each with its own
+    // cursor, so they stay in lockstep without serial coupling.
     let extra = project(root, &constructs);
 
-    // Mutate the AST: every PUA sentinel becomes a `NodeValue::Raw`
-    // node carrying the rendered Aozora HTML. After this returns,
-    // the AST contains no sentinel character; `comrak::format_html`
-    // emits final HTML in a single verbatim pass. The table carries each
-    // construct's source text, so sentinels that landed in literal markdown
-    // contexts (inline code, link URLs) are rewritten back to it.
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
     let html = format_root(root, options, Some(mask_originals.as_slice()));
     (html, constructs.diagnostics().to_vec(), extra)
 }
 
-/// Common HTML finalisation: comrak-format the root (per top-level
-/// child when `source_line_anchors` is on, so each child's first
-/// open tag picks up its `data-aozora-md-source-line` attribute), then
-/// unmask code-block triggers.
-///
-/// AST-level Aozora sentinel splicing runs in [`drive_pipeline`]
-/// before this is called, so by the time we hand the AST to
-/// `comrak::format_html` no PUA sentinel remains.
+/// Formats per top-level child when `source_line_anchors` is on, so each
+/// child's first open tag can pick up its `data-aozora-md-source-line`.
 fn format_root<'a>(
     root: &'a AstNode<'a>,
     options: &Options,
@@ -548,40 +408,29 @@ fn format_root<'a>(
 }
 
 /// One block of [`render_blocks_to_ir`]'s output.
-///
-/// Each entry corresponds to one top-level comrak child. `html` is the
-/// rendered HTML for that child (with Aozora sentinels spliced).
-/// `ir` is the IR projection — typically a single block, but empty for
-/// comrak constructs the IR does not model (definition lists, footnote
-/// refs, raw HTML, …).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RenderedBlock {
+    /// Usually one block; empty for comrak constructs the IR does not model
+    /// (definition lists, footnote refs, raw HTML, …).
     pub ir: Vec<ir::IrBlock>,
     pub html: String,
     /// 1-based line where this block began in the source.
     pub source_line: u32,
 }
 
-/// Per-block streaming render.
+/// Per-block streaming render, one [`RenderedBlock`] per top-level comrak
+/// child in document order.
 ///
-/// Produces one [`RenderedBlock`] per top-level comrak child, in
-/// document order. Used by aozora-flavored-markdown-obsidian's chunked-cancellation path
-/// (ADR-0009): the JS bridge can iterate the returned vector and
-/// check its `AbortSignal` between blocks.
+/// Serves the obsidian chunked-cancellation path (ADR-0009): the JS bridge
+/// checks its `AbortSignal` between blocks. Diagnostics come back attached
+/// to the document rather than per-block, because the lexer pass is not
+/// block-scoped.
 ///
-/// The current implementation parses the document once (a single
-/// comrak pass) and renders each top-level block's HTML separately
-/// using `comrak::format_html`. Diagnostics from the lexer are
-/// returned alongside the blocks, attached to the document as a
-/// whole rather than per-block (the lexer pass is non-block-scoped).
-///
-/// A paired container spanning several top-level blocks emits its open
-/// and close markers in the blocks they appear in — the builder threads
-/// its container stack across calls, so the pair still matches. A container
-/// the source never closes is drained at the end into a trailing block of
-/// its own, matching the closing tag the HTML side appends there, so
-/// concatenating either output leaves no container hanging open.
+/// A paired container spanning several blocks emits its open and close
+/// markers in the blocks they appear in, and one the source never closes is
+/// drained into a trailing block matching the closing tag the HTML side
+/// appends — so concatenating either output leaves nothing hanging open.
 ///
 /// # Examples
 ///
@@ -594,11 +443,7 @@ pub struct RenderedBlock {
 /// assert!(diagnostics.is_empty());
 /// ```
 ///
-/// # Oversized input
-///
-/// If `input` exceeds `MAX_SOURCE_BYTES` this returns
-/// `(Vec::new(), Vec::new())` — no blocks, no diagnostics — without
-/// invoking the core lexer. See `MAX_SOURCE_BYTES`.
+/// Oversized input degrades as in [`render`].
 #[must_use]
 pub fn render_blocks_to_ir(
     input: &str,
@@ -680,16 +525,14 @@ fn collect_rendered_blocks<'a>(
     blocks
 }
 
-/// Round-trip an aozora-flavored-markdown source through the parser and back
-/// to canonical aozora-md-source text.
+/// Round-trip source through the parser back to canonical
+/// aozora-md-source text.
 ///
-/// Delegates to the parser's own formatter — the inverse of the parse, and
-/// canonicalising: notation the author wrote in a longer form comes back in
-/// the shortest spelling that reads the same (below, the ruby's explicit
-/// base marker is dropped because the base is unambiguous without it).
-/// Plain CommonMark portions pass through verbatim because the parser
-/// leaves them untouched, and the output is a fixed point — serializing it
-/// again returns it unchanged.
+/// Canonicalising, not merely inverse: notation written in a longer form
+/// comes back in the shortest spelling that reads the same (below, the
+/// ruby's explicit base marker is dropped because the base is unambiguous
+/// without it). Plain CommonMark passes through verbatim, and the output is
+/// a fixed point.
 ///
 /// # Examples
 ///
@@ -701,14 +544,8 @@ fn collect_rendered_blocks<'a>(
 /// assert_eq!(serialize(&canonical), canonical);
 /// ```
 ///
-/// # Oversized input
-///
-/// If `input` exceeds `MAX_SOURCE_BYTES` this returns an empty
-/// `String` without invoking the core lexer (which would otherwise
-/// `assert!` and abort under `panic = "abort"`). See
-/// `MAX_SOURCE_BYTES`. The round-trip is therefore *not* identity on
-/// inputs larger than 4 GiB — but such input cannot be lexed at all, so
-/// an empty serialization is the only graceful option.
+/// Past `MAX_SOURCE_BYTES` this returns an empty `String`, so the round-trip
+/// is *not* identity there — but such input cannot be lexed at all.
 #[must_use]
 pub fn serialize(input: &str) -> String {
     if !source_within_span_budget(input) {

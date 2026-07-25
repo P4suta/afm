@@ -1,32 +1,17 @@
-//! Per-top-level-block render with source-line anchor injection.
+//! Per-top-level-block render with `data-aozora-md-source-line` injection,
+//! behind `Options::source_line_anchors`.
 //!
-//! When `Options::source_line_anchors` is `true`, the renderer
-//! attaches a `data-aozora-md-source-line="N"` (1-based) attribute to the
-//! first opening tag of every top-level block. The aozora-flavored-markdown-obsidian
-//! document-mode adapter (Pillar 6) uses these anchors to map
-//! Obsidian's per-block post-processor calls back to slices of the
-//! full rendered fragment.
-//!
-//! ## Design
-//!
-//! Iterate `root.children()`, format each child with `comrak::
-//! format_html` into its own buffer, and inject the anchor onto the
-//! first opening tag of that buffer. The Nth top-level child becomes
-//! the Nth anchored tag — no depth tracking, no full-document HTML
-//! scan, no ambiguity about which open tag is "top-level".
-//!
-//! The buffer-per-child loop replaces the older two-pass design
-//! (collect lines + post-format HTML scan) which had to reconstruct
-//! the top-level boundary by hand-rolling a tag walker with quote
-//! tracking, void-tag detection, and self-closing handling.
+//! Formatting each top-level child into its own buffer makes the Nth child
+//! the Nth anchored tag: no depth tracking, no full-document HTML scan, and
+//! no ambiguity about which open tag is top-level. The two-pass alternative
+//! had to reconstruct that boundary with a hand-rolled tag walker carrying
+//! quote tracking, void-tag detection and self-closing handling.
 
 use comrak::nodes::AstNode;
 
 use crate::constructs::saturating_u32;
 
-/// Format every top-level child of `root` into a single HTML string,
-/// prepending a `data-aozora-md-source-line="N"` attribute onto the first
-/// opening tag of each child's output.
+/// One anchored `data-aozora-md-source-line="N"` per top-level child.
 pub(crate) fn format_root_with_anchors<'a>(
     root: &'a AstNode<'a>,
     options: &comrak::Options<'static>,
@@ -43,18 +28,10 @@ pub(crate) fn format_root_with_anchors<'a>(
     out
 }
 
-/// Insert `data-aozora-md-source-line="<line>"` immediately after the
-/// element name of the first opening tag in `buf`.
-///
-/// "First opening tag" means the first `<X` sequence where `X` is an
-/// ASCII letter — this skips over comments (`<!--`), doctype
-/// declarations (`<!DOCTYPE>`), and processing instructions
-/// (`<?xml`), none of which comrak normally emits but which a raw
-/// HTML block can carry verbatim from the source.
-///
-/// If no eligible open tag is present (rare: a top-level child whose
-/// rendered output is purely whitespace or a comment), the buffer
-/// is left untouched.
+/// "First opening tag" means the first `<X` where `X` is an ASCII letter,
+/// skipping comments, doctypes and processing instructions — which comrak
+/// does not emit, but a raw HTML block can carry verbatim from the source.
+/// With no eligible tag the buffer is left untouched.
 fn inject_anchor_into_first_open_tag(buf: &mut String, line: u32) {
     let bytes = buf.as_bytes();
     let mut i = 0;

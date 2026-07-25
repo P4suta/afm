@@ -1,9 +1,6 @@
-//! Phase 2 — render aozora-flavored-markdown sources into XHTML spine items.
-//!
-//! Each source is decoded (UTF-8, or Shift_JIS for `.sjis` /
-//! `.shift_jis`), rendered by [`aozora_flavored_markdown::render`], and
-//! wrapped in an XHTML (HTML5 doctype) envelope carrying the manuscript
-//! language and a stylesheet link.
+//! Phase 2 — decode each source (UTF-8, or Shift_JIS for `.sjis` /
+//! `.shift_jis`), render it, and wrap it in an XHTML envelope carrying the
+//! manuscript language and a stylesheet link.
 
 use std::str;
 
@@ -18,7 +15,7 @@ pub(crate) struct SpineItem {
     pub href: String,
     /// `<title>` element of the chapter.
     pub title: String,
-    /// Full XHTML document — already HTML-escaped by aozora-flavored-markdown.
+    /// Already HTML-escaped by the renderer.
     pub xhtml: String,
 }
 

@@ -1,48 +1,35 @@
 //! The HTML one 青空文庫 construct renders to.
 //!
-//! The parser renders documents, not constructs, so this module asks it the
-//! only question it answers: it parses the construct's own source run as a
-//! document of its own and keeps the HTML that comes back. Exactly one
-//! construct fills that run — [`crate::constructs`] shows that before it
-//! publishes the run — so what comes back is that construct's markup and
-//! nothing else.
+//! The parser renders documents, not constructs, so this asks it the only
+//! question it answers: parse the construct's own source run as a document
+//! and keep the HTML. Exactly one construct fills that run, which
+//! [`crate::constructs`] establishes before publishing it.
 //!
-//! Two adjustments follow, and they are the whole module:
+//! Asking the renderer is what keeps the two sides from drifting. Deriving
+//! the markup from a classification instead would make this crate a second
+//! owner of the notation, and every notation the parser grew would silently
+//! render as something else here.
 //!
-//! * The paragraph wrapper an inline construct arrives in is dropped. Block
-//!   structure belongs to comrak here, not to the sub-document; a construct
-//!   that renders as a block of its own (a page break, a container marker)
-//!   arrives without a wrapper and passes straight through.
-//! * The classes are rebranded (ADR-0011): the parser emits its own
-//!   `aozora-*` brand, this crate's HTML uses `aozora-md-*`. Only class
-//!   attribute values are rewritten — a fragment is the construct's markup
-//!   wrapped around the *author's* text, and that text may say `aozora-`
-//!   for reasons of its own. This crate's own name does.
-//!
-//! Asking the renderer is what keeps the two sides from drifting. The
-//! alternative — deriving the markup from the construct's classification —
-//! would make this crate a second owner of the notation, and every notation
-//! the parser grew would silently render as something else here.
+//! Two adjustments follow, and they are the whole module: the paragraph
+//! wrapper an inline construct arrives in is dropped (block structure is
+//! comrak's here, not the sub-document's), and classes are rebranded
+//! `aozora-*` → `aozora-md-*` (ADR-0011). Only class attribute values are
+//! rewritten, because the author's own text may say `aozora-` for reasons of
+//! its own — this crate's name does.
 
 // The two brands live next to the contract they define — the published
 // `AOZORA_MD_CLASSES` is the parser's own list under the rewritten brand —
 // so the rewrite below cannot be changed without the contract following it.
 use crate::classes::{BRAND, REBRAND};
 
-/// The wrapper the renderer puts around a document whose whole content is
-/// inline. The pair is the one HTML shape this crate reads.
+/// The wrapper the renderer puts around an all-inline document.
 const PARAGRAPH_OPEN: &str = "<p>";
-/// Closing half of [`PARAGRAPH_OPEN`].
 const PARAGRAPH_CLOSE: &str = "</p>";
-/// Start of the one attribute whose value carries the parser's brand.
+/// The one attribute whose value carries the parser's brand.
 const CLASS_ATTRIBUTE: &str = "class=\"";
 
-/// The fragment `snapshot` renders to, where `snapshot` is the parser's
-/// reading of exactly one construct's source run.
-///
-/// The caller parses rather than passing the run itself because the same
-/// reading answers the other question [`crate::constructs`] asks of a run —
-/// which constructs it contains — and one parse answers both.
+/// Takes a snapshot rather than the run itself because the same reading
+/// answers the other question [`crate::constructs`] asks of a run.
 pub(crate) fn of(snapshot: &aozora::Snapshot) -> String {
     let html = snapshot.to_html();
     // The renderer ends a document with a newline; a fragment is woven into
@@ -56,26 +43,19 @@ pub(crate) fn of(snapshot: &aozora::Snapshot) -> String {
     rebrand(body)
 }
 
-/// The two halves a paired container's marker renders to.
-///
-/// A container marker with nothing inside it renders as one empty element,
-/// so the markup that opens the container is everything before its own
-/// closing tag and the markup that closes it is that tag. Reading both off
-/// the same fragment is what lets a close — which renders to nothing on its
-/// own, having no open to close — be spliced at all.
+/// A container marker with nothing inside renders as one empty element, so
+/// the opening markup is everything before its closing tag. Reading both off
+/// the *open* is what lets a close — which renders to nothing on its own —
+/// be spliced at all.
 pub(crate) fn halves(fragment: &str) -> (&str, &str) {
     fragment
         .rfind("</")
         .map_or((fragment, ""), |at| fragment.split_at(at))
 }
 
-/// `fragment` with every class token under the parser's brand rewritten to
-/// this crate's.
-///
-/// Scanning for the attribute rather than for the brand is what keeps the
-/// rewrite off the author's own text: the parser puts its brand in class
-/// attributes and nowhere else, so a `aozora-` that reaches here outside
-/// one belongs to the document.
+/// Scanning for the attribute rather than for the brand keeps the rewrite
+/// off the author's own text: the parser puts its brand in class attributes
+/// and nowhere else, so an `aozora-` outside one belongs to the document.
 fn rebrand(fragment: &str) -> String {
     let mut out = String::with_capacity(fragment.len());
     let mut rest = fragment;
@@ -97,9 +77,8 @@ fn rebrand(fragment: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The fragment `run` renders to, going through the parse the
-    /// production path caches. A run past the parser's span budget renders
-    /// to nothing, exactly as it does there.
+    /// A run past the parser's span budget renders to nothing, exactly as
+    /// it does on the production path.
     fn render(run: &str) -> String {
         aozora::parse(run.to_owned())
             .map_or_else(|_| String::new(), |document| of(&document.snapshot()))

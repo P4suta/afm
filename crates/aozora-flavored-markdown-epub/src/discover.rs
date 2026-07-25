@@ -1,9 +1,5 @@
-//! Phase 1 — discover.
-//!
-//! Walks the input directory, collects the Aozora Flavored Markdown
-//! sources in spine order
-//! (lexicographic for now; the metadata file may override), and parses
-//! the `book.toml` into a structured [`Metadata`] value.
+//! Phase 1 — collect the sources in spine order (lexicographic, unless
+//! `book.toml` overrides it) and parse that manifest into [`Metadata`].
 
 use std::fs;
 use std::path::{Path, PathBuf};

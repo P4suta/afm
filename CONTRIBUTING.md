@@ -1,372 +1,150 @@
 # Contributing to aozora-flavored-markdown
 
-Thanks for wanting to help. aozora-flavored-markdown is an active project with a small
-surface area of rules, but those rules are strict — the guarantees
-below only stay true if every contribution respects them.
-
-## Where things live
-
-aozora-flavored-markdown is the **Markdown ↔ Aozora composition layer**: it composes a
+This repo is the **Markdown ↔ Aozora composition layer**: it composes a
 vendored verbatim comrak with the sibling
-[`P4suta/aozora`](https://github.com/P4suta/aozora) parser /
-renderer to produce HTML where CommonMark + GFM and 青空文庫記法
-coexist correctly. New 青空文庫記法 / lexer / per-node render work
-lands in the sibling repo, not here. aozora-md-side work falls into:
+[`P4suta/aozora`](https://github.com/P4suta/aozora) parser so CommonMark +
+GFM and 青空文庫記法 coexist in one document.
 
-1. **Markdown ↔ Aozora glue** — `crates/aozora-flavored-markdown/`
-   (`render_to_string`, `render_to_ir`, `serialize`,
-   `ast_splice::splice_into_ast`, the `IrDocument` projection).
-2. **CLI** — `crates/aozora-flavored-markdown-cli/` (`aozora-flavored-markdown render` / `aozora-flavored-markdown check`).
-3. **WASM bridge** — `crates/aozora-flavored-markdown-wasm/` (aozora-flavored-markdown-obsidian / browser
-   hosts).
-4. **Documentation** — the READMEs (introduction), rustdoc (API), and
-   `docs/adr/` (Architecture Decision Records).
-
-Authoring tools (formatter / LSP / VS Code extension) live in a
-third sibling repo
-[`P4suta/aozora-tools`](https://github.com/P4suta/aozora-tools)
-per ADR-0009.
+**New 青空文庫記法 does not start here.** Lexer phases, AST shapes,
+recogniser tables and a notation's own HTML all live in the sibling repo
+(ADR-0010, ADR-0021). File it there; the next version bump brings it here
+automatically.
 
 ## Ground rules
 
-1. **Docker-only execution** (ADR-0002). Do not invoke `cargo` or
-   `bun` on the host. Every automated step goes through
-   `just <target>`, which shells into the dev container.
-2. **Vendored comrak is hands-off** (ADR-0001). The fork sits at
-   `upstream/comrak/` with a **0-line diff budget** — any change
-   would be a fork divergence and needs its own ADR. Composition
-   happens in `aozora-flavored-markdown::ast_splice` (AST sentinel splice),
-   never inside `upstream/comrak/`.
-3. **No warning suppressions.** `#[allow(...)]`, `#![allow(...)]`,
-   `#[cfg_attr(..., allow(...))]`, `continue-on-error` in
-   workflows, and similar escape hatches are rejected by
-   `just strict-code`. Refactor the real issue instead.
-4. **TDD with C1 100% branch coverage as the goal.** A failing
-   test lands first, then the fix. The CI floor is currently 97%
-   regions (`_COV_FLOOR` in `Justfile`), ratcheted upward as gaps
-   close.
-5. **No unused dependencies.** A dependency declared in any
-   `Cargo.toml` — including `[workspace.dependencies]` — that no
-   crate actually `use`s is rejected by `just shear` (cargo-shear).
-   Delete the dead entry, or — for a macro- or `cfg`-only use
-   cargo-shear's `syn` pass can't see — record a documented
+1. **Docker-only execution** (ADR-0002). Never invoke `cargo` or `bun` on
+   the host — every step goes through `just <target>`, which shells into
+   the dev container.
+2. **Vendored comrak is hands-off** (ADR-0001). `upstream/comrak/` has a
+   **0-line diff budget**; composition happens in `ast_splice`, never
+   inside the fork.
+3. **No warning suppressions.** `#[allow(...)]`, `continue-on-error`, and
+   similar escape hatches are rejected by `just strict-code`. Fix the real
+   issue.
+4. **TDD, with the coverage floor as a ratchet.** A failing test lands
+   first. The floor is `_COV_FLOOR` in the `Justfile` and only moves up.
+5. **No unused dependencies.** `just shear` rejects them. For a macro- or
+   `cfg`-only use its `syn` pass cannot see, record a documented
    `[workspace.metadata.cargo-shear] ignored = [...]`.
+6. **Comments earn their place.** `just comment-discipline` fails on doc
+   comments naming retired upstream paths, and on a doc-comment ratio above
+   the pinned ceiling. Write down *why*, not what the code already says.
 
-## First-time setup
-
-One command after cloning — builds the dev image, installs the git
-hooks, checks the environment, and runs the tests:
-
-```sh
-just setup
-```
-
-It wraps the steps you can also run by hand:
+## Setup and the development loop
 
 ```sh
-docker compose build dev       # ~5 min first time, cached afterward
-jj git init --colocate         # if jj isn't already initialised (optional)
-just hooks                     # wire lefthook pre-commit / commit-msg / pre-push
-just doctor                    # verify images, volumes, the aozora pin
-just test                      # confirm green
-```
-
-`just setup` is idempotent, so re-run it after pulling. Prefer zero local
-setup? The **Open in GitHub Codespaces** badge in the README boots a
-container with the toolchain already built.
-
-## Development loop
-
-```sh
-just watch                     # bacon watcher inside the dev container
-just lint                      # fmt + clippy pedantic+nursery + typos + strict-code + comment-discipline
+just setup                     # build the dev image, install hooks, run tests
+just watch                     # bacon watcher inside the container
+just lint                      # fmt + clippy + typos + strict-code + comment-discipline
 just test                      # full workspace nextest
-just prop                      # property-based sweep (128 cases per block)
-just spec-commonmark           # CommonMark 0.31.2 (652 cases)
-just spec-gfm                  # GFM 0.29 spec
-just coverage                  # cargo llvm-cov, fails below _COV_FLOOR
-just upstream-diff             # verify upstream/comrak/ is still 0-line
-just ci                        # replica of the full CI pipeline
-
-# Before a release:
-just prop-deep                 # 4096 cases per block — deeper than CI
+just ci                        # exactly the gate CI runs
 ```
 
-`just --list` enumerates everything available.
+`just setup` is idempotent; re-run it after pulling. `just --list`
+enumerates every recipe. Before a release, `just prop-deep` runs a 4096-case
+property sweep — deeper than CI.
 
-Aozora-layer fixtures (annotation cases, golden 56656, 17 k-work
-corpus sweep, fuzz) live in the sibling
-[`P4suta/aozora`](https://github.com/P4suta/aozora) repo. Run them
-from there.
-
-## Your first change
-
-A quick lap to confirm the loop works end to end:
-
-1. `just setup` — once per clone (build image, hooks, doctor, tests).
-2. `just watch` in one terminal — bacon recompiles on every save.
-3. Make a small edit in `crates/aozora-flavored-markdown/` and add a test next to
-   it (a `#[cfg(test)]` case, or a row in the relevant `tests/*.rs`).
-   The watcher stays red until it passes.
-4. `just test` for the whole suite, `just lint` for fmt + clippy.
-5. `just ci` before you push — it is exactly the gate CI runs, so a
-   green `just ci` means a green PR. The `pre-push` hook runs it for you.
-6. Commit with a Conventional Commits subject (`feat(markdown): …`);
-   the `commit-msg` hook rejects anything else.
-
-New 青空文庫 notation does **not** start here — it lands in the sibling
-[`P4suta/aozora`](https://github.com/P4suta/aozora) repo first (ADR-0010).
+Aozora-layer fixtures (annotation cases, the golden corpus, fuzz) live in
+the sibling repo. Run them from there.
 
 ## Troubleshooting
 
-Run **`just doctor`** first — it audits images, cache volumes, the
-`aozora` pin, and playground prerequisites, and prints a fix hint for
-anything missing.
+Run **`just doctor`** first: it audits images, cache volumes, the `aozora`
+pin and playground prerequisites, and prints a fix hint for anything
+missing. Beyond that:
 
-- **First `docker compose build dev` is slow (~2–5 min).** Expected; it
-  is cached afterwards. A flaky download usually fixes itself on a
-  re-run (`CARGO_NET_RETRY=10` rides out transient registry blips).
-- **`Blocking waiting for file lock on build directory`.** Two cargo
-  commands are sharing the one `cargo-target` volume — e.g. `just watch`
-  while you run `just test`. Let one finish; they serialise on the lock,
-  they do not deadlock.
-- **rust-analyzer shows "cannot find Cargo" / red squiggles everywhere.**
-  The host has no Rust toolchain (ADR-0002) — rust-analyzer must run
-  *inside* the image. Open the repo in the devcontainer / a Codespace
-  (it boots `rust-analyzer` in-container), or work from `just shell`. A
-  host-side rust-analyzer cannot see the toolchain and never will.
-- **`just <recipe>` fails with a Docker error from inside a container.**
-  Your image predates the container-aware Justfile. Rebuild it
-  (`docker compose build dev`) so `AOZORA_MD_IN_CONTAINER=1` is baked in and
-  recipes run their tool directly instead of nesting a container.
-- **sccache looks cold (slow rebuilds).** `just sccache-stats` shows the
-  hit ratio; a stray `RUSTC_WRAPPER` override or profile tweak can defeat
-  it. `just sccache-zero && just clean && just build && just sccache-stats`
-  gives a clean measurement window.
-- **Root-owned files in the tree / permission denied.** The dev image
-  runs as UID 1000 so bind-mount writes stay host-owned; if a CI run
-  left root-owned artefacts behind, `just clean` (or `just nuke` to also
-  drop the cache volumes) resets them.
-- **Docker Desktop / WSL feels slow.** The cargo registry, target, and
-  sccache caches plus the playground `node_modules` live in *named
-  volumes* outside the `/workspace` bind mount on purpose — don't move
-  them into the tree, that is the slow path.
+- **`Blocking waiting for file lock on build directory`** — two cargo
+  commands share the one `cargo-target` volume (e.g. `just watch` during
+  `just test`). They serialise; they do not deadlock.
+- **rust-analyzer cannot find Cargo** — the host has no Rust toolchain
+  (ADR-0002). Open the repo in the devcontainer or a Codespace, or work
+  from `just shell`. A host-side rust-analyzer will never see it.
+- **A `just` recipe fails with a Docker error from inside a container** —
+  your image predates the container-aware `Justfile`. `docker compose build
+  dev` bakes `AOZORA_MD_IN_CONTAINER=1` back in.
+- **Root-owned files / permission denied** — `just clean`, or `just nuke`
+  to also drop the cache volumes.
+- **Docker Desktop / WSL feels slow** — the registry, target, sccache and
+  `node_modules` caches live in named volumes outside the bind mount on
+  purpose. Moving them into the tree is the slow path.
 
-## How to make a change
+## Where a change lands
 
-### aozora-flavored-markdown (the glue layer)
-
-Most aozora-md-side changes are one of:
-
-- **Aozora splice edge case** — landing in
-  `crates/aozora-flavored-markdown/src/ast_splice.rs`. Add a unit test in the
-  same module's `#[cfg(test)] mod tests` and a property-test ping
-  in `tests/post_process_invariants.rs` if the change has
-  cross-input semantics. Predicates that codify "must-never-be"
-  HTML shapes live in the `aozora-flavored-markdown-test-support` crate —
-  add new ones there with both the predicate and a unit pin
-  (`invariant_unit_check_X_passes_on_clean_input`,
-  `invariant_unit_check_X_fires_on_<shape>`).
-- **Construct substitution** — `crates/aozora-flavored-markdown/src/constructs.rs`
-  owns the table both walkers consume: one PUA sentinel per 青空文庫
-  construct, substituted in source coordinates (ADR-0023). Changes there
-  belong with a unit test in the same module, plus a case in
-  `crates/aozora-flavored-markdown/tests/construct_spans.rs` when they touch
-  what a construct's byte range covers or resolves to.
-- **IR projection** — `crates/aozora-flavored-markdown/src/ir/`. Every
-  notation projects to one `IrBlock::Aozora` / `IrInline::Aozora`
-  (ADR-0022); paragraph dispatch flows through `IrWalker::walk_top` →
-  `classify_paragraph`. Streaming-mode behaviour goes through
-  `StreamingIrBuilder`. Add tests in
-  `crates/aozora-flavored-markdown/tests/ir_aozora.rs`.
-- **CSS class contract drift** — `AOZORA_MD_CLASSES` is derived from the
-  sibling renderer's own published list (the brand is rewritten to
-  `aozora-md-*` per ADR-0011), so a class it adds, renames or drops needs
-  no edit there. What it does need is a matching rule in both
-  `crates/aozora-flavored-markdown/theme/aozora-md-{horizontal,vertical}.css`;
-  `tests/css_class_contract.rs` fails until the themes and the contract
-  agree in both directions.
-- **Public API drift** — `Options::default` defaults, new
-  entry points, diagnostic shape. Lives in
-  `crates/aozora-flavored-markdown/src/lib.rs`. Bumping the IR schema is a
-  semver-major change because aozora-flavored-markdown-wasm and aozora-flavored-markdown-obsidian validate
-  it on the JS side.
-- **CLI behaviour** — `crates/aozora-flavored-markdown-cli/src/main.rs` and the binary-
-  level integration tests in `crates/aozora-flavored-markdown-cli/tests/cli_integration.rs`.
-
-### Spec / golden / corpus regression
-
-`crates/aozora-flavored-markdown/tests/*.rs` covers the CommonMark + GFM spec
-runners (`commonmark_spec.rs`, `gfm_spec.rs`) and the Aozora ×
-Markdown integration surface (`aozora_parity.rs`,
-`paired_container.rs`, `heading_promotion.rs`,
-`block_structure_interaction.rs`,
-`property_html_shape.rs`, …). Each adds a single layer of evidence;
-new invariants ride on the same scaffolding.
-
-### Adding a 青空文庫 notation
-
-Recognising it **does not happen on the aozora-flavored-markdown
-side**. Lexer phases, AST shapes, recogniser tables and the notation's
-own HTML all live in the sibling
-[`P4suta/aozora`](https://github.com/P4suta/aozora) repo (ADR-0010 for
-the rationale, ADR-0021 for the boundary). Once a construct is
-classified upstream, the next version bump here gives it neither a
-renderer nor an IR variant of its own: it arrives as one more entry in
-the construct table (`src/constructs.rs`), renders from its own source
-run (`src/fragment.rs`), and reaches the IR as a new `kind` string on
-`IrInline::Aozora` / `IrBlock::Aozora` (ADR-0022).
-
-Three things still have to be checked when the bump brings a notation
-this repo has never seen:
-
-- **`block_sentinel_of` in `src/constructs.rs`** — which of the four
-  sentinels stands for the construct. A notation written on a line of
-  its own (a page break, a container marker, an illustration) needs an
-  arm here. The upstream kind enum is `#[non_exhaustive]`, so a kind
-  no arm names does not fail to compile — it falls through to the
-  inline sentinel, and the construct's block-level markup is then
-  spliced *inside* the surrounding `<p>`.
-- **`inline_is_dropped` in the same file** — which constructs an
-  inline walk consumes rather than renders (a heading hint always, a
-  directive inside a heading). Also a hand-written match over kinds.
-- **A theme rule for each new CSS class.** `AOZORA_MD_CLASSES` is
-  derived from the parser's own list rather than hand-kept, so nothing
-  needs adding to it; `tests/css_class_contract.rs` names the classes
-  no stylesheet covers yet, in both directions.
+- **Splice edge case** — `crates/aozora-flavored-markdown/src/ast_splice.rs`,
+  with a unit test in the same module. A "must never be" HTML shape belongs
+  in the `aozora-flavored-markdown-test-support` crate as a predicate plus
+  both unit pins (passes-on-clean, fires-on-shape).
+- **Construct substitution** — `src/constructs.rs` owns the table both
+  walkers consume, one PUA sentinel per construct in source coordinates
+  (ADR-0023). Touching what a byte range covers needs a case in
+  `tests/construct_spans.rs`.
+- **IR projection** — `src/ir/`. Every notation projects to one
+  `IrBlock::Aozora` / `IrInline::Aozora` (ADR-0022). Tests in
+  `tests/ir_aozora.rs`. Bumping the IR schema is semver-major: the wasm
+  bridge and the obsidian plugin validate it on the JS side.
+- **CSS classes** — `AOZORA_MD_CLASSES` is derived from the sibling
+  renderer's list (rebranded per ADR-0011), so nothing is hand-kept. A new
+  class needs a rule in both `theme/aozora-md-{horizontal,vertical}.css`;
+  `tests/css_class_contract.rs` fails until they agree in both directions.
+- **A notation this repo has never seen** — check `block_sentinel_of` (an
+  unnamed kind falls through to the inline sentinel, which would splice
+  block markup inside a `<p>`) and `inline_is_dropped`, both hand-written
+  matches in `src/constructs.rs`.
 
 ## Architectural changes
 
-Any decision that shapes how a whole subsystem behaves lands first
-as an **Architecture Decision Record** (MADR format) under
-`docs/adr/`. Scaffold one with:
+Any decision that shapes a whole subsystem lands first as an ADR (MADR
+format) under `docs/adr/`:
 
 ```sh
 cargo xtask new-adr 'my new decision'
 ```
 
-Add a row to the index ([`docs/ADR_INDEX.md`](docs/ADR_INDEX.md)) and
-reference the ADR in the commit body.
-`docs/adr/0021-aozora-boundary-is-the-public-surface.md` is an
-example of a decision that reshapes a whole boundary;
-`docs/adr/0011-brand-boundary-css-class-rewrite.md` is an example of a
-small, scoped one.
+Add a row to [`docs/ADR_INDEX.md`](docs/ADR_INDEX.md) and reference the ADR
+in the commit body.
 
-## Commit style
+## Commits and pull requests
 
-**Conventional Commits**
-([v1.0.0](https://www.conventionalcommits.org/)). The `commit-msg`
-hook enforces this. Accepted types: `feat`, `fix`, `docs`,
-`style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
-`revert`. Scopes match the workspace shape — one of: `markdown`
-(aozora-flavored-markdown), `cli` (aozora-flavored-markdown-cli), `wasm`
-(aozora-flavored-markdown-wasm), `epub`, `xtask`, `comrak` (touches under
-`upstream/comrak/`), `adr`, `release`, `dev`, `test`.
+[Conventional Commits](https://www.conventionalcommits.org/), enforced by
+the `commit-msg` hook. Scopes match the workspace shape: `markdown`, `cli`,
+`wasm`, `epub`, `xtask`, `comrak`, `adr`, `release`, `dev`, `test`. One
+logical change per commit.
 
-A single commit should be a single logical change. Split unrelated
-edits.
+PR titles match the commits, and `Closes #N` links the issue. Keep the PR
+template's checklist — it is the same gate `just ci` runs, so a green
+`just ci` means a green PR.
 
-## Pull requests
+Report bugs with the `bug_report` form; the shortest source text that
+triggers the issue is the most valuable thing you can supply. Security
+issues go through `SECURITY.md`, never a public issue.
 
-- PR title should be `<type>(<scope>): <summary>` matching the
-  commits.
-- Link any issue the PR closes (`Closes #N` in the body).
-- The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) walks you
-  through the checklist — **keep it**. It reminds everyone
-  (including the author) of the full gate: tests, coverage, ADR,
-  `just ci`.
-- CI runs `just ci` in the ci container image. The gate is the
-  same one you ran locally; surprises mean either an environment
-  mismatch or an ADR-boundary subtlety.
-
-## Reporting bugs and asking for features
-
-- **Bugs**: use the `bug_report` issue form. The minimal
-  reproducible input (the shortest source text that triggers the
-  issue) is the most valuable thing you can supply.
-- **Features**: use the `feature_request` form. Concrete
-  motivation (a real Aozora Bunko text that needs the notation, a
-  CommonMark construction that would benefit, a corpus sweep hit)
-  makes triage faster. If the feature is "support a new 青空文庫
-  notation", file it on the sibling
-  [`P4suta/aozora`](https://github.com/P4suta/aozora/issues) repo
-  instead — that's where the parser lives.
-- **Questions / discussions**: prefer GitHub Discussions over
-  issues.
-
-## Security
-
-Security-sensitive issues (parser crashes, memory safety concerns,
-sandbox escapes) should be reported privately per `SECURITY.md` —
-do **not** open a public issue.
-
-## How to release
+## Releasing
 
 Releases are automated by [cargo-dist](https://opensource.axo.dev/cargo-dist/)
-(`dist`) and triggered by a git tag of the form `v<semver>`:
+and triggered by a `v<semver>` tag:
 
-1. Update `CHANGELOG.md` — promote `[Unreleased]` to
-   `[<version>] - YYYY-MM-DD` and add a fresh `[Unreleased]` stub. The
-   file is **written by hand**: an entry has to say what broke and what
-   to do about it, which a commit subject does not. `just changelog`
-   prints a Conventional-Commits draft to stdout to check the section
-   against — it does not write the file, and nothing else may.
-2. Regenerate the bundled CLI assets: `just dist-assets`. The man page
-   embeds the version, so a version bump changes
-   `dist/assets/man/aozora-flavored-markdown.1` (and `just ci`'s `dist-assets-check` gate
-   would otherwise fail).
-3. Commit the changelog + asset bump:
-   `git commit -m "chore: release v<version>"`.
-4. Tag (annotated): `git tag -a v<version> -m 'v<version>'`.
-5. Push: `git push origin main v<version>`.
-6. `.github/workflows/release.yml` (generated by `dist`) reacts to
-   the tag, builds the `aozora-flavored-markdown` binary on the five targets configured
-   in `dist-workspace.toml` (aarch64/x86_64 linux-gnu, aarch64/x86_64
-   macOS, x86_64 windows-msvc), packages each as an archive with the
-   licences + `README.md` + bundled completions and man page, generates
-   `shell`/`powershell` installer scripts and checksums, and creates the
-   GitHub Release with notes derived from the changelog.
-7. Sanity check: download one artefact, verify its `.sha256`, then
-   `./aozora-flavored-markdown --version` to confirm the embedded version matches the tag.
+1. Update `CHANGELOG.md` by hand — an entry has to say what broke and what
+   to do about it, which a commit subject does not. `just changelog` prints
+   a draft to stdout to check against; nothing writes the file for you.
+2. `just dist-assets` — the man page embeds the version, and `just ci`'s
+   `dist-assets-check` gate fails otherwise.
+3. Commit, tag annotated, push both.
 
-The release config lives in `dist-workspace.toml`; regenerate the
-workflow after editing it with `dist generate`. Every PR runs the
-`plan` job (a `dist plan` dry-run) so a broken release config fails
-at review time; you can also run `dist plan` locally before tagging.
+`release.yml` is **generated, never hand-edited**: `dist plan` diffs it
+against the generator and fails on any drift, including the `actions/*`
+refs inside it. Those refs are commit-pinned via
+`[dist.github-action-commits]` in `dist-workspace.toml`; move one forward by
+resolving the tag, updating the entry and its comment, running `dist
+generate`, and committing both files. `.github/dependabot.yml` excludes the
+generated file from version updates — a *security* PR can still rewrite it,
+in which case close the PR and bump the pin instead. The weekly
+`release-pins` workflow fails when a pin freezes behind its upstream.
 
-`release.yml` is **generated, never hand-edited** — `dist plan`
-diffs it against the generator and fails on any drift, including the
-`actions/*` refs inside it. So `.github/dependabot.yml` excludes the
-file from the `github-actions` ecosystem (`exclude-paths`); every
-hand-written workflow stays under Dependabot.
-
-The refs are still commit-pinned, not left floating on a major tag:
-`[dist.github-action-commits]` in `dist-workspace.toml` maps each
-action to an immutable SHA, and the generator emits that instead of
-its own default. To move one forward, resolve the tag
-(`gh api repos/<owner>/<action>/git/ref/tags/<tag> --jq .object.sha`),
-update the entry and its `# v<x.y.z>` comment, run `dist generate`,
-and commit both files together. Same for `cargo-dist-version` itself.
-
-Two things do **not** happen automatically, by design:
-
-- `exclude-paths` is version-updates-only. A Dependabot *security*
-  PR can still rewrite `release.yml`; it will fail `dist plan`. Close
-  it and bump the pin in `dist-workspace.toml` instead.
-- Nothing else watches `dist-workspace.toml` — Dependabot's cargo
-  ecosystem reads `Cargo.toml`/`Cargo.lock` only. The weekly
-  `release-pins` workflow (`.github/workflows/release-pins.yml`,
-  also `workflow_dispatch`-able) fails when `cargo-dist-version`
-  trails the newest dist release or when a pinned action commit is no
-  longer the tip of its major tag, so the pins cannot freeze silently.
-
-**ADR-0002 scope exception**: release builds run on native GitHub
-Actions runners with the matching stable rustc, not inside the dev
-Docker image. The Docker-only rule applies to development and CI;
-the release pipeline is deliberately host-toolchain so each binary
-target matches its runner OS exactly.
+**ADR-0002 scope exception**: release builds run on native runners so each
+binary target matches its runner OS. Docker-only applies to development and
+CI.
 
 ## License
 
-By contributing, you agree that your contributions are
-dual-licensed under Apache-2.0 OR MIT, the same as the project.
+By contributing, you agree that your contributions are dual-licensed under
+Apache-2.0 OR MIT, the same as the project.
