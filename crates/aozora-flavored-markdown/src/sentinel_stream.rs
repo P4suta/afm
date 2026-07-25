@@ -28,6 +28,8 @@ use aozora::pipeline::{
 use aozora::syntax::borrowed::{AozoraNode, HeadingHint, NodeRef};
 use comrak::nodes::{AstNode, NodeValue};
 
+use crate::diagnostics::Span;
+
 /// Which paired sentinel a block-sentinel paragraph carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockSentinelKind {
@@ -219,9 +221,70 @@ where
     });
 }
 
-/// Cursor over an owned sentinel-ordered stream of (construct, literal)
-/// pairs, where `literal` is the original source text the lexer collapsed
-/// into that sentinel.
+/// The lexer's normalised text, plus whether its byte offsets are also
+/// valid offsets into the text the caller handed us.
+///
+/// Every span the lexer reports is measured against its Phase-0 output, and
+/// that phase *moves bytes*: it strips leading BOMs, folds `\r\n` to `\n`,
+/// decomposes accent digraphs inside `〔…〕`, and inserts a blank line
+/// before decorative rules. On such an input a normalised offset addresses a
+/// different — possibly non-`char`-boundary — position in the caller's own
+/// source, so handing it out as "slice your source with this" would return
+/// silently wrong text or panic.
+///
+/// [`Self::derived`] settles the question once, by comparing the two
+/// texts, and the answer rides along to whoever publishes a span
+/// (currently [`crate::ir`], which withholds spans it cannot honour).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NormalizedSource<'s> {
+    /// The normalised text. Span coordinates are byte offsets into this.
+    pub(crate) text: &'s str,
+    /// `true` when a span's offsets address `text` *and* the caller's
+    /// source, because normalisation changed nothing.
+    pub(crate) addresses_source: bool,
+}
+
+impl<'s> NormalizedSource<'s> {
+    /// For a caller that supplies the normalised text itself: its own
+    /// coordinates are, trivially, the ones the spans use.
+    pub(crate) const fn verbatim(text: &'s str) -> Self {
+        Self {
+            text,
+            addresses_source: true,
+        }
+    }
+
+    /// For the internal pipeline, where `normalized` was derived from
+    /// `source` by the lexer's Phase 0.
+    ///
+    /// Byte-equality is the exact test: this crate's code-block mask is
+    /// char-for-char length preserving (every trigger and the mask are
+    /// 3-byte codepoints), so an unchanged normalisation means the offsets
+    /// index the caller's raw input as well.
+    pub(crate) fn derived(normalized: &'s str, source: &str) -> Self {
+        Self {
+            text: normalized,
+            addresses_source: normalized == source,
+        }
+    }
+}
+
+/// One entry of the sentinel stream: the construct a sentinel stands for,
+/// plus the byte range it occupied in the source.
+///
+/// `span` is `None` for entries built without a usable source table —
+/// [`SentinelCursor::from_nodes`] (unit tests and the streaming cursor
+/// swap), or a normalisation that moved the coordinates away from the
+/// caller's source (see [`NormalizedSource`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SentinelHit<'src> {
+    pub(crate) node: NodeRef<'src>,
+    pub(crate) span: Option<Span>,
+}
+
+/// Cursor over an owned sentinel-ordered stream of (construct, span,
+/// literal) entries, where `literal` is the original source text the lexer
+/// collapsed into that sentinel.
 ///
 /// Both [`crate::ast_splice`] and [`crate::ir`] materialise the stream into
 /// a `Vec` once, then walk it linearly. The cursor owns that `Vec` so
@@ -231,7 +294,7 @@ where
 /// The owned `literal` lets the splicer's literal-context paths render a
 /// sentinel that landed inside a markdown inline code span or a link
 /// destination as its *original source*, not as the Aozora HTML. It is
-/// owned (not a borrow) because it is sliced from the **sanitized**
+/// owned (not a borrow) because it is sliced from the **normalised**
 /// source — a transient buffer the lexer rewrites from the raw input
 /// (BOM/CRLF/accent-span normalisation) — which the cursor must not
 /// outlive a borrow into. Callers that don't need it (`from_nodes`, the
@@ -239,7 +302,7 @@ where
 /// [`Self::next`] / [`Self::peek`].
 #[derive(Debug)]
 pub(crate) struct SentinelCursor<'src> {
-    nodes: Vec<(NodeRef<'src>, String)>,
+    nodes: Vec<(SentinelHit<'src>, String)>,
     idx: usize,
 }
 
@@ -250,17 +313,23 @@ impl<'src> SentinelCursor<'src> {
     /// back to its original Aozora source instead of leaking the PUA char
     /// or rendering interpreted markup where it doesn't belong.
     ///
-    /// `sanitized` MUST be the lexer's Phase-0 sanitized source, because
-    /// the span coordinates are in sanitized-source bytes — slicing the raw
+    /// `src` MUST be the lexer's input-normalisation output, because the
+    /// span coordinates are in normalised-source bytes — slicing the raw
     /// input would misalign (or panic) on BOM / CRLF / accent-span inputs.
     /// The two tables are parallel and both source-ordered (pinned by
     /// `source_nodes_parallel_to_registry`), so zipping pairs each entry
     /// with its own span. The `get` guard keeps a span that somehow falls
-    /// outside `sanitized` from panicking — it degrades to an empty literal
+    /// outside the text from panicking — it degrades to an empty literal
     /// rather than aborting the process.
+    ///
+    /// A hit only carries its span when [`NormalizedSource::addresses_source`]
+    /// says the offsets still address the caller's source; otherwise the
+    /// span is withheld rather than published in coordinates no consumer
+    /// holds. Literals are unaffected — those are sliced from the
+    /// normalised text right here, where the coordinates are always valid.
     pub(crate) fn from_lex_out_with_source(
         lex_out: Option<&BorrowedLexOutput<'src>>,
-        sanitized: &str,
+        src: NormalizedSource<'_>,
     ) -> Self {
         let nodes = lex_out.map_or_else(Vec::new, |lo| {
             lo.registry
@@ -268,11 +337,19 @@ impl<'src> SentinelCursor<'src> {
                 .zip(lo.source_nodes.iter())
                 .map(|((_pos, node), sn)| {
                     let span = sn.source_span;
-                    let literal = sanitized
+                    let literal = src
+                        .text
                         .get(span.start as usize..span.end as usize)
                         .unwrap_or_default()
                         .to_owned();
-                    (node, literal)
+                    let hit = SentinelHit {
+                        node,
+                        span: src.addresses_source.then_some(Span {
+                            start: span.start,
+                            end: span.end,
+                        }),
+                    };
+                    (hit, literal)
                 })
                 .collect()
         });
@@ -281,12 +358,12 @@ impl<'src> SentinelCursor<'src> {
 
     /// Construct directly from a `Vec` of registry entries (used
     /// by tests and by the streaming builder which owns the `Vec`).
-    /// Literals are empty — the streaming IR builder never reads them.
+    /// Literals are empty and spans absent — neither is read on that path.
     pub(crate) fn from_nodes(nodes: Vec<NodeRef<'src>>) -> Self {
         Self {
             nodes: nodes
                 .into_iter()
-                .map(|node| (node, String::new()))
+                .map(|node| (SentinelHit { node, span: None }, String::new()))
                 .collect(),
             idx: 0,
         }
@@ -296,12 +373,12 @@ impl<'src> SentinelCursor<'src> {
     /// `peek(0)` returns the next entry that [`Self::next`] would
     /// produce.
     pub(crate) fn peek(&self, offset: usize) -> Option<NodeRef<'src>> {
-        self.nodes.get(self.idx + offset).map(|(node, _)| *node)
+        self.nodes.get(self.idx + offset).map(|(hit, _)| hit.node)
     }
 
     /// Consume and return the next entry, advancing the cursor.
-    pub(crate) fn next(&mut self) -> Option<NodeRef<'src>> {
-        let n = self.nodes.get(self.idx).map(|(node, _)| *node);
+    pub(crate) fn next(&mut self) -> Option<SentinelHit<'src>> {
+        let n = self.nodes.get(self.idx).map(|(hit, _)| *hit);
         if n.is_some() {
             self.idx += 1;
         }
@@ -435,10 +512,80 @@ mod tests {
         let _ = cursor.next();
         assert!(matches!(
             cursor.next(),
-            Some(NodeRef::BlockOpen(ContainerKind::Keigakomi))
+            Some(SentinelHit {
+                node: NodeRef::BlockOpen(ContainerKind::Keigakomi),
+                span: None,
+            })
         ));
         cursor.advance(99); // saturating
         assert!(cursor.next().is_none());
+    }
+
+    /// The source table is what makes the collapsed IR sliceable: each hit
+    /// must come back with the byte range its notation occupied, not just
+    /// the construct. Pin it end-to-end through the real lexer, since the
+    /// zip in `from_lex_out_with_source` is the only place the two parallel
+    /// tables meet.
+    #[test]
+    fn cursor_carries_the_source_span_of_each_hit() {
+        use aozora::pipeline::lex_into_arena;
+        use aozora::syntax::borrowed::Arena;
+
+        const SRC: &str = "前｜青梅《おうめ》後";
+        let arena = Arena::new();
+        let lex_out = lex_into_arena(SRC, &arena);
+        let mut cursor = SentinelCursor::from_lex_out_with_source(
+            Some(&lex_out),
+            NormalizedSource::derived(SRC, SRC),
+        );
+
+        let Some(SentinelHit {
+            span: Some(span), ..
+        }) = cursor.next()
+        else {
+            panic!("the ruby construct must come back with its source span");
+        };
+        assert_eq!(
+            &SRC[span.start as usize..span.end as usize],
+            "｜青梅《おうめ》",
+            "span must slice back to the notation the author wrote"
+        );
+    }
+
+    /// The counterpart: on an input Phase 0 rewrites, the lexer's offsets
+    /// stop addressing the caller's source, so the cursor withholds them.
+    /// CRLF is the case that matters in practice — 青空文庫 source is
+    /// historically Shift_JIS + CRLF — and it is exactly where publishing
+    /// the normalised offset would hand a consumer a mid-codepoint index.
+    #[test]
+    fn cursor_withholds_spans_when_normalisation_moved_the_bytes() {
+        use aozora::pipeline::lex_into_arena;
+        use aozora::pipeline::lexer::sanitize;
+        use aozora::syntax::borrowed::Arena;
+
+        const RAW: &str = "前\r\n\r\n｜青梅《おうめ》へ";
+        let sanitized = sanitize(RAW);
+        let arena = Arena::new();
+        let lex_out = lex_into_arena(RAW, &arena);
+        let mut cursor = SentinelCursor::from_lex_out_with_source(
+            Some(&lex_out),
+            NormalizedSource::derived(&sanitized.text, RAW),
+        );
+
+        let Some(hit) = cursor.next() else {
+            panic!("the ruby construct is still tracked, span or no span");
+        };
+        assert!(
+            hit.span.is_none(),
+            "a normalised offset must not be published as a source offset: {hit:?}"
+        );
+        // Why it must not: the raw source is two bytes longer per folded
+        // CRLF, so the normalised end offset lands inside a codepoint.
+        let normalized_end = lex_out.source_nodes[0].source_span.end as usize;
+        assert!(
+            !RAW.is_char_boundary(normalized_end),
+            "the fixture must keep exercising the mid-codepoint case"
+        );
     }
 
     /// `SentinelCursor::from_lex_out_with_source` reads the registry's

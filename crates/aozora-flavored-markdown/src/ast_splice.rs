@@ -60,14 +60,15 @@ use comrak::Arena;
 use comrak::nodes::{AstNode, NodeHeading, NodeValue};
 
 use crate::sentinel_stream::{
-    BlockSentinelKind, ParaScan, SentinelCursor, is_sentinel_char, paragraph_sole_block_sentinel,
+    BlockSentinelKind, NormalizedSource, ParaScan, SentinelCursor, is_sentinel_char,
+    paragraph_sole_block_sentinel,
 };
 
 /// Splice every Aozora sentinel embedded in `root`'s text descendants
 /// into the comrak AST. After this returns, the AST contains no PUA
 /// sentinel character: `comrak::format_html` will emit fully resolved
 /// HTML in a single verbatim pass.
-/// `sanitized` is the lexer's Phase-0 sanitized source. The splicer slices
+/// `src` is the lexer's Phase-0 sanitized source. The splicer slices
 /// it via the parallel span table to recover a sentinel's original Aozora
 /// source for literal markdown contexts (inline code spans, link
 /// destinations), where the notation must render verbatim rather than as
@@ -77,10 +78,10 @@ pub(crate) fn splice_into_ast<'a, 'src>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
     lex_out: &BorrowedLexOutput<'src>,
-    sanitized: &str,
+    src: NormalizedSource<'_>,
 ) {
     let mut splicer = AstSplicer::<'a, 'src> {
-        cursor: SentinelCursor::from_lex_out_with_source(Some(lex_out), sanitized),
+        cursor: SentinelCursor::from_lex_out_with_source(Some(lex_out), src),
         container_stack: Vec::new(),
         in_heading_depth: 0,
         arena,
@@ -201,13 +202,13 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
     }
 
     fn handle_block_sentinel(&mut self, paragraph: &'a AstNode<'a>, kind: BlockSentinelKind) {
-        let Some(node_ref) = self.cursor.next() else {
+        let Some(hit) = self.cursor.next() else {
             // Registry exhausted: drop the paragraph silently rather
             // than leak the PUA sentinel into the rendered HTML.
             paragraph.detach();
             return;
         };
-        match (kind, node_ref) {
+        match (kind, hit.node) {
             (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(node)) => {
                 self.replace_with_block_html(paragraph, render_aozora_html(node, true));
             }
@@ -270,11 +271,11 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
         while let Some(ch) = chars.next() {
             if is_sentinel_char(ch) {
                 self.flush_text(&mut current, &mut segments);
-                let Some(node_ref) = self.cursor.next() else {
+                let Some(hit) = self.cursor.next() else {
                     continue;
                 };
                 if ch == INLINE_SENTINEL
-                    && let NodeRef::Inline(aozora) = node_ref
+                    && let NodeRef::Inline(aozora) = hit.node
                 {
                     // Heading body must not carry `aozora-md-annotation`
                     // wrappers (Tier C). Annotation-shaped Aozora
@@ -523,7 +524,15 @@ fn classify(value: &NodeValue) -> DispatchAction {
     }
 }
 
-fn render_aozora_html(node: AozoraNode<'_>, entering: bool) -> String {
+/// Render one resolved 青空文庫 construct to its HTML fragment.
+///
+/// `entering` picks the opening or closing half for paired containers; leaf
+/// and inline constructs ignore it and render whole.
+///
+/// [`crate::ir`] calls this too: the collapsed IR carries the same fragment
+/// the HTML splice weaves in, so the two outputs cannot disagree about what
+/// a notation renders to.
+pub(crate) fn render_aozora_html(node: AozoraNode<'_>, entering: bool) -> String {
     let mut out = String::new();
     render_node::render(node, entering, &mut StringSink(&mut out))
         .expect("writing AozoraNode HTML to a String cannot fail");
@@ -584,7 +593,12 @@ mod tests {
         let comrak_arena: Arena<'_> = Arena::new();
         let opts = comrak::Options::default();
         let root = comrak::parse_document(&comrak_arena, lex_out.normalized, &opts);
-        splice_into_ast(root, &comrak_arena, &lex_out, &sanitized.text);
+        splice_into_ast(
+            root,
+            &comrak_arena,
+            &lex_out,
+            NormalizedSource::derived(&sanitized.text, &masked),
+        );
         let mut html = String::new();
         comrak::format_html(root, &opts, &mut html).expect("formatting to a String never fails");
         code_block_mask::unmask_html(&html, &originals).into_owned()

@@ -16,15 +16,16 @@ was extracted (ADR-0010).
 | [0010](./adr/0010-extract-aozora-core.md) | Extract aozora parser core into sibling repository `aozora` | accepted |
 | [0011](./adr/0011-brand-boundary-css-class-rewrite.md) | Brand boundary: HTML class rewrite at the aozora-flavored-markdown side | accepted |
 | [0012](./adr/0012-diagnostic-json-output-schema-and-stability.md) | Diagnostic JSON output schema and stability (`aozora-md.diagnostics.v1`) | accepted |
-| [0013](./adr/0013-public-ir-enums-non-exhaustive.md) | Public IR enums are `#[non_exhaustive]` | accepted |
+| [0013](./adr/0013-public-ir-enums-non-exhaustive.md) | Public IR enums are `#[non_exhaustive]` | accepted (narrowed by 0022) |
 | [0014](./adr/0014-comrak-vendoring-upgrade-policy.md) | comrak vendoring upgrade & follow policy | accepted |
 | [0015](./adr/0015-crates-io-publication-and-semver.md) | crates.io publication and semver policy | accepted |
 | [0016](./adr/0016-rebrand-to-aozora-flavored-markdown.md) | Rebrand `afm` → `aozora-flavored-markdown` | accepted |
-| [0017](./adr/0017-derive-typescript-types-with-tsify.md) | Derive the TypeScript `.d.ts` with `tsify` | accepted |
+| [0017](./adr/0017-derive-typescript-types-with-tsify.md) | Derive the TypeScript `.d.ts` with `tsify` | accepted (union re-stated by 0022) |
 | [0018](./adr/0018-consolidate-the-epub-generator-into-this-workspace.md) | Consolidate the EPUB generator into this workspace | accepted |
 | [0019](./adr/0019-epub-generation-is-hand-rolled-not-via-pandoc.md) | EPUB generation is hand-rolled, not via pandoc | accepted |
 | [0020](./adr/0020-canonicalise-aozora-md-css-at-the-next-aozora-bump.md) | Canonicalise the `aozora-md-*` CSS at the next aozora bump | accepted |
 | [0021](./adr/0021-aozora-boundary-is-the-public-surface.md) | The aozora boundary is aozora's public surface only | accepted |
+| [0022](./adr/0022-collapse-the-aozora-half-of-the-ir.md) | Collapse the Aozora half of the IR to `{kind, span, html}` | accepted |
 
 ## Authoring a new ADR
 

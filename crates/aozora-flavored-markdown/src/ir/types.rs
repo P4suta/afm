@@ -7,8 +7,24 @@
 //! — straight from these definitions, with no hand-written `.d.ts` to keep in
 //! sync (ADR-0017). The `serde` attributes are the single source of the wire
 //! shape.
+//!
+//! # Two halves, two rules
+//!
+//! The Markdown vocabulary is **owned here**: paragraphs, headings, lists,
+//! tables, code, links and images each get their own typed variant, because
+//! this crate is the thing that decides what they mean.
+//!
+//! The 青空文庫 vocabulary is **not**. Every notation collapses to one
+//! variant per level — [`IrBlock::Aozora`] and [`IrInline::Aozora`] — carrying
+//! an opaque `kind` tag, the source `span`, and the rendered `html` fragment.
+//! Mirroring the notation's own type vocabulary here would own it twice
+//! (ADR-0021); a new notation upstream now lands in the IR as a new `kind`
+//! string instead of a new Rust variant.
 
 use serde::Serialize;
+
+#[doc(inline)]
+pub use crate::diagnostics::Span;
 
 #[derive(Debug, Default, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -24,8 +40,10 @@ pub struct IrDocument {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-// New Aozora notations land as new variants; `#[non_exhaustive]` (ADR-0013)
-// lets that happen in a minor release without breaking external `match`es.
+// New Markdown constructs land as new variants; `#[non_exhaustive]`
+// (ADR-0013) lets that happen in a minor release without breaking external
+// `match`es. New 青空文庫 notations do not need a variant at all — they
+// arrive as a new `kind` on `IrBlock::Aozora` (ADR-0022).
 #[non_exhaustive]
 pub enum IrBlock {
     Paragraph {
@@ -84,34 +102,29 @@ pub enum IrBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
-    // ----- Aozora-specific block variants -----
-    /// Paired-container wrapper. `indent_level` is set to `Some(n)` for
-    /// [`ContainerSubtype::Indent`] (字下げ amount) and
-    /// [`ContainerSubtype::AlignEnd`] (地上げ offset); `None` otherwise.
-    Container {
-        subtype: ContainerSubtype,
-        children: Vec<IrBlock>,
+    /// A 青空文庫 construct that occupies a whole block: `［＃改ページ］`,
+    /// `［＃改丁］`, an illustration, or one marker of a paired container.
+    ///
+    /// Containers are **not** nested here. Their open and close markers are
+    /// two separate blocks (`kind` = `"containerOpen"` / `"containerClose"`)
+    /// carrying the opening and closing HTML, in the same document order the
+    /// rendered HTML uses — so concatenating `html` across the document
+    /// reproduces the nesting without this crate re-deriving it.
+    Aozora {
+        /// Opaque notation tag. See [`IrInline::Aozora`]'s `kind`.
+        #[serde(rename = "aozoraKind")]
+        kind: String,
+        /// Byte range of the marker in the source, end-exclusive, under the
+        /// same rules as [`IrInline::Aozora`]'s `span`. Additionally `None`
+        /// for a close marker this crate synthesised because the document
+        /// ended with the container still open.
         #[serde(skip_serializing_if = "Option::is_none")]
-        indent_level: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    PageBreak {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    /// `［＃改丁／改段／改見開き］`. See [`SectionSubtype`]. `［＃改ページ］` is
-    /// its own block — see [`IrBlock::PageBreak`].
-    SectionBreak {
-        subtype: SectionSubtype,
+        span: Option<Span>,
+        /// Rendered HTML for this marker, already rebranded to
+        /// `aozora-md-*` classes (ADR-0011).
+        html: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
     },
 }
 
@@ -148,8 +161,8 @@ pub enum IrTableAlign {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-// See `IrBlock`: `#[non_exhaustive]` (ADR-0013) keeps new inline notations
-// additive for external consumers.
+// See `IrBlock`: `#[non_exhaustive]` (ADR-0013) keeps new inline Markdown
+// constructs additive for external consumers.
 #[non_exhaustive]
 pub enum IrInline {
     Text {
@@ -196,181 +209,46 @@ pub enum IrInline {
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
-    // ----- Aozora-specific variants (mirror TS IRInline) -----
-    /// Furigana. `reading` is the flattened reading text;
-    /// `explicit` is `true` when the source used the explicit
-    /// `｜base《reading》` opener.
-    Ruby {
-        base: Vec<IrInline>,
-        reading: String,
-        explicit: bool,
+    /// A 青空文庫 construct sitting inside a text run: ruby, emphasis
+    /// dots, 縦中横, 外字, a 返り点, a bracket annotation, …
+    ///
+    /// One variant covers all of them on purpose. The notation's own
+    /// vocabulary is the sibling parser's to define (ADR-0021); reproducing
+    /// it as Rust variants here would own it twice and force this crate to
+    /// grow a variant every time upstream grows a notation.
+    Aozora {
+        /// Opaque notation tag — `"ruby"`, `"bouten"`, `"gaiji"`, … —
+        /// serialised as `aozoraKind` because `kind` is already the
+        /// union's discriminant. Treat it as an open string set: an
+        /// unrecognised tag means a notation newer than the consumer,
+        /// and `html` still renders it correctly.
+        #[serde(rename = "aozoraKind")]
+        kind: String,
+        /// Byte range of the notation in the source, end-exclusive —
+        /// slicing the source you passed in recovers the text the author
+        /// wrote.
+        ///
+        /// `None` when that promise cannot be kept: the parser measures
+        /// spans against its normalised text, and normalisation moves bytes
+        /// (a leading BOM is stripped, `\r\n` folds to `\n`, accent
+        /// digraphs inside `〔…〕` combine, decorative rules gain a blank
+        /// line). On such an input the offsets would address a different —
+        /// possibly mid-codepoint — position in your source, so no span is
+        /// reported rather than a wrong one.
         #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
+        span: Option<Span>,
+        /// Rendered HTML for this notation, already rebranded to
+        /// `aozora-md-*` classes (ADR-0011).
+        ///
+        /// Byte-identical to the run the same notation contributes to
+        /// [`crate::render`]'s output — including the case where that run
+        /// is empty: a notation the HTML suppresses in context (an
+        /// annotation inside a heading body, which would contaminate it
+        /// with `aozora-md-annotation` markup) is suppressed here too, so
+        /// rendering from the IR cannot produce markup the document does
+        /// not have.
+        html: String,
     },
-    /// `《《…》》` double-bracket bouten. Upstream's `DoubleRuby`
-    /// carries a single `content` payload — that payload becomes
-    /// `base` here. The shape is intentionally minimal: any future
-    /// upstream addition (e.g., explicit ring-style metadata) lands
-    /// as a new optional field rather than re-using empty strings as
-    /// placeholders.
-    DoubleRuby {
-        base: Vec<IrInline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    /// Emphasis dots / sidelines. See [`BoutenStyle`] and [`BoutenPosition`].
-    Bouten {
-        children: Vec<IrInline>,
-        style: BoutenStyle,
-        position: BoutenPosition,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    Gaiji {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        codepoint: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fallback_text: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    Tcy {
-        text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-    /// Generic annotation. `payload` is the raw bytes between `［＃` and
-    /// `］`. `resolved` carries the [`AnnotationKind`] classification when
-    /// the upstream lexer recognised the annotation; `None` for future
-    /// non-exhaustive variants aozora-flavored-markdown hasn't seen yet.
-    Annotation {
-        payload: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        resolved: Option<AnnotationKind>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        range: Option<Range>,
-    },
-}
-
-// ---------------------------------------------------------------------
-// Aozora classification enums
-//
-// These mirror the sibling parser's own classifications but are owned
-// here, so the public IR surface is decoupled from upstream's
-// semver. Each `#[serde(rename_all = "camelCase")]` variant serializes to
-// the exact wire string the previous stringly-typed fields produced, so
-// the JSON is byte-identical. `#[non_exhaustive]` keeps them additive
-// (ADR-0013); `Unknown` is the wire value emitted when the upstream lexer
-// produces a variant aozora-flavored-markdown does not classify yet.
-
-/// Paired-container subtype, mirroring the upstream container kind
-/// (minus the numeric payload, which rides in
-/// [`IrBlock::Container`]'s `indent_level`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub enum ContainerSubtype {
-    /// 字下げ — left indent.
-    Indent,
-    /// 地上げ — right-aligned (trailing) block.
-    AlignEnd,
-    /// 罫囲み — ruled box.
-    Keigakomi,
-    /// 割り注 — interlinear note.
-    Warichu,
-    /// An upstream variant aozora-flavored-markdown does not classify yet.
-    Unknown,
-}
-
-/// Section-break subtype, mirroring the upstream section kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub enum SectionSubtype {
-    /// 改丁.
-    Choho,
-    /// 改段.
-    Dan,
-    /// 改見開き.
-    Spread,
-    /// An upstream variant aozora-flavored-markdown does not classify yet.
-    Unknown,
-}
-
-/// Emphasis-dot / sideline style, mirroring the upstream bouten kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub enum BoutenStyle {
-    /// ゴマ点.
-    Goma,
-    /// 白ゴマ点.
-    WhiteSesame,
-    /// 丸.
-    Circle,
-    /// 白丸.
-    WhiteCircle,
-    /// 二重丸.
-    DoubleCircle,
-    /// 蛇の目.
-    Janome,
-    /// ばつ.
-    Cross,
-    /// 白三角.
-    WhiteTriangle,
-    /// 波線（脇線）.
-    WavyLine,
-    /// 傍線.
-    UnderLine,
-    /// 二重傍線.
-    DoubleUnderLine,
-    /// An upstream variant aozora-flavored-markdown does not classify yet.
-    Unknown,
-}
-
-/// Which side of the text a bouten sits on, mirroring the upstream
-/// bouten position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub enum BoutenPosition {
-    /// Right side (vertical) / above (horizontal) — the default.
-    Right,
-    /// Left side (vertical) / below (horizontal).
-    Left,
-    /// An upstream variant aozora-flavored-markdown does not classify yet.
-    Unknown,
-}
-
-/// Resolved annotation classification, mirroring the upstream
-/// annotation kind.
-///
-/// Carried as `Option` on [`IrInline::Annotation`]'s `resolved`: `None`
-/// means the upstream lexer produced a variant aozora-flavored-markdown
-/// hasn't seen yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub enum AnnotationKind {
-    /// The lexer saw the annotation but could not classify it.
-    Unknown,
-    /// `［＃「…」はママ］` — leave as-is.
-    AsIs,
-    /// A textual editorial note.
-    TextualNote,
-    /// A ruby span the lexer flagged as invalid.
-    InvalidRubySpan,
-    /// 割り注 open marker.
-    WarichuOpen,
-    /// 割り注 close marker.
-    WarichuClose,
 }
 
 /// Source-position range, end-exclusive.
@@ -403,65 +281,54 @@ pub struct Position {
 mod tests {
     use super::*;
 
-    /// Lock the camelCase wire strings the stringly-typed fields used to
-    /// produce, so the enum migration stays byte-identical on the JSON side.
+    /// Serialise an IR value, turning the (unreachable) error into a test
+    /// failure. `serde_json` only fails here for types with a custom
+    /// `Serialize` that errors, which none of these have.
+    fn json<T: Serialize>(value: T) -> serde_json::Value {
+        match serde_json::to_value(value) {
+            Ok(v) => v,
+            Err(err) => panic!("IR values must serialise: {err}"),
+        }
+    }
+
+    /// The collapsed Aozora variants share the union's `kind` discriminant
+    /// with their own notation tag, so the tag rides under `aozoraKind`.
+    /// Lock both keys: a plain `kind` field here would silently emit a
+    /// duplicate JSON key and the last one would win on the JS side.
     #[test]
-    fn classification_enums_serialize_to_stable_wire_strings() {
-        use serde_json::to_value;
+    fn aozora_inline_wire_shape_separates_tag_from_discriminant() {
+        let value = json(IrInline::Aozora {
+            kind: "ruby".to_owned(),
+            span: Some(Span { start: 3, end: 21 }),
+            html: "<ruby>青梅<rt>おうめ</rt></ruby>".to_owned(),
+        });
 
-        for (style, wire) in [
-            (BoutenStyle::Goma, "goma"),
-            (BoutenStyle::WhiteSesame, "whiteSesame"),
-            (BoutenStyle::Circle, "circle"),
-            (BoutenStyle::WhiteCircle, "whiteCircle"),
-            (BoutenStyle::DoubleCircle, "doubleCircle"),
-            (BoutenStyle::Janome, "janome"),
-            (BoutenStyle::Cross, "cross"),
-            (BoutenStyle::WhiteTriangle, "whiteTriangle"),
-            (BoutenStyle::WavyLine, "wavyLine"),
-            (BoutenStyle::UnderLine, "underLine"),
-            (BoutenStyle::DoubleUnderLine, "doubleUnderLine"),
-            (BoutenStyle::Unknown, "unknown"),
-        ] {
-            assert_eq!(to_value(style).unwrap(), wire);
-        }
+        assert_eq!(value["kind"], "aozora");
+        assert_eq!(value["aozoraKind"], "ruby");
+        assert_eq!(value["span"]["start"], 3);
+        assert_eq!(value["span"]["end"], 21);
+        assert_eq!(value["html"], "<ruby>青梅<rt>おうめ</rt></ruby>");
+    }
 
-        for (position, wire) in [
-            (BoutenPosition::Right, "right"),
-            (BoutenPosition::Left, "left"),
-            (BoutenPosition::Unknown, "unknown"),
-        ] {
-            assert_eq!(to_value(position).unwrap(), wire);
-        }
+    /// The block half uses the same two-key split, keeps `sourceLine`, and
+    /// omits an absent span rather than emitting `null` — the same
+    /// `skip_serializing_if` contract every other optional IR field follows.
+    #[test]
+    fn aozora_block_wire_shape_omits_absent_span() {
+        let value = json(IrBlock::Aozora {
+            kind: "containerClose".to_owned(),
+            span: None,
+            html: "</div>".to_owned(),
+            source_line: Some(7),
+        });
 
-        for (subtype, wire) in [
-            (ContainerSubtype::Indent, "indent"),
-            (ContainerSubtype::AlignEnd, "alignEnd"),
-            (ContainerSubtype::Keigakomi, "keigakomi"),
-            (ContainerSubtype::Warichu, "warichu"),
-            (ContainerSubtype::Unknown, "unknown"),
-        ] {
-            assert_eq!(to_value(subtype).unwrap(), wire);
-        }
-
-        for (subtype, wire) in [
-            (SectionSubtype::Choho, "choho"),
-            (SectionSubtype::Dan, "dan"),
-            (SectionSubtype::Spread, "spread"),
-            (SectionSubtype::Unknown, "unknown"),
-        ] {
-            assert_eq!(to_value(subtype).unwrap(), wire);
-        }
-
-        for (kind, wire) in [
-            (AnnotationKind::Unknown, "unknown"),
-            (AnnotationKind::AsIs, "asIs"),
-            (AnnotationKind::TextualNote, "textualNote"),
-            (AnnotationKind::InvalidRubySpan, "invalidRubySpan"),
-            (AnnotationKind::WarichuOpen, "warichuOpen"),
-            (AnnotationKind::WarichuClose, "warichuClose"),
-        ] {
-            assert_eq!(to_value(kind).unwrap(), wire);
-        }
+        assert_eq!(value["kind"], "aozora");
+        assert_eq!(value["aozoraKind"], "containerClose");
+        assert_eq!(value["html"], "</div>");
+        assert_eq!(value["sourceLine"], 7);
+        assert!(
+            value.get("span").is_none(),
+            "absent span must not serialise: {value}"
+        );
     }
 }

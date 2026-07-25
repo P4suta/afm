@@ -1,16 +1,16 @@
 # 0017. Derive the TypeScript `.d.ts` with `tsify`
 
-- Status: accepted
+- Status: accepted; emitted union re-stated by ADR-0022
 - Date: 2026-06-21
 - Deciders: @P4suta
 - Tags: ir, typescript, codegen, wasm, dx
 
-> **Pending re-statement (2026-07-25):** PR3 of the aozora 0.5.0
-> follow-through collapses the Aozora half of the IR, which changes the
-> tsify-derived `.d.ts` shape (a breaking change for TypeScript consumers).
-> The *decision* — derive, don't hand-write — is unaffected; the emitted
-> union described below is superseded at that point. See
-> [ADR-0021](0021-aozora-boundary-is-the-public-surface.md).
+> **Amendment (ADR-0022, 2026-07-25):** the Aozora half of the IR collapsed
+> to one variant per level, so the emitted `IrBlock` / `IrInline` unions
+> changed shape — a breaking change for TypeScript consumers. The *decision*
+> — derive, don't hand-write — is what made that a one-line diff on the JS
+> side rather than a hand-edited union, and is unaffected. See
+> [ADR-0022](0022-collapse-the-aozora-half-of-the-ir.md).
 
 ## Context
 
