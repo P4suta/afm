@@ -137,7 +137,7 @@ pub enum Violation {
         snippet: String,
         total: usize,
     },
-    /// Tier B — a PUA sentinel (U+E001–U+E004) reached the rendered HTML.
+    /// Tier B — a PUA sentinel (U+E000–U+E004) reached the rendered HTML.
     SentinelLeak {
         codepoint: char,
         first_offset: usize,
@@ -275,25 +275,28 @@ pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-/// Tier B — rendered HTML contains no PUA sentinel (U+E001–U+E004).
+/// Tier B — rendered HTML carries no codepoint from [`sentinels::ALL`].
 ///
-/// **Unconditional; callers must not gate it on a clean parse.** An author
-/// who types U+E001 does not get one back — the parser reports it *and*
-/// overwrites it with U+FFFD, in a code span and in running text alike. So
-/// every sentinel reaching the output was written by the substitution and
-/// never resolved, which is a bug on any input, most of all on one that also
-/// produced diagnostics: the recovery path is where an unresolved construct
-/// is likeliest to survive.
+/// **Not gated on a clean parse.** An author who types U+E001 does not get
+/// one back — the parser reports it *and* overwrites it with U+FFFD, so a
+/// construct sentinel in the output was substituted and never resolved: a
+/// bug on any input, most of all on one that also produced diagnostics.
+/// The mask is the member that argument misses — masking bails out on a
+/// source already carrying one, so `src` tells a leak from the author's
+/// own byte.
 ///
 /// # Errors
 ///
 /// [`Violation::SentinelLeak`] naming the offending codepoint.
-pub fn check_no_sentinel_leak(html: &str) -> Result<(), Violation> {
+pub fn check_no_sentinel_leak(src: &str, html: &str) -> Result<(), Violation> {
     // Single source of truth: the substitution is the library's, so the
     // set it publishes is what a leak is measured against. A sentinel added
     // there flows in here automatically instead of silently going unchecked
     // against a hardcoded U+E001..U+E004 copy.
     for &c in &sentinels::ALL {
+        if c == sentinels::MASK && src.contains(c) {
+            continue;
+        }
         let mut buf = [0u8; 4];
         let needle: &str = c.encode_utf8(&mut buf);
         if let Some(offset) = html.find(needle) {
@@ -556,9 +559,9 @@ pub fn check_escape_invariants(html: &str) -> Result<(), Violation> {
 ///
 /// Tier A is deliberately left out: a bare `［＃` is legitimate output for a
 /// source whose bracket pairing is malformed, so its precondition belongs to
-/// the caller. Tier I is gated on
-/// [`source_contains_html_entity_literal`]. Every other tier here holds on
-/// arbitrary bytes, [`check_no_sentinel_leak`] included.
+/// the caller. Tier I is gated on [`source_contains_html_entity_literal`],
+/// and [`check_no_sentinel_leak`] reads `src` for its own carve-out. Every
+/// other tier here holds on arbitrary bytes.
 ///
 /// # Panics
 ///
@@ -579,7 +582,7 @@ pub fn assert_html_invariants(src: &str, html: &str) {
     let report = |tier: &str, e: Violation| -> ! {
         panic!("{tier} violated:{}\n  details = {e:?}", context())
     };
-    if let Err(e) = check_no_sentinel_leak(html) {
+    if let Err(e) = check_no_sentinel_leak(src, html) {
         report("Tier B (PUA sentinel leak)", e);
     }
     if let Err(e) = check_html_tag_balance(html) {
@@ -770,11 +773,10 @@ pub fn check_markup_completeness(html: &str) -> Result<(), Violation> {
 /// # Errors
 ///
 /// Every violation found.
-pub fn assert_invariants(html: &str) -> Result<(), Vec<Violation>> {
+pub fn assert_invariants(src: &str, html: &str) -> Result<(), Vec<Violation>> {
     type Predicate = fn(&str) -> Result<(), Violation>;
     let predicates: &[Predicate] = &[
         check_no_bare_bracket,
-        check_no_sentinel_leak,
         check_heading_integrity,
         check_html_tag_balance,
         check_directive_wrapper_shape,
@@ -784,7 +786,11 @@ pub fn assert_invariants(html: &str) -> Result<(), Vec<Violation>> {
         check_content_model,
         check_markup_completeness,
     ];
-    let violations: Vec<_> = predicates.iter().filter_map(|p| p(html).err()).collect();
+    let violations: Vec<_> = check_no_sentinel_leak(src, html)
+        .err()
+        .into_iter()
+        .chain(predicates.iter().filter_map(|p| p(html).err()))
+        .collect();
     if violations.is_empty() {
         Ok(())
     } else {
@@ -1296,14 +1302,14 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_no_sentinel_leak_passes_on_clean_input() {
-        check_no_sentinel_leak(clean_html()).unwrap();
+        check_no_sentinel_leak("clean source", clean_html()).unwrap();
     }
 
     #[test]
     fn invariant_unit_check_no_sentinel_leak_fires_on_each_sentinel() {
-        for c in ['\u{E001}', '\u{E002}', '\u{E003}', '\u{E004}'] {
+        for c in sentinels::ALL {
             let html = format!("x{c}y");
-            let err = check_no_sentinel_leak(&html).expect_err("must leak");
+            let err = check_no_sentinel_leak("plain source", &html).expect_err("must leak");
             assert!(
                 matches!(err, Violation::SentinelLeak { codepoint, .. } if codepoint == c),
                 "expected SentinelLeak for {c:?}, got {err:?}",
@@ -1489,7 +1495,7 @@ mod tests {
     #[test]
     fn invariant_unit_assert_invariants_aggregates_clean_pass() {
         let html = r#"<ruby>青<rp>(</rp><rt>あ</rt><rp>)</rp></ruby><span class="aozora-md-combine-upright">20</span>"#;
-        assert_invariants(html).unwrap();
+        assert_invariants("青《あ》20", html).unwrap();
     }
 
     #[test]
@@ -1497,7 +1503,7 @@ mod tests {
         // Bare bracket + unknown class + missing rp in one sample.
         let html =
             r#"<ruby>x<rp>(</rp><rt>y</rt></ruby><span class="aozora-md-unknown">［＃X］</span>"#;
-        let violations = assert_invariants(html).expect_err("must fire");
+        let violations = assert_invariants("x《y》［＃X］", html).expect_err("must fire");
         assert!(!violations.is_empty());
     }
 

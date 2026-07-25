@@ -23,9 +23,10 @@
 //! ```
 //!
 //! The test discovers artifacts by reading the directory at run time,
-//! so a new file is picked up automatically. The discovery walk
-//! returns artifacts in sorted order so failure messages stay stable
-//! across machines and `nextest` runs.
+//! so a new file is picked up automatically and a target with nothing
+//! promoted yet needs no directory. The discovery walk returns
+//! artifacts in sorted order so failure messages stay stable across
+//! machines and `nextest` runs.
 
 use std::fs;
 use std::panic;
@@ -33,8 +34,8 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::{Options, render, serialize};
-use aozora_flavored_markdown_test_support::assert_html_invariants;
+use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, serialize};
+use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_sentinel_leak};
 
 #[test]
 fn parse_render_regressions_replay_cleanly() {
@@ -43,6 +44,31 @@ fn parse_render_regressions_replay_cleanly() {
         |src| {
             let html = render(src, &Options::default()).html;
             assert_html_invariants(src, &html);
+        },
+        ReplayInput::Utf8,
+    );
+}
+
+#[test]
+fn render_blocks_regressions_replay_cleanly() {
+    replay_each(
+        "render_blocks",
+        |src| {
+            // Mirrors the `render_blocks` target: Tier B per chunk, the
+            // rest on the concatenation, which is the only form that owes
+            // tag balance when a container spans blocks.
+            let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+            let mut joined = String::new();
+            for block in &blocks {
+                if let Err(e) = check_no_sentinel_leak(src, &block.html) {
+                    panic!(
+                        "sentinel leaked into one block: {e:?}\n  html = {:?}",
+                        block.html
+                    );
+                }
+                joined.push_str(&block.html);
+            }
+            assert_html_invariants(src, &joined);
         },
         ReplayInput::Utf8,
     );

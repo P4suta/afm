@@ -36,13 +36,12 @@ mod source_line_anchors;
 #[cfg(feature = "theme")]
 pub mod theme;
 
-/// PUA sentinel codepoints substituted for 青空文庫 constructs before
-/// comrak parses.
+/// PUA codepoints this crate substitutes into the source before comrak parses.
 ///
 /// Owned here rather than re-exported from the sibling parser: the
-/// substitution is ours to make, so the constant is ours to keep stable.
+/// substitution is ours to make, so the constants are ours to keep stable.
 pub mod sentinels {
-    use crate::constructs;
+    use crate::{code_block_mask, constructs};
 
     /// Ruby / bouten / annotation / gaiji / TCY / kaeriten.
     pub const INLINE: char = constructs::INLINE_SENTINEL;
@@ -52,6 +51,8 @@ pub mod sentinels {
     pub const BLOCK_OPEN: char = constructs::BLOCK_OPEN_SENTINEL;
     /// Paired-container close line (e.g. `［＃ここで字下げ終わり］`).
     pub const BLOCK_CLOSE: char = constructs::BLOCK_CLOSE_SENTINEL;
+    /// A 青空文庫 trigger hidden inside a fenced code block.
+    pub const MASK: char = code_block_mask::MASK_CHAR;
 
     /// Read by the leak checks instead of re-listing codepoints, so a
     /// sentinel added later is covered without editing the checker.
@@ -62,7 +63,7 @@ pub mod sentinels {
     /// assert!(sentinels::ALL.contains(&sentinels::INLINE));
     /// assert!(sentinels::ALL.iter().all(|c| ('\u{E000}'..='\u{F8FF}').contains(c)));
     /// ```
-    pub const ALL: [char; 4] = [INLINE, BLOCK_LEAF, BLOCK_OPEN, BLOCK_CLOSE];
+    pub const ALL: [char; 5] = [INLINE, BLOCK_LEAF, BLOCK_OPEN, BLOCK_CLOSE, MASK];
 }
 
 #[doc(inline)]
@@ -455,11 +456,11 @@ pub fn render_blocks_to_ir(
     if !options.aozora_enabled {
         let comrak_arena = comrak::Arena::new();
         let root = comrak::parse_document(&comrak_arena, input, &options.comrak);
-        let blocks = collect_rendered_blocks(root, options, Vec::new());
+        let blocks = collect_rendered_blocks(root, options, Vec::new(), &[]);
         return (blocks, Vec::new());
     }
 
-    let (masked_source, _mask_originals) = code_block_mask::mask_code_block_triggers(input);
+    let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
     aozora::prewarm();
     // The builder owns the construct table; the splice below borrows the
     // same one, so both outputs of this call describe the same document.
@@ -485,7 +486,7 @@ pub fn render_blocks_to_ir(
     // becomes its own `RenderedBlock`; giving the drain the same shape
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
-    let blocks = collect_rendered_blocks(root, options, blocks_ir);
+    let blocks = collect_rendered_blocks(root, options, blocks_ir, &mask_originals);
     (blocks, diagnostics)
 }
 
@@ -493,6 +494,7 @@ fn collect_rendered_blocks<'a>(
     root: &'a AstNode<'a>,
     options: &Options,
     mut blocks_ir: Vec<Vec<ir::IrBlock>>,
+    mask_originals: &[char],
 ) -> Vec<RenderedBlock> {
     // The AST has already been spliced at the document level by the
     // caller (so `format_html` sees no sentinels here), and the IR
@@ -503,14 +505,29 @@ fn collect_rendered_blocks<'a>(
     // us an empty IR vector; we emit `Vec::new()` per block in that
     // case so the per-block IR field stays consistent with the IR
     // builder's no-op behaviour.
+    //
+    // Masks are restored with a cursor rather than the one pass the
+    // document path makes: handing every block the whole slice would replay
+    // block 1's originals into block 2.
     let mut blocks = Vec::new();
+    let mut mask_cursor = mask_originals;
     for (idx, child) in root.children().enumerate() {
         let data = child.data.borrow();
         let line = constructs::saturating_u32(data.sourcepos.start.line).max(1);
         drop(data);
-        let mut block_html = String::new();
-        comrak::format_html(child, &options.comrak, &mut block_html)
-            .expect("formatting a String never fails");
+        let rendered = if options.source_line_anchors {
+            source_line_anchors::format_block_with_anchor(child, &options.comrak)
+        } else {
+            let mut buf = String::new();
+            comrak::format_html(child, &options.comrak, &mut buf)
+                .expect("formatting a String never fails");
+            buf
+        };
+        let block_html = if mask_cursor.is_empty() {
+            rendered
+        } else {
+            code_block_mask::unmask_html_from(&rendered, &mut mask_cursor).into_owned()
+        };
         let ir_blocks = if idx < blocks_ir.len() {
             mem::take(&mut blocks_ir[idx])
         } else {

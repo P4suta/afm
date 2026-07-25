@@ -1,8 +1,8 @@
 //! Aozora notations that land in *literal* markdown contexts — inline
 //! code spans, link/image destinations, code blocks and unclaimed `［＃…］`
 //! runs — must render as their original source, never as an interpreted
-//! Aozora node, and must never leak the internal PUA sentinel
-//! (`U+E001..=U+E004`) into the HTML.
+//! Aozora node, and must never leak an internal PUA sentinel
+//! (`U+E000..=U+E004`) into the HTML.
 //!
 //! Substitution is CommonMark-blind (ADR-0010): every construct in the
 //! text becomes a sentinel *before* comrak parses, so a notation written
@@ -16,11 +16,15 @@
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 
-/// No `U+E001..=U+E004` sentinel may survive into the HTML.
-fn assert_no_sentinel(html: &str) {
-    if let Err(e) = check_no_sentinel_leak(html) {
+/// Render, then hold the output to Tier B: no PUA sentinel may survive into
+/// the HTML. Checking at the render site is what gives the predicate the
+/// source it reads.
+fn render_checked(src: &str) -> String {
+    let html = render_to_string(src);
+    if let Err(e) = check_no_sentinel_leak(src, &html) {
         panic!("sentinel leaked: {e:?}\n  html = {html:?}");
     }
+    html
 }
 
 // ---------------------------------------------------------------------------
@@ -31,8 +35,7 @@ fn assert_no_sentinel(html: &str) {
 fn ruby_inside_inline_code_renders_literally() {
     // `｜青梅《おうめ》` inside backticks is literal markdown: the source
     // text must appear verbatim in <code>, NOT as an interpreted <ruby>.
-    let html = render_to_string("`｜青梅《おうめ》`");
-    assert_no_sentinel(&html);
+    let html = render_checked("`｜青梅《おうめ》`");
     assert!(
         html.contains("<code>｜青梅《おうめ》</code>"),
         "inline code must carry the literal Aozora source, got {html:?}"
@@ -48,8 +51,7 @@ fn implicit_ruby_inside_inline_code_keeps_base_text() {
     // Implicit ruby (`青梅《おうめ》`, no `｜`): the lexer consumes the
     // base `青梅` into the notation, so the span-sliced literal must
     // restore the full original including the base.
-    let html = render_to_string("`青梅《おうめ》`");
-    assert_no_sentinel(&html);
+    let html = render_checked("`青梅《おうめ》`");
     assert!(
         html.contains("<code>青梅《おうめ》</code>"),
         "implicit-ruby literal must include the base text, got {html:?}"
@@ -62,8 +64,7 @@ fn bouten_directive_inside_inline_code_renders_literally() {
     // preceding run) inside backticks stays literal source. (Block-level
     // directives like ［＃改ページ］ are `\n\n`-padded by the lexer and so
     // can't sit inside a single-line code span — that's a separate shape.)
-    let html = render_to_string("`text［＃「text」に傍点］`");
-    assert_no_sentinel(&html);
+    let html = render_checked("`text［＃「text」に傍点］`");
     assert!(
         html.contains("<code>text［＃「text」に傍点］</code>"),
         "inline directive inside inline code must stay literal, got {html:?}"
@@ -76,8 +77,7 @@ fn sentinel_in_inline_code_does_not_desync_following_notation() {
     // used to consume nothing, so the *next* real notation grabbed the
     // wrong registry entry. Here the trailing ｜B《b》 must render as B/b,
     // not as A/a from the code span.
-    let html = render_to_string("`｜A《a》` then ｜B《b》end");
-    assert_no_sentinel(&html);
+    let html = render_checked("`｜A《a》` then ｜B《b》end");
     assert!(
         html.contains("<code>｜A《a》</code>"),
         "code span keeps its literal, got {html:?}"
@@ -106,8 +106,7 @@ fn a_notation_inside_an_unclaimed_bracket_run_stays_literal() {
     // including the bouten directive nested inside it, which is one. The
     // splicer used to copy that construct's sentinel into the wrapper's
     // text: a U+E001 in the reader's HTML.
-    let html = render_to_string("［＃改［＃「あ」に傍点］］");
-    assert_no_sentinel(&html);
+    let html = render_checked("［＃改［＃「あ」に傍点］］");
     assert!(
         html.contains("hidden>［＃改［＃「あ」に傍点］］</span>"),
         "the unclaimed run must be hidden as the author wrote it, got {html:?}"
@@ -119,8 +118,7 @@ fn an_unclaimed_bracket_run_does_not_desync_the_notation_after_it() {
     // The construct inside the run has to be consumed as well as written
     // back, or the next real notation reads this one's entry and renders
     // A/a where the author wrote B/b.
-    let html = render_to_string("［＃改｜A《a》］\n\nそして｜B《b》です");
-    assert_no_sentinel(&html);
+    let html = render_checked("［＃改｜A《a》］\n\nそして｜B《b》です");
     assert!(
         html.contains("hidden>［＃改｜A《a》］</span>"),
         "the run keeps its literal, got {html:?}"
@@ -140,8 +138,7 @@ fn an_unclaimed_bracket_run_in_a_heading_does_not_desync_either() {
     // Inside a heading the run is dropped rather than wrapped (Tier C bars
     // the wrapper from a heading body), so nothing is written back — but the
     // construct it swallowed still has to be consumed.
-    let html = render_to_string("# 見出し［＃改｜A《a》］\n\nそして｜B《b》です");
-    assert_no_sentinel(&html);
+    let html = render_checked("# 見出し［＃改｜A《a》］\n\nそして｜B《b》です");
     assert!(
         html.contains("<h1>見出し</h1>"),
         "the heading keeps only its own text, got {html:?}"
@@ -165,8 +162,7 @@ fn ruby_trigger_in_link_url_keeps_literal_destination() {
     // A notation inside a link URL must keep the author's literal URL
     // (comrak then percent-encodes the fullwidth chars), not a
     // percent-encoded sentinel.
-    let html = render_to_string("[x](http://e.com/｜p《r》)");
-    assert_no_sentinel(&html);
+    let html = render_checked("[x](http://e.com/｜p《r》)");
     // U+E001 percent-encodes to %EE%80%81; the literal ｜ is %EF%BD%9C.
     assert!(
         !html.contains("%EE%80%81"),
@@ -182,8 +178,7 @@ fn ruby_trigger_in_link_url_keeps_literal_destination() {
 fn notation_in_link_url_does_not_desync_link_text() {
     // The link text notation and the URL notation must each consume their
     // own registry entry in source order: text first, then url.
-    let html = render_to_string("[｜T《t》](http://e.com/｜U《u》)");
-    assert_no_sentinel(&html);
+    let html = render_checked("[｜T《t》](http://e.com/｜U《u》)");
     // Link text renders its ruby (T/t)...
     assert!(
         html.contains("<ruby>T") && html.contains("<rt>t</rt>"),
@@ -212,8 +207,7 @@ fn ruby_inside_an_indented_code_block_renders_literally() {
     // mask hides the triggers inside a fence before the lexer runs
     // (ADR-0010) — but an indented block is context that mask deliberately
     // does not reproduce, and comrak reads one out of any four-space line.
-    let html = render_to_string("本文\n\n    ｜青梅《おうめ》\n");
-    assert_no_sentinel(&html);
+    let html = render_checked("本文\n\n    ｜青梅《おうめ》\n");
     assert!(
         html.contains("<pre><code>｜青梅《おうめ》\n</code></pre>"),
         "the code block must carry the source the author typed, got {html:?}"
@@ -236,8 +230,7 @@ fn a_code_block_reads_the_same_fenced_or_indented() {
 fn a_code_block_does_not_desync_the_notation_after_it() {
     // The block consumes its own construct, so the ruby that follows still
     // gets its own.
-    let html = render_to_string("本文\n\n    ｜青梅《おうめ》\n\n｜鶴見《つるみ》\n");
-    assert_no_sentinel(&html);
+    let html = render_checked("本文\n\n    ｜青梅《おうめ》\n\n｜鶴見《つるみ》\n");
     assert!(
         html.contains("<pre><code>｜青梅《おうめ》\n</code></pre>"),
         "the block keeps its literal, got {html:?}"
@@ -255,8 +248,7 @@ fn crlf_before_notation_does_not_panic_and_renders() {
     // The leading CRLF makes the sanitized source shorter than the raw
     // input, so the ruby's source span only lines up against the sanitized
     // text. Must not panic, and the ruby must still render.
-    let html = render_to_string("a\r\n\r\n｜青梅《おうめ》");
-    assert_no_sentinel(&html);
+    let html = render_checked("a\r\n\r\n｜青梅《おうめ》");
     assert!(
         html.contains("<ruby>") && html.contains("青梅") && html.contains("おうめ"),
         "ruby after CRLF must render, got {html:?}"
@@ -266,8 +258,7 @@ fn crlf_before_notation_does_not_panic_and_renders() {
 #[test]
 fn bom_before_notation_does_not_panic() {
     // A UTF-8 BOM is stripped by sanitize, shifting every later offset.
-    let html = render_to_string("\u{feff}｜青梅《おうめ》");
-    assert_no_sentinel(&html);
+    let html = render_checked("\u{feff}｜青梅《おうめ》");
     assert!(
         html.contains("<ruby>"),
         "ruby after BOM must render, got {html:?}"
@@ -287,8 +278,7 @@ fn rewritten_document_keeps_each_code_span_distinct() {
     // CJK notation of equal character count. Recovering them by shape and
     // length alone cannot tell them apart; the reported offset can, and
     // must, or the author's notation is silently deleted.
-    let html = render_to_string("本文\n----------\n`｜A《a》`と`｜B《b》`");
-    assert_no_sentinel(&html);
+    let html = render_checked("本文\n----------\n`｜A《a》`と`｜B《b》`");
     assert!(
         html.contains("<code>｜A《a》</code>") && html.contains("<code>｜B《b》</code>"),
         "each code span must keep its own literal, got {html:?}"
@@ -300,8 +290,7 @@ fn rewritten_document_keeps_the_link_destination() {
     // An empty recovery is worse than nothing in a URL: it renders as a
     // plausible-looking wrong destination rather than as visibly missing
     // text.
-    let html = render_to_string("本文\n----------\n[y](http://e.com/｜A《a》)");
-    assert_no_sentinel(&html);
+    let html = render_checked("本文\n----------\n[y](http://e.com/｜A《a》)");
     assert!(
         html.contains("%EF%BD%9C"),
         "the destination must keep the author's ｜, got {html:?}"
@@ -321,8 +310,7 @@ fn rewritten_document_with_many_literal_contexts_stays_linear() {
         // code span instead of two single ones.
         src.push_str("`｜A《a》` ");
     }
-    let html = render_to_string(&src);
-    assert_no_sentinel(&html);
+    let html = render_checked(&src);
     assert_eq!(
         html.matches("<code>｜A《a》</code>").count(),
         COUNT,
@@ -336,8 +324,7 @@ fn rewritten_document_with_many_literal_contexts_stays_linear() {
 
 #[test]
 fn fenced_code_block_still_literal() {
-    let html = render_to_string("```\n｜青梅《おうめ》\n```");
-    assert_no_sentinel(&html);
+    let html = render_checked("```\n｜青梅《おうめ》\n```");
     assert!(
         html.contains("｜青梅《おうめ》"),
         "fenced code must keep its literal Aozora source, got {html:?}"

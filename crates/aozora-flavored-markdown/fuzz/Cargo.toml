@@ -34,6 +34,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "render_blocks"
+path = "fuzz_targets/render_blocks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "serialize_round_trip"
 path = "fuzz_targets/serialize_round_trip.rs"
 test = false
