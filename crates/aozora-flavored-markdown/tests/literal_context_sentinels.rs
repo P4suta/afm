@@ -164,6 +164,62 @@ fn bom_before_notation_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
+// Documents the parser rewrites before lexing. Their notations' byte ranges
+// address a text nobody else holds, so a literal context has to recover the
+// author's source rather than slice it. A decorative rule (`----------`)
+// is the cheapest way into that path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rewritten_document_keeps_each_code_span_distinct() {
+    // Two rubies of the same shape and the same byte length — the norm for
+    // CJK notation of equal character count. Recovering them by shape and
+    // length alone cannot tell them apart; the reported offset can, and
+    // must, or the author's notation is silently deleted.
+    let html = render_to_string("本文\n----------\n`｜A《a》`と`｜B《b》`");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("<code>｜A《a》</code>") && html.contains("<code>｜B《b》</code>"),
+        "each code span must keep its own literal, got {html:?}"
+    );
+}
+
+#[test]
+fn rewritten_document_keeps_the_link_destination() {
+    // An empty recovery is worse than nothing in a URL: it renders as a
+    // plausible-looking wrong destination rather than as visibly missing
+    // text.
+    let html = render_to_string("本文\n----------\n[y](http://e.com/｜A《a》)");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("%EF%BD%9C"),
+        "the destination must keep the author's ｜, got {html:?}"
+    );
+}
+
+#[test]
+fn rewritten_document_with_many_literal_contexts_stays_linear() {
+    // Every literal read used to re-lex the whole enclosing block, which
+    // made this input quadratic — reachable from the `parse_render` fuzz
+    // target, so a crash-class defect rather than a slow test. The index
+    // is built once and shared, so the work is one pass over the source.
+    const COUNT: usize = 2_000;
+    let mut src = String::from("本文\n----------\n");
+    for _ in 0..COUNT {
+        // Spaced out: back-to-back backticks would open a double-backtick
+        // code span instead of two single ones.
+        src.push_str("`｜A《a》` ");
+    }
+    let html = render_to_string(&src);
+    assert_no_sentinel(&html);
+    assert_eq!(
+        html.matches("<code>｜A《a》</code>").count(),
+        COUNT,
+        "every code span must recover its literal"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Fenced code blocks (already masked) stay literal — regression guard.
 // ---------------------------------------------------------------------------
 

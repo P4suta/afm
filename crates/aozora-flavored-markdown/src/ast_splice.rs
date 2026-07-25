@@ -6,7 +6,7 @@
 //! than re-scanning a flat HTML byte stream.
 //!
 //! [`crate::ir`]'s `IrWalker` walks the same comrak AST to project an
-//! `IrDocument`; both consume the same [`SentinelCursor`] and
+//! `IrDocument`; both consume the same [`ConstructCursor`] and
 //! [`paragraph_sole_block_sentinel`] / [`ParaScan`] primitives, differing only
 //! in their emit target.
 //!
@@ -44,23 +44,22 @@
 //! 4. **Orphan `［＃...］`**: a bracket run the lexer never claimed.
 //!    Split the `Text` and replace the bracket span with a `Raw` node
 //!    containing `<span class="aozora-md-annotation" hidden>...</span>`.
-//!    No registry advance — by construction the orphan has no
-//!    matching entry.
+//!    No cursor advance — by construction the orphan has no
+//!    matching construct.
 
 use core::fmt;
 use core::mem;
 use std::borrow::Cow;
 
-use aozora::pipeline::{BorrowedLexOutput, INLINE_SENTINEL};
 use aozora::render::render_node;
 use aozora::syntax::Container;
 use aozora::syntax::ContainerKind;
-use aozora::syntax::borrowed::{AozoraNode, HeadingHint, NodeRef};
+use aozora::{AozoraNode, HeadingHint, NodeRef};
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeHeading, NodeValue};
 
-use crate::sentinel_stream::{
-    BlockSentinelKind, NormalizedSource, ParaScan, SentinelCursor, is_sentinel_char,
+use crate::constructs::{
+    BlockSentinelKind, ConstructCursor, Constructs, INLINE_SENTINEL, ParaScan, is_sentinel_char,
     paragraph_sole_block_sentinel,
 };
 
@@ -68,20 +67,19 @@ use crate::sentinel_stream::{
 /// into the comrak AST. After this returns, the AST contains no PUA
 /// sentinel character: `comrak::format_html` will emit fully resolved
 /// HTML in a single verbatim pass.
-/// `src` is the lexer's Phase-0 sanitized source. The splicer slices
-/// it via the parallel span table to recover a sentinel's original Aozora
-/// source for literal markdown contexts (inline code spans, link
-/// destinations), where the notation must render verbatim rather than as
-/// interpreted Aozora HTML. It must be the *sanitized* source, not the raw
-/// input, because the span coordinates are in sanitized-source bytes.
+///
+/// `constructs` is the source-coordinate replacement table: the splicer
+/// walks it in document order, and reads a construct's source text from it
+/// for the literal markdown contexts (inline code spans, link
+/// destinations) where the notation must render verbatim rather than as
+/// interpreted Aozora HTML.
 pub(crate) fn splice_into_ast<'a, 'src>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
-    lex_out: &BorrowedLexOutput<'src>,
-    src: NormalizedSource<'_>,
+    constructs: &Constructs<'src>,
 ) {
-    let mut splicer = AstSplicer::<'a, 'src> {
-        cursor: SentinelCursor::from_lex_out_with_source(Some(lex_out), src),
+    let mut splicer = AstSplicer::<'a, '_, 'src> {
+        cursor: constructs.cursor(),
         container_stack: Vec::new(),
         in_heading_depth: 0,
         arena,
@@ -90,10 +88,10 @@ pub(crate) fn splice_into_ast<'a, 'src>(
     splicer.drain_unclosed_containers(root);
 }
 
-/// AST mutator that consumes the borrowed-AST registry in source
+/// AST mutator that consumes the construct table in source
 /// order and weaves rendered Aozora HTML into the comrak tree.
-struct AstSplicer<'a, 'src> {
-    cursor: SentinelCursor<'src>,
+struct AstSplicer<'a, 't, 'src> {
+    cursor: ConstructCursor<'t, 'src>,
     /// `ContainerKind` of every still-open paired container, in LIFO
     /// order. Push on `BlockOpen`, pop on `BlockClose`. Tracking the
     /// kind (rather than just a depth counter) lets us synthesise a
@@ -110,7 +108,7 @@ struct AstSplicer<'a, 'src> {
     arena: &'a Arena<'a>,
 }
 
-impl<'a, 'src> AstSplicer<'a, 'src> {
+impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     /// Depth-first traversal over an explicit work stack rather than
     /// recursion.
     ///
@@ -203,7 +201,7 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
 
     fn handle_block_sentinel(&mut self, paragraph: &'a AstNode<'a>, kind: BlockSentinelKind) {
         let Some(hit) = self.cursor.next() else {
-            // Registry exhausted: drop the paragraph silently rather
+            // Table exhausted: drop the paragraph silently rather
             // than leak the PUA sentinel into the rendered HTML.
             paragraph.detach();
             return;
@@ -228,7 +226,7 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
                 );
             }
             _ => {
-                // Mismatch (registry/AST drift) or orphan close (no
+                // Mismatch (table/AST drift) or orphan close (no
                 // matching open): silently drop the paragraph rather than
                 // emit an unbalanced close tag (Tier-D protection).
                 paragraph.detach();
@@ -295,7 +293,7 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
                     }
                 }
                 // Block sentinel surviving into inline context, or
-                // inline-position registry mismatch: drop silently.
+                // inline-position table mismatch: drop silently.
             } else if ch == '［' && chars.peek() == Some(&'＃') {
                 // Orphan `［＃...］` run the lexer never claimed.
                 chars.next(); // consume ＃
@@ -353,14 +351,14 @@ impl<'a, 'src> AstSplicer<'a, 'src> {
     /// Rewrite each sentinel in `s` to the original Aozora source the
     /// lexer collapsed into it, leaving non-sentinel chars untouched.
     /// Advances the cursor once per sentinel so later sentinels in
-    /// ordinary text stay in lockstep. A sentinel with no registry entry
+    /// ordinary text stay in lockstep. A sentinel with no construct
     /// (cursor exhausted) is dropped rather than leaked.
     fn rewrite_literal_context(&mut self, s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for ch in s.chars() {
             if is_sentinel_char(ch) {
                 if let Some(literal) = self.cursor.next_literal() {
-                    out.push_str(literal);
+                    out.push_str(&literal);
                 }
             } else {
                 out.push(ch);
@@ -449,7 +447,7 @@ enum Work<'a> {
     ExitHeading,
     /// Rewrite a link/image node's `url`/`title` fields after its children
     /// (the link text) have been processed, so sentinels in the fields
-    /// consume their registry entries in source order.
+    /// consume their constructs in source order.
     ProcessLinkFields(&'a AstNode<'a>),
 }
 
@@ -503,7 +501,7 @@ fn classify(value: &NodeValue) -> DispatchAction {
         // Inline code spans are literal markdown: a sentinel here means an
         // Aozora notation that the user wrote *inside* backticks. It must
         // render as its original source, not interpreted HTML — and it
-        // must still consume its registry entry so later sentinels stay in
+        // must still consume its construct so later sentinels stay in
         // lockstep. Code without a sentinel is left untouched.
         NodeValue::Code(c) => {
             if c.literal.chars().any(is_sentinel_char) {
@@ -574,31 +572,25 @@ impl fmt::Write for StringSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aozora::pipeline::{BLOCK_LEAF_SENTINEL, lex_into_arena};
-    use aozora::syntax::borrowed::Arena as AozoraArena;
+    use aozora::{Arena as AozoraArena, lex_into_arena};
 
     use crate::code_block_mask;
+    use crate::constructs::BLOCK_LEAF_SENTINEL;
 
-    /// Run the full aozora-flavored-markdown pipeline (mask → lex → parse → splice →
-    /// `format_html` → unmask) through the AST splicer and return
-    /// the produced HTML. Mirrors `crate::lib::drive_pipeline`
+    /// Run the full aozora-flavored-markdown pipeline (mask → lex → tile →
+    /// parse → splice → `format_html` → unmask) through the AST splicer and
+    /// return the produced HTML. Mirrors `crate::lib::drive_pipeline`
     /// exactly so the unit tests exercise the same code-block-mask
     /// boundary the production renderer uses.
     fn render_via_ast_splice(input: &str) -> String {
-        use aozora::pipeline::lexer::sanitize;
         let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
-        let sanitized = sanitize(&masked);
         let aozora_arena = AozoraArena::new();
         let lex_out = lex_into_arena(&masked, &aozora_arena);
+        let constructs = Constructs::build(&masked, Some(&lex_out));
         let comrak_arena: Arena<'_> = Arena::new();
         let opts = comrak::Options::default();
-        let root = comrak::parse_document(&comrak_arena, lex_out.normalized, &opts);
-        splice_into_ast(
-            root,
-            &comrak_arena,
-            &lex_out,
-            NormalizedSource::derived(&sanitized.text, &masked),
-        );
+        let root = comrak::parse_document(&comrak_arena, constructs.text(), &opts);
+        splice_into_ast(root, &comrak_arena, &constructs);
         let mut html = String::new();
         comrak::format_html(root, &opts, &mut html).expect("formatting to a String never fails");
         code_block_mask::unmask_html(&html, &originals).into_owned()

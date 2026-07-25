@@ -50,10 +50,10 @@
 //!
 //! The walker is built from two small primitives:
 //!
-//! 1. `crate::sentinel_stream::SentinelCursor` — the shared construct-stream
-//!    cursor. The HTML splicer (`crate::ast_splice`) and this
+//! 1. `crate::constructs::ConstructCursor` — the shared cursor over the
+//!    replacement table. The HTML splicer (`crate::ast_splice`) and this
 //!    builder both consume the same source-order sequence of
-//!    entries; the cursor abstraction keeps them in lockstep.
+//!    constructs; the cursor abstraction keeps them in lockstep.
 //! 2. `ParaScan` — single-descent paragraph profile. One walk per
 //!    paragraph computes both the sole-block-sentinel test and the
 //!    heading-hint lookahead at once, eliminating the two-scan
@@ -77,16 +77,15 @@ pub use types::{
 
 use core::mem;
 
-use aozora::pipeline::BorrowedLexOutput;
-use aozora::syntax::borrowed::{AozoraNode, HeadingHint, NodeRef};
 use aozora::syntax::{Container, ContainerKind};
+use aozora::{AozoraNode, BorrowedLexOutput, HeadingHint, NodeRef};
 use comrak::nodes::{
     AstNode, ListType, NodeHeading, NodeList, NodeValue, Sourcepos, TableAlignment,
 };
 
 use crate::ast_splice::render_aozora_html;
-use crate::sentinel_stream::{
-    BlockSentinelKind, NormalizedSource, ParaScan, SentinelCursor, is_sentinel_char,
+use crate::constructs::{
+    BlockSentinelKind, ConstructCursor, Constructs, ParaScan, is_sentinel_char,
     paragraph_sole_block_sentinel, saturating_u32,
 };
 
@@ -101,25 +100,18 @@ const CONTAINER_CLOSE: &str = "containerClose";
 
 /// Walk a comrak AST root and project it to [`IrDocument`].
 ///
-/// `lex_out` carries the resolved-construct registry. When `Some`, every
-/// PUA sentinel in the comrak text is projected to an [`IrBlock::Aozora`] /
-/// [`IrInline::Aozora`]; when `None`, the walker degrades to markdown-only
+/// `constructs` is the source-coordinate replacement table. Every PUA
+/// sentinel in the comrak text is projected to an [`IrBlock::Aozora`] /
+/// [`IrInline::Aozora`]; an empty table degrades to markdown-only
 /// behaviour (used by `Options::aozora_enabled = false`).
-/// `src` is the lexer's input-normalisation output, threaded so a
-/// sentinel that landed in a literal markdown context (inline code,
+///
+/// A sentinel that landed in a literal markdown context (inline code,
 /// link/image destination) projects back to its original Aozora source
-/// instead of leaking the PUA char and desyncing the cursor — and so the
-/// projection knows whether the lexer's offsets still address the caller's
-/// own text (see `NormalizedSource`).
-pub(crate) fn build_ir<'a>(
-    root: &'a AstNode<'a>,
-    lex_out: Option<&BorrowedLexOutput<'a>>,
-    src: NormalizedSource<'_>,
-) -> IrDocument {
-    let mut walker = IrWalker::new(
-        SentinelCursor::from_lex_out_with_source(lex_out, src),
-        Vec::new(),
-    );
+/// instead of leaking the PUA char and desyncing the cursor. A construct
+/// carries its source range only when the table could show that range
+/// addresses the caller's own text.
+pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs<'_>) -> IrDocument {
+    let mut walker = IrWalker::new(constructs.cursor(), Vec::new());
     walker.walk_root(root);
     IrDocument {
         blocks: walker.finish(),
@@ -128,9 +120,9 @@ pub(crate) fn build_ir<'a>(
 
 /// Stateful per-block IR builder for streaming mode.
 ///
-/// Materialises the registry once at construction time and threads a
-/// shared cursor across successive `walk_block` calls so multi-block
-/// inputs preserve the registry's source order. The cursor lives in
+/// Builds the construct table once at construction time and threads a
+/// cursor position across successive `walk_block` calls so multi-block
+/// inputs preserve the source order. The position lives in
 /// this struct (not in the walker) so individual `walk_block` calls
 /// can be issued lazily — aozora-flavored-markdown-obsidian's chunked-cancellation path
 /// (ADR-0009) uses this to checkpoint between blocks.
@@ -144,51 +136,51 @@ pub(crate) fn build_ir<'a>(
 /// with an unmatched opening tag.
 #[derive(Debug)]
 pub struct StreamingIrBuilder<'src> {
-    cursor: SentinelCursor<'src>,
+    constructs: Constructs<'src>,
+    /// How many constructs the previous `walk_block` calls consumed.
+    consumed: usize,
     open: Vec<ContainerKind>,
 }
 
 impl<'src> StreamingIrBuilder<'src> {
-    /// Materialise the registry once. `None` produces an empty
-    /// builder that degrades to markdown-only projection. `normalized` is
-    /// the lexer's input-normalisation output — the same text the sentinels
-    /// were embedded in — used to project literal-context sentinels
-    /// (inline code, link/image URLs) back to their original Aozora source.
+    /// Build the construct table once. `None` produces an empty
+    /// builder that degrades to markdown-only projection. `source` is the
+    /// text handed to the parser — the constructs' byte ranges are measured
+    /// against it, and it is where a literal-context sentinel (inline code,
+    /// link/image URL) reads back the Aozora source the author wrote.
     ///
-    /// Because the caller supplies that text, the spans this builder emits
-    /// are offsets into it — the caller's own coordinates. (The
-    /// whole-document [`crate::render_to_ir`] entry point, whose caller
-    /// only ever sees the raw source, withholds a span that normalisation
-    /// moved out from under it.)
+    /// The spans this builder emits are therefore offsets into `source`, or
+    /// absent where the parser rewrote the text before lexing it and no
+    /// range could be shown to address `source` (see [`crate::ir`]).
     #[must_use]
-    pub fn new(lex_out: Option<&BorrowedLexOutput<'src>>, normalized: &str) -> Self {
-        Self::with_source(lex_out, NormalizedSource::verbatim(normalized))
-    }
-
-    /// [`Self::new`] for the in-crate pipeline, which knows whether the
-    /// lexer's offsets survived normalisation.
-    pub(crate) fn with_source(
-        lex_out: Option<&BorrowedLexOutput<'src>>,
-        src: NormalizedSource<'_>,
-    ) -> Self {
+    pub fn new(lex_out: Option<&BorrowedLexOutput<'src>>, source: &str) -> Self {
         Self {
-            cursor: SentinelCursor::from_lex_out_with_source(lex_out, src),
+            constructs: Constructs::build(source, lex_out),
+            consumed: 0,
             open: Vec::new(),
         }
     }
 
+    /// The construct table this builder walks. The in-crate streaming
+    /// driver reads the text comrak should parse from it, and hands it to
+    /// the HTML splicer, so one table serves both outputs of a call.
+    pub(crate) fn constructs(&self) -> &Constructs<'src> {
+        &self.constructs
+    }
+
     /// Walk a single comrak block, advancing the shared cursor.
     pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
-        // Move the cursor and container stack into a freshly-constructed
-        // walker for the duration of this call, then take them back. The
-        // walker's `top` buffer is scoped per-call; the cursor and the
-        // stack are the state that threads across calls.
-        let cursor = mem::replace(&mut self.cursor, SentinelCursor::from_nodes(Vec::new()));
+        // Resume the cursor where the previous call left it and move the
+        // container stack into a freshly-constructed walker for the
+        // duration of this call, then take both back. The walker's `top`
+        // buffer is scoped per-call; the cursor position and the stack are
+        // the state that threads across calls.
+        let cursor = self.constructs.cursor_at(self.consumed);
         let open = mem::take(&mut self.open);
         let mut walker = IrWalker::new(cursor, open);
         walker.walk_top(node);
         let (blocks, cursor, open) = walker.into_parts();
-        self.cursor = cursor;
+        self.consumed = cursor.index();
         self.open = open;
         blocks
     }
@@ -232,8 +224,8 @@ impl<'src> StreamingIrBuilder<'src> {
 /// different `comrak::Arena`) and elided through `&AstNode<'_>` in
 /// every method signature, so a per-method `<'a>` does not have to
 /// shadow the struct's `'src`.
-struct IrWalker<'src> {
-    cursor: SentinelCursor<'src>,
+struct IrWalker<'t, 'src> {
+    cursor: ConstructCursor<'t, 'src>,
     /// Blocks gathered so far, in document order.
     top: Vec<IrBlock>,
     /// Kinds of the paired containers currently open, in LIFO order.
@@ -267,8 +259,8 @@ struct IrWalker<'src> {
 /// complete regardless.
 const MAX_AST_DEPTH: usize = 256;
 
-impl<'src> IrWalker<'src> {
-    fn new(cursor: SentinelCursor<'src>, open: Vec<ContainerKind>) -> Self {
+impl<'t, 'src> IrWalker<'t, 'src> {
+    fn new(cursor: ConstructCursor<'t, 'src>, open: Vec<ContainerKind>) -> Self {
         Self {
             cursor,
             top: Vec::new(),
@@ -291,7 +283,7 @@ impl<'src> IrWalker<'src> {
     /// Return the blocks plus the cursor and container stack, so a
     /// streaming caller can thread them into the next per-block walk.
     /// Used by [`StreamingIrBuilder`].
-    fn into_parts(self) -> (Vec<IrBlock>, SentinelCursor<'src>, Vec<ContainerKind>) {
+    fn into_parts(self) -> (Vec<IrBlock>, ConstructCursor<'t, 'src>, Vec<ContainerKind>) {
         (self.top, self.cursor, self.open)
     }
 
@@ -659,7 +651,7 @@ impl<'src> IrWalker<'src> {
         for ch in s.chars() {
             if is_sentinel_char(ch) {
                 if let Some(literal) = self.cursor.next_literal() {
-                    out.push_str(literal);
+                    out.push_str(&literal);
                 }
             } else {
                 out.push(ch);

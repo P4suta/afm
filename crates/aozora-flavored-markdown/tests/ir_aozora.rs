@@ -732,20 +732,17 @@ fn render_blocks_to_ir_emits_aozora_block_per_top_level_block() {
 fn streaming_ir_builder_threads_cursor_across_blocks() {
     // Two top-level blocks, each with its own inline sentinel: the cursor
     // must thread so the second block resolves against the second entry.
-    use aozora::pipeline::lex_into_arena;
-    use aozora::pipeline::lexer::sanitize;
-    use aozora::syntax::borrowed::Arena;
+    use aozora::{Arena, lex_into_arena};
     use aozora_flavored_markdown::ir::StreamingIrBuilder;
     use comrak::parse_document;
 
     let src = "｜A《a》\n\n｜B《b》";
-    let sanitized = sanitize(src);
     let arena = Arena::new();
     let lex_out = lex_into_arena(src, &arena);
     let comrak_arena = comrak::Arena::new();
     let opts = comrak::Options::default();
     let root = parse_document(&comrak_arena, lex_out.normalized, &opts);
-    let mut builder = StreamingIrBuilder::new(Some(&lex_out), &sanitized.text);
+    let mut builder = StreamingIrBuilder::new(Some(&lex_out), src);
     let mut block_iter = root.children();
     let first = builder.walk_block(block_iter.next().expect("first block"));
     let second = builder.walk_block(block_iter.next().expect("second block"));

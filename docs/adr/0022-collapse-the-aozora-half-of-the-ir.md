@@ -41,7 +41,8 @@ Every 青空文庫 construct projects to **one** variant per level —
   the offsets address a different — possibly mid-codepoint — position in the
   caller's source, so the projection withholds the span instead of
   publishing coordinates no consumer holds. Moving the whole pipeline to
-  source coordinates is the follow-up that makes this unconditional.
+  source coordinates ([ADR-0023](0023-substitute-constructs-in-source-coordinates.md))
+  is the follow-up that makes this unconditional.
 - `html` — the rendered fragment, produced by the same renderer the HTML
   splice uses, already rebranded to `aozora-md-*` (ADR-0011).
 

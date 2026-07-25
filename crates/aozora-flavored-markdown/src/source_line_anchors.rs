@@ -22,7 +22,7 @@
 
 use comrak::nodes::AstNode;
 
-use crate::sentinel_stream::saturating_u32;
+use crate::constructs::saturating_u32;
 
 /// Format every top-level child of `root` into a single HTML string,
 /// prepending a `data-aozora-md-source-line="N"` attribute onto the first

@@ -4,7 +4,7 @@
 //! blockquotes carry no depth cap (`handle_blockquote` in the vendored
 //! tree), unlike list nesting which it caps at 100 — and aozora-flavored-markdown walks that
 //! AST to splice Aozora spans and to project the IR. Before the splice
-//! walk (`ast_splice`), the inline descent (`sentinel_stream`), and the
+//! walk (`ast_splice`), the inline descent (`constructs`), and the
 //! IR builder were made iterative / depth-bounded, a deeply nested
 //! document overflowed the call stack. Under the release profile's
 //! `panic = "abort"` that is a hard process abort — a crash on untrusted
