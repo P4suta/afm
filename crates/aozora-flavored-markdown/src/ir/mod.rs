@@ -60,9 +60,9 @@
 //!    redundancy that a naive translation of the HTML splicer would
 //!    have.
 //!
-//! Both walkers render each notation through the same
-//! `crate::ast_splice::render_aozora_html`, so the IR's `html` and the
-//! document's HTML cannot drift apart on what a notation *renders to*.
+//! Both walkers read each notation's fragment off the same construct
+//! table, so the IR's `html` and the document's HTML cannot drift apart on
+//! what a notation *renders to*.
 //! Whether a notation renders at all is the other half of that agreement,
 //! and it is context-dependent (heading-hint promotion, Tier-C suppression
 //! inside headings); this walker reproduces those decisions, and
@@ -75,17 +75,16 @@ pub use types::{
     IrBlock, IrDocument, IrInline, IrListItem, IrTableAlign, IrTableRow, Position, Range, Span,
 };
 
+use core::iter;
 use core::mem;
 
-use aozora::syntax::{Container, ContainerKind};
 use aozora::{AozoraNode, BorrowedLexOutput, HeadingHint, NodeRef};
 use comrak::nodes::{
     AstNode, ListType, NodeHeading, NodeList, NodeValue, Sourcepos, TableAlignment,
 };
 
-use crate::ast_splice::render_aozora_html;
 use crate::constructs::{
-    BlockSentinelKind, ConstructCursor, Constructs, ParaScan, is_sentinel_char,
+    BlockSentinelKind, ConstructCursor, Constructs, ParaScan, inline_is_dropped, is_sentinel_char,
     paragraph_sole_block_sentinel, saturating_u32,
 };
 
@@ -111,7 +110,7 @@ const CONTAINER_CLOSE: &str = "containerClose";
 /// carries its source range only when the table could show that range
 /// addresses the caller's own text.
 pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs<'_>) -> IrDocument {
-    let mut walker = IrWalker::new(constructs.cursor(), Vec::new());
+    let mut walker = IrWalker::new(constructs.cursor(), 0);
     walker.walk_root(root);
     IrDocument {
         blocks: walker.finish(),
@@ -139,7 +138,8 @@ pub struct StreamingIrBuilder<'src> {
     constructs: Constructs<'src>,
     /// How many constructs the previous `walk_block` calls consumed.
     consumed: usize,
-    open: Vec<ContainerKind>,
+    /// How many containers the blocks walked so far left open.
+    open: usize,
 }
 
 impl<'src> StreamingIrBuilder<'src> {
@@ -157,7 +157,7 @@ impl<'src> StreamingIrBuilder<'src> {
         Self {
             constructs: Constructs::build(source, lex_out),
             consumed: 0,
-            open: Vec::new(),
+            open: 0,
         }
     }
 
@@ -171,13 +171,12 @@ impl<'src> StreamingIrBuilder<'src> {
     /// Walk a single comrak block, advancing the shared cursor.
     pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
         // Resume the cursor where the previous call left it and move the
-        // container stack into a freshly-constructed walker for the
+        // open-container count into a freshly-constructed walker for the
         // duration of this call, then take both back. The walker's `top`
-        // buffer is scoped per-call; the cursor position and the stack are
+        // buffer is scoped per-call; the cursor position and the count are
         // the state that threads across calls.
         let cursor = self.constructs.cursor_at(self.consumed);
-        let open = mem::take(&mut self.open);
-        let mut walker = IrWalker::new(cursor, open);
+        let mut walker = IrWalker::new(cursor, mem::take(&mut self.open));
         walker.walk_top(node);
         let (blocks, cursor, open) = walker.into_parts();
         self.consumed = cursor.index();
@@ -195,12 +194,8 @@ impl<'src> StreamingIrBuilder<'src> {
     /// chunked-cancellation path (ADR-0009) inserts them one by one — would
     /// leave the container swallowing everything that follows.
     #[must_use]
-    pub fn finish(mut self) -> Vec<IrBlock> {
-        let mut out = Vec::with_capacity(self.open.len());
-        while let Some(kind) = self.open.pop() {
-            out.push(synthesised_close(kind));
-        }
-        out
+    pub fn finish(self) -> Vec<IrBlock> {
+        drain_open_containers(&self.constructs.cursor(), self.open)
     }
 }
 
@@ -228,10 +223,10 @@ struct IrWalker<'t, 'src> {
     cursor: ConstructCursor<'t, 'src>,
     /// Blocks gathered so far, in document order.
     top: Vec<IrBlock>,
-    /// Kinds of the paired containers currently open, in LIFO order.
-    /// Tracking the kind (not just a depth) lets an unclosed container
-    /// synthesise its own matching close at end-of-document.
-    open: Vec<ContainerKind>,
+    /// How many paired containers are currently open. A count is enough
+    /// because every container closes the same way — see the splicer's
+    /// `open_containers`, which this mirrors.
+    open: usize,
     /// Number of `Heading` ancestors the walker is currently inside —
     /// the mirror of the splicer's `in_heading_depth`, and used for the
     /// same reason: annotation-shaped notations are dropped from a
@@ -260,7 +255,7 @@ struct IrWalker<'t, 'src> {
 const MAX_AST_DEPTH: usize = 256;
 
 impl<'t, 'src> IrWalker<'t, 'src> {
-    fn new(cursor: ConstructCursor<'t, 'src>, open: Vec<ContainerKind>) -> Self {
+    fn new(cursor: ConstructCursor<'t, 'src>, open: usize) -> Self {
         Self {
             cursor,
             top: Vec::new(),
@@ -274,16 +269,15 @@ impl<'t, 'src> IrWalker<'t, 'src> {
     /// splicer's end-of-document orphan-close pass) and return the
     /// document blocks. Used by `build_ir`.
     fn finish(mut self) -> Vec<IrBlock> {
-        while let Some(kind) = self.open.pop() {
-            self.top.push(synthesised_close(kind));
-        }
+        let drained = drain_open_containers(&self.cursor, mem::take(&mut self.open));
+        self.top.extend(drained);
         self.top
     }
 
-    /// Return the blocks plus the cursor and container stack, so a
+    /// Return the blocks plus the cursor and open-container count, so a
     /// streaming caller can thread them into the next per-block walk.
     /// Used by [`StreamingIrBuilder`].
-    fn into_parts(self) -> (Vec<IrBlock>, ConstructCursor<'t, 'src>, Vec<ContainerKind>) {
+    fn into_parts(self) -> (Vec<IrBlock>, ConstructCursor<'t, 'src>, usize) {
         (self.top, self.cursor, self.open)
     }
 
@@ -337,18 +331,23 @@ impl<'t, 'src> IrWalker<'t, 'src> {
     ) -> Option<IrBlock> {
         let hit = self.cursor.next()?;
         let (tag, html) = match (kind, hit.node) {
-            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(node)) => (
-                notation_kind(node).to_owned(),
-                render_aozora_html(node, true),
-            ),
-            (BlockSentinelKind::Open, NodeRef::BlockOpen(ck)) => {
-                self.open.push(ck);
-                (CONTAINER_OPEN.to_owned(), container_html(ck, true))
+            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(node)) => {
+                (notation_kind(node).to_owned(), hit.html()?)
+            }
+            (BlockSentinelKind::Open, NodeRef::BlockOpen(_)) => {
+                // A marker that renders to nothing opens nothing — the
+                // mirror of the splicer's `block_html`, so the two drains
+                // owe the document the same number of closes.
+                let html = hit.html()?;
+                self.open += 1;
+                (CONTAINER_OPEN.to_owned(), html)
             }
             // An orphan close (no matching open) emits nothing, in lockstep
             // with the HTML splicer's guard against unbalanced close tags.
-            (BlockSentinelKind::Close, NodeRef::BlockClose(ck)) if self.open.pop().is_some() => {
-                (CONTAINER_CLOSE.to_owned(), container_html(ck, false))
+            (BlockSentinelKind::Close, NodeRef::BlockClose(_)) if self.open > 0 => {
+                self.open -= 1;
+                let html = hit.html().unwrap_or_else(|| self.cursor.container_close());
+                (CONTAINER_CLOSE.to_owned(), html)
             }
             // Registry/AST drift or an orphan close: emit nothing.
             _ => return None,
@@ -696,17 +695,20 @@ impl<'t, 'src> IrWalker<'t, 'src> {
             // raw text inside a fenced code block) drop silently —
             // matches `crate::ast_splice::split_text_node`.
             if let NodeRef::Inline(aozora) = hit.node {
-                // …as does an annotation inside a heading: its fragment is
-                // an `aozora-md-annotation` wrapper, which Tier C bars from
-                // a heading body, so the splicer drops it. The registry
-                // entry is already consumed, so both streams stay in step.
-                if self.in_heading > 0 && matches!(aozora, AozoraNode::Annotation(_)) {
+                // …as does a notation the splicer drops rather than
+                // renders, for the reasons `inline_is_dropped` gives. The
+                // table entry is already consumed, so both streams stay in
+                // step.
+                if inline_is_dropped(aozora, self.in_heading > 0) {
                     continue;
                 }
+                let Some(html) = hit.html() else {
+                    continue;
+                };
                 out.push(IrInline::Aozora {
                     kind: notation_kind(aozora).to_owned(),
                     span: hit.span,
-                    html: render_aozora_html(aozora, true),
+                    html,
                 });
             }
         }
@@ -720,23 +722,24 @@ impl<'t, 'src> IrWalker<'t, 'src> {
     }
 }
 
-/// Opening or closing HTML for one paired-container marker.
-fn container_html(kind: ContainerKind, entering: bool) -> String {
-    render_aozora_html(AozoraNode::Container(Container { kind }), entering)
-}
-
-/// The close block for a container the source never closed. Shared by both
+/// One close block per container the source left open. Shared by both
 /// drains ([`IrWalker::finish`] for the whole document,
 /// [`StreamingIrBuilder::finish`] for the per-block path) so the two cannot
-/// describe the same situation differently.
-fn synthesised_close(kind: ContainerKind) -> IrBlock {
-    IrBlock::Aozora {
+/// describe the same situation differently — and so a document that closed
+/// everything it opened, which is nearly all of them, never asks what a
+/// close renders to.
+fn drain_open_containers(cursor: &ConstructCursor<'_, '_>, open: usize) -> Vec<IrBlock> {
+    if open == 0 {
+        return Vec::new();
+    }
+    let close = IrBlock::Aozora {
         kind: CONTAINER_CLOSE.to_owned(),
         // Synthesised, so there is no source text behind it.
         span: None,
-        html: container_html(kind, false),
+        html: cursor.container_close(),
         source_line: None,
-    }
+    };
+    iter::repeat_n(close, open).collect()
 }
 
 /// Opaque tag for a resolved construct, as carried by
@@ -891,7 +894,7 @@ mod tests {
     #[test]
     fn notation_kind_names_the_container_payload_constructs() {
         use aozora::syntax::borrowed::Warichu;
-        use aozora::syntax::{AlignEnd, Indent, Keigakomi};
+        use aozora::syntax::{AlignEnd, Container, ContainerKind, Indent, Keigakomi};
 
         let warichu = Warichu {
             upper: Content::EMPTY,

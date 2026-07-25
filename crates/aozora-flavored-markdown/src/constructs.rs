@@ -41,24 +41,43 @@
 //! no consumer holds.
 //!
 //! When the tiling does not match either way, the parser's own text drives
-//! comrak — the rendering is identical — and no construct carries a range.
-//! What is still needed there is the *source text* of a construct that
-//! landed in a literal markdown context (an inline code span, a link
-//! destination), and that is recovered by [`SourceIndex`]: every window of
-//! the source a sub-parse can trust, lexed once, keyed by what it holds.
-//! The index is built on the first literal a document reads and shared by
-//! every read after it, so recovery costs one pass over the source however
-//! many literals are asked for — never one pass *per* literal.
+//! comrak — the block structure is identical — and no construct carries a
+//! range. What is still needed there is the *source text* of every
+//! construct, and that is recovered by [`SourceIndex`]: each window of the
+//! source a sub-parse can trust is lexed once, and the constructs it holds
+//! are recorded by byte length and offset. A lookup takes the candidate of
+//! the right length nearest the offset the parser reported that also parses
+//! back to the construct asked for. The index is built on the first run a
+//! document reads and shared by every read after it, so recovery costs one
+//! pass over the source however many runs are asked for.
+//!
+//! Recovery can still come up empty — the parser owes us no bound on how
+//! far its own rewrites move an offset. A construct whose run cannot be
+//! found contributes nothing rather than something guessed at, both walkers
+//! agree on that by asking the same table, and the render says so: the
+//! table raises one diagnostic naming how many constructs it lost.
+//!
+//! # What a construct renders to
+//!
+//! The same source run answers both questions the walkers ask. Read
+//! verbatim it is the literal a markdown code span or link destination
+//! needs; handed to [`crate::fragment`] it is the HTML the splice weaves in.
+//! The table caches the run per construct and the fragment per run, so a
+//! document's repeated notation is recovered once per occurrence and parsed
+//! once per distinct notation.
 
+use core::fmt;
 use core::mem;
 use core::ops::ControlFlow;
 use std::borrow::Cow;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 
 use aozora::{AozoraNode, Arena, BorrowedLexOutput, HeadingHint, NodeRef, SourceNode};
 use comrak::nodes::{AstNode, NodeValue};
 
-use crate::diagnostics::Span;
+use crate::diagnostics::{Diagnostic, Span};
+use crate::fragment;
 
 /// Inline construct (ruby / bouten / annotation / gaiji / TCY / kaeriten).
 pub(crate) const INLINE_SENTINEL: char = '\u{E001}';
@@ -135,10 +154,18 @@ struct Construct<'src> {
     span: Span,
     /// The source run the sentinel stands for, sliced when the table was
     /// tiled. `None` on the fallback path, where finding it costs a lookup
-    /// in the recovery index — see [`Constructs::literal_of`], which only
-    /// the literal contexts pay for.
+    /// in the recovery index — see [`Constructs::literal_of`].
     literal: Option<String>,
 }
+
+/// The notation a container close is written with.
+///
+/// The one notation this crate names. It is needed where the source opens a
+/// container and never closes it: the splice has to close it anyway, and the
+/// closing markup is whatever this notation renders to — asked for the same
+/// way every other fragment is, so it stays the parser's answer rather than
+/// a tag written down here.
+const CONTAINER_CLOSE_NOTATION: &str = "［＃ここで字下げ終わり］";
 
 /// Source-ordered construct table plus the text comrak parses.
 #[derive(Debug)]
@@ -154,11 +181,22 @@ pub(crate) struct Constructs<'src> {
     /// caller can slice, and therefore publishable.
     ranges_address_source: bool,
     /// Our copy of the source, kept only when the tiling could not be
-    /// trusted: there a literal has to be recovered rather than sliced.
+    /// trusted: there a run has to be recovered rather than sliced.
     untiled_source: Option<String>,
     /// Where every construct sits in `untiled_source`, built on the first
-    /// literal read and shared by every read after it.
+    /// run read and shared by every read after it.
     index: OnceCell<SourceIndex>,
+    /// What the index answered for a construct, by table position, and
+    /// `None` where it could not place one. Both walkers ask about the
+    /// same constructs and a run is read more than once per construct, so
+    /// the probing a lookup costs is paid once. Empty on the tiled path,
+    /// where every run was sliced up front.
+    recovered: RefCell<HashMap<usize, Option<Span>>>,
+    /// What each source run renders to, keyed by the run. A document
+    /// repeats its notation — the same ruby, the same page break, the same
+    /// container marker — so a fragment is parsed once however many
+    /// constructs stand for it.
+    fragments: RefCell<HashMap<String, String>>,
 }
 
 impl<'src> Constructs<'src> {
@@ -172,6 +210,8 @@ impl<'src> Constructs<'src> {
             ranges_address_source: true,
             untiled_source: None,
             index: OnceCell::new(),
+            recovered: RefCell::new(HashMap::new()),
+            fragments: RefCell::new(HashMap::new()),
         }
     }
 
@@ -196,6 +236,8 @@ impl<'src> Constructs<'src> {
                 ranges_address_source: matches!(hygienic, Cow::Borrowed(_)),
                 untiled_source: None,
                 index: OnceCell::new(),
+                recovered: RefCell::new(HashMap::new()),
+                fragments: RefCell::new(HashMap::new()),
             };
         }
         Self {
@@ -204,6 +246,8 @@ impl<'src> Constructs<'src> {
             ranges_address_source: false,
             untiled_source: Some(source.to_owned()),
             index: OnceCell::new(),
+            recovered: RefCell::new(HashMap::new()),
+            fragments: RefCell::new(HashMap::new()),
         }
     }
 
@@ -211,11 +255,10 @@ impl<'src> Constructs<'src> {
     ///
     /// Free on the tiled path, where the run was sliced when the table was
     /// built. On the fallback path it consults the recovery index — which
-    /// is why it is asked for lazily: only a notation that landed in a
-    /// literal markdown context (an inline code span, a link destination)
-    /// needs its source text, and building the index at all is work a
-    /// document without one should not pay for. Empty when the index cannot
-    /// place the construct.
+    /// is why it is asked for lazily: building the index at all is work a
+    /// markdown-only document should not pay for, and the answer is then
+    /// memoised per construct so neither walker probes twice. Empty when
+    /// the index cannot place the construct.
     fn literal_of(&self, idx: usize) -> Cow<'_, str> {
         let Some(entry) = self.entries.get(idx) else {
             return Cow::Borrowed("");
@@ -226,10 +269,60 @@ impl<'src> Constructs<'src> {
         let Some(source) = &self.untiled_source else {
             return Cow::Borrowed("");
         };
-        let index = self.index.get_or_init(|| SourceIndex::build(source));
-        resolve_in_source(source, index, entry.span, entry.node)
+        let known = self.recovered.borrow().get(&idx).copied();
+        let found = known.unwrap_or_else(|| {
+            let index = self.index.get_or_init(|| SourceIndex::build(source));
+            let found = resolve_in_source(source, index, entry.span, entry.node);
+            self.recovered.borrow_mut().insert(idx, found);
+            found
+        });
+        found
             .and_then(|span| slice(source, span))
             .map_or(Cow::Borrowed(""), Cow::Borrowed)
+    }
+
+    /// The HTML construct `idx` renders to, or `None` when its source run
+    /// could not be recovered and there is nothing to render.
+    fn fragment_of(&self, idx: usize) -> Option<String> {
+        let run = self.literal_of(idx);
+        (!run.is_empty()).then(|| self.fragment_for(&run))
+    }
+
+    /// What the render has to say for itself: one warning naming how many
+    /// constructs were lost, or nothing at all — which is every document
+    /// whose tiling was trusted, and nearly every one whose was not.
+    ///
+    /// Read once both walkers are done, so the count covers every construct
+    /// either of them asked about.
+    pub(crate) fn diagnostics(&self) -> Vec<Diagnostic> {
+        let lost = self
+            .recovered
+            .borrow()
+            .values()
+            .filter(|found| found.is_none())
+            .count();
+        if lost == 0 {
+            return Vec::new();
+        }
+        vec![Diagnostic::constructs_unresolved(lost)]
+    }
+
+    /// The HTML `run` renders to, parsed once per distinct run.
+    fn fragment_for(&self, run: &str) -> String {
+        if let Some(cached) = self.fragments.borrow().get(run) {
+            return cached.clone();
+        }
+        let html = fragment::render(run);
+        self.fragments
+            .borrow_mut()
+            .insert(run.to_owned(), html.clone());
+        html
+    }
+
+    /// The markup that closes a container the source left open. Both
+    /// walkers drain their open containers at end of document with it.
+    fn container_close(&self) -> String {
+        self.fragment_for(CONTAINER_CLOSE_NOTATION)
     }
 
     /// The text comrak parses.
@@ -395,23 +488,21 @@ const MAX_PROBES: usize = 16;
 ///
 /// Built in one pass: the source is cut into the windows a sub-parse can
 /// trust and each is lexed once, so the whole index costs about what a
-/// single sub-parse of the document costs. Every literal the document reads
+/// single sub-parse of the document costs. Every run the document reads
 /// then answers from it — which is what keeps a document with thousands of
-/// notations in literal contexts linear rather than quadratic.
+/// notations linear rather than quadratic.
 #[derive(Debug)]
 struct SourceIndex {
-    /// Non-overlapping, in source order, so a lookup binary-searches for
-    /// the window holding the offset it was given.
-    windows: Vec<IndexedWindow>,
-}
-
-/// One window of the source and the constructs lexing it yields.
-#[derive(Debug)]
-struct IndexedWindow {
-    span: Span,
-    /// `(byte length, start offset in the source)` per construct, sorted:
-    /// a lookup knows the length it wants and roughly the offset, so it
-    /// binary-searches for both.
+    /// `(byte length, start offset in the source)` per construct found in
+    /// a window, sorted: a lookup knows the length it wants and roughly
+    /// the offset, so it binary-searches for both.
+    ///
+    /// The windows are what decides *which* constructs are in here; where
+    /// each one sits is an offset into the whole source, so a lookup never
+    /// has to care which window found it. It cannot: the offset the parser
+    /// reports is one it measured against a text it rewrote, and a rewrite
+    /// near the top of a document moves every offset under it — including
+    /// past the boundary of the window the construct is really in.
     candidates: Vec<(u32, u32)>,
 }
 
@@ -428,30 +519,28 @@ impl SourceIndex {
             start: 0,
             end: saturating_u32(source.len()),
         };
-        let mut windows = Vec::new();
+        let mut candidates = Vec::new();
         for block in split_spans(source, whole, BLANK_LINE) {
-            match index_window(source, block) {
-                Some(window) => windows.push(window),
-                None => windows.extend(
-                    split_spans(source, block, "\n")
-                        .map(|line| trim_carriage_return(source, line))
-                        .filter_map(|line| index_window(source, line)),
-                ),
+            if index_window(source, block, &mut candidates) {
+                continue;
+            }
+            for line in split_spans(source, block, "\n") {
+                index_window(source, trim_carriage_return(source, line), &mut candidates);
             }
         }
-        windows.retain(|window| !window.candidates.is_empty());
-        Self { windows }
+        candidates.sort_unstable();
+        Self { candidates }
     }
 
     /// The range in `source` of the construct `span` names.
     ///
-    /// Among the candidates in the window holding `span.start` that are
-    /// `span`'s byte length, the nearest one that parses on its own to
-    /// `node`'s shape wins. `None` when no candidate qualifies — an honest
-    /// "unknown" beats a plausible-looking wrong answer.
+    /// Among the candidates of `span`'s byte length, the nearest one to
+    /// `span.start` that parses on its own to `node`'s shape wins. `None`
+    /// when no candidate qualifies — an honest "unknown" beats a
+    /// plausible-looking wrong answer.
     fn resolve(&self, source: &str, span: Span, node: NodeRef<'_>) -> Option<Span> {
         let want = span.end.checked_sub(span.start)?;
-        let run = self.window_holding(span.start)?.run_of_length(want);
+        let run = self.run_of_length(want);
         let pivot = run.partition_point(|&(_, start)| start < span.start);
         let (mut left, mut right) = (pivot, pivot);
         for _ in 0..MAX_PROBES {
@@ -488,17 +577,6 @@ impl SourceIndex {
         None
     }
 
-    /// The indexed window holding `offset`, if any. An offset the parser's
-    /// rewrites pushed onto a blank line belongs to no window, and gets no
-    /// answer.
-    fn window_holding(&self, offset: u32) -> Option<&IndexedWindow> {
-        let after = self.windows.partition_point(|w| w.span.start <= offset);
-        let window = self.windows.get(after.checked_sub(1)?)?;
-        (offset <= window.span.end).then_some(window)
-    }
-}
-
-impl IndexedWindow {
     /// The candidates of exactly `want` bytes, in source order.
     fn run_of_length(&self, want: u32) -> &[(u32, u32)] {
         let from = self.candidates.partition_point(|&(len, _)| len < want);
@@ -507,42 +585,38 @@ impl IndexedWindow {
     }
 }
 
-/// Lex `source[window]` and record where each construct it holds sits in
-/// `source`.
+/// Lex `source[window]` and push where each construct it holds sits in
+/// `source` onto `out`.
 ///
-/// `None` when the window is one the parser rewrites before lexing, since
-/// the offsets a sub-parse reports inside it would then be shifted too.
-/// That is decided by the same proof the whole document runs — the window's
-/// tiling against the window's own sentinel text — rather than by a list of
-/// the rewrites, which are the parser's to make and to change.
-fn index_window(source: &str, window: Span) -> Option<IndexedWindow> {
-    let text = slice(source, window)?;
+/// `false` — with `out` untouched — when the window is one the parser
+/// rewrites before lexing, since the offsets a sub-parse reports inside it
+/// would then be shifted too. That is decided by the same proof the whole
+/// document runs — the window's tiling against the window's own sentinel
+/// text — rather than by a list of the rewrites, which are the parser's to
+/// make and to change. The caller answers a `false` by trying the window's
+/// lines instead.
+fn index_window(source: &str, window: Span, out: &mut Vec<(u32, u32)>) -> bool {
+    let Some(text) = slice(source, window) else {
+        return false;
+    };
     if text.is_empty() {
-        return None;
+        return false;
     }
     let arena = Arena::new();
     let lexed = aozora::lex_into_arena(text, &arena);
     if !ranges_address(text, &lexed) {
-        return None;
+        return false;
     }
-    let mut candidates: Vec<(u32, u32)> = lexed
-        .source_nodes
-        .iter()
-        .map(|entry| {
-            (
-                entry
-                    .source_span
-                    .end
-                    .saturating_sub(entry.source_span.start),
-                window.start.saturating_add(entry.source_span.start),
-            )
-        })
-        .collect();
-    candidates.sort_unstable();
-    Some(IndexedWindow {
-        span: window,
-        candidates,
-    })
+    out.extend(lexed.source_nodes.iter().map(|entry| {
+        (
+            entry
+                .source_span
+                .end
+                .saturating_sub(entry.source_span.start),
+            window.start.saturating_add(entry.source_span.start),
+        )
+    }));
+    true
 }
 
 /// The range in `source` of the construct at `span`.
@@ -647,12 +721,66 @@ fn slice(source: &str, span: Span) -> Option<&str> {
 // Cursor
 // ===================================================================
 
-/// One entry of the construct stream: what the parser resolved, plus the
-/// byte range it occupied in the source.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ConstructHit<'src> {
+/// One entry of the construct stream: what the parser resolved, the byte
+/// range it occupied in the source, and — on demand — the HTML it renders
+/// to.
+///
+/// The fragment is asked for rather than carried because a construct does
+/// not always reach the output: an orphan close, or an annotation inside a
+/// heading, is consumed to keep the stream in step and then dropped. Those
+/// never pay for a parse.
+#[derive(Clone, Copy)]
+pub(crate) struct ConstructHit<'t, 'src> {
     pub(crate) node: NodeRef<'src>,
     pub(crate) span: Option<Span>,
+    table: &'t Constructs<'src>,
+    idx: usize,
+}
+
+impl ConstructHit<'_, '_> {
+    /// The HTML this construct renders to, or `None` when its source run
+    /// could not be recovered — see [`Constructs::literal_of`]. A caller
+    /// that has block structure riding on the answer (a container marker)
+    /// must not treat `None` as empty markup: nothing was rendered, so
+    /// nothing was opened or closed either.
+    pub(crate) fn html(&self) -> Option<String> {
+        self.table.fragment_of(self.idx)
+    }
+}
+
+/// Whether an inline construct is consumed and dropped rather than
+/// rendered. Both walkers ask, so neither can decide it differently.
+///
+/// Two notations never reach the output as themselves:
+///
+/// * an annotation inside a heading. Its fragment is an
+///   `aozora-md-annotation` wrapper, which Tier C bars from a heading body.
+/// * a heading hint, wherever an inline walk reaches one. A hint is a
+///   directive about the text around it, and the paragraph case acts on it
+///   by promoting the whole paragraph to a heading. Reaching it inline
+///   means there is nothing to promote — a markdown heading, a table cell —
+///   and, unlike every other notation, a hint's source run does *not*
+///   cover the text it names, so parsing that run on its own resolves to an
+///   unknown annotation. Rendering that would put the bracket run back into
+///   the very heading it was written to name.
+pub(crate) fn inline_is_dropped(node: AozoraNode<'_>, in_heading: bool) -> bool {
+    match node {
+        AozoraNode::HeadingHint(_) => true,
+        AozoraNode::Annotation(_) => in_heading,
+        _ => false,
+    }
+}
+
+impl fmt::Debug for ConstructHit<'_, '_> {
+    /// Elides the table — every hit borrows the same one, and printing it
+    /// per hit would bury whatever the caller was debugging.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConstructHit")
+            .field("node", &self.node)
+            .field("span", &self.span)
+            .field("idx", &self.idx)
+            .finish()
+    }
 }
 
 /// Cursor over a [`Constructs`] table.
@@ -678,16 +806,24 @@ impl<'t, 'src> ConstructCursor<'t, 'src> {
     }
 
     /// Consume and return the next construct, advancing the cursor.
-    pub(crate) fn next(&mut self) -> Option<ConstructHit<'src>> {
+    pub(crate) fn next(&mut self) -> Option<ConstructHit<'t, 'src>> {
         let publishable = self.table.ranges_address_source;
-        let hit = self.table.entries.get(self.idx).map(|entry| ConstructHit {
+        let idx = self.idx;
+        let hit = self.table.entries.get(idx).map(|entry| ConstructHit {
             node: entry.node,
             span: publishable.then_some(entry.span),
+            table: self.table,
+            idx,
         });
         if hit.is_some() {
             self.idx += 1;
         }
         hit
+    }
+
+    /// The markup that closes a container the source left open.
+    pub(crate) fn container_close(&self) -> String {
+        self.table.container_close()
     }
 
     /// Consume the next construct, returning the source text it stands for.
@@ -1249,7 +1385,7 @@ mod tests {
             );
             assert_eq!(
                 recover(SRC, page_break_span, annotation.node),
-                None,
+                Some(annotation_span),
                 "a page break must not answer for an annotation"
             );
             // And a range past the end of the source places nothing.
@@ -1276,11 +1412,8 @@ mod tests {
             ("\u{feff}前\n｜青梅《おうめ》", "｜青梅《おうめ》"),
         ] {
             let index = SourceIndex::build(src);
-            let [window] = index.windows.as_slice() else {
-                panic!("one line of {src:?} holds a construct: {index:?}");
-            };
-            let [(len, start)] = window.candidates.as_slice() else {
-                panic!("that line holds exactly one construct: {window:?}");
+            let [(len, start)] = index.candidates.as_slice() else {
+                panic!("one line of {src:?} holds one construct: {index:?}");
             };
             assert_eq!(
                 slice(
@@ -1294,6 +1427,24 @@ mod tests {
                 "the indexed range must cover the notation in {src:?}"
             );
         }
+    }
+
+    /// A rewrite near the top of a document moves every offset under it,
+    /// so the offset the parser reports for a construct can land outside —
+    /// even before — the block the construct is really in. Recovery has to
+    /// answer anyway: this is the shape of every real 青空文庫 file, which
+    /// is CRLF and opens with a decorative rule.
+    #[test]
+    fn recovery_answers_an_offset_that_landed_outside_the_constructs_block() {
+        const RAW: &str = "本文\r\n----------\r\n｜青梅《おうめ》\r\n";
+        with_constructs(RAW, |constructs| {
+            assert!(
+                constructs.untiled_source.is_some(),
+                "the fixture must take the fallback path: {constructs:?}"
+            );
+            let mut cursor = constructs.cursor();
+            assert_eq!(cursor.next_literal().as_deref(), Some("｜青梅《おうめ》"));
+        });
     }
 
     /// A document the parser rewrote can still hold two constructs of the

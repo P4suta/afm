@@ -48,6 +48,7 @@ mod ast_splice;
 mod code_block_mask;
 mod constructs;
 pub mod diagnostics;
+mod fragment;
 pub mod html;
 pub mod ir;
 mod source_line_anchors;
@@ -465,6 +466,12 @@ where
     // `code_block_mask` module docs for the masking scheme.
     let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
 
+    // A render parses the document once and then each of its constructs
+    // again, on its own, to learn what that construct renders to. Building
+    // the parser's process-global tables here keeps that cost off the first
+    // of those parses; the call is idempotent and free once warm.
+    aozora::prewarm();
+
     let arena = Arena::new();
     let lex_out = aozora::lex_into_arena(&masked_source, &arena);
 
@@ -493,7 +500,11 @@ where
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
     let html = format_root(root, options, Some(mask_originals.as_slice()));
-    let diagnostics = lex_out.diagnostics.iter().map(Diagnostic::from).collect();
+    // Read after both walks, so the table has been asked about every
+    // construct either of them reached.
+    let mut diagnostics: Vec<Diagnostic> =
+        lex_out.diagnostics.iter().map(Diagnostic::from).collect();
+    diagnostics.extend(constructs.diagnostics());
     (html, diagnostics, extra)
 }
 
@@ -612,13 +623,19 @@ pub fn render_blocks_to_ir(
         .map(|child| builder.walk_block(child))
         .collect();
     ast_splice::splice_into_ast(root, &comrak_arena, builder.constructs());
+    // Read while the builder still owns the table, and after both walks:
+    // the drain below asks it only about the one notation that always
+    // resolves, so nothing is lost by reading here.
+    let unresolved = builder.constructs().diagnostics();
     // End-of-document drain. The splicer appends one synthesised close
     // per still-open container as a fresh top-level child, so each one
     // becomes its own `RenderedBlock`; giving the drain the same shape
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
     let blocks = collect_rendered_blocks(root, options, blocks_ir);
-    let diagnostics = lex_out.diagnostics.iter().map(Diagnostic::from).collect();
+    let mut diagnostics: Vec<Diagnostic> =
+        lex_out.diagnostics.iter().map(Diagnostic::from).collect();
+    diagnostics.extend(unresolved);
     (blocks, diagnostics)
 }
 

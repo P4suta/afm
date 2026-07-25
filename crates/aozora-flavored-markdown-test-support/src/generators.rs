@@ -8,7 +8,7 @@
 //! | Strategy | Shape | Drives |
 //! |---|---|---|
 //! | [`kanji_fragment`] | single-script CJK runs | heading-hint targets, ruby bases |
-//! | [`aozora_fragment`] | plain text + Aozora trigger glyphs + decorative rule rows | "render is total", Tier A/B, setext promotion |
+//! | [`aozora_fragment`] | plain text + Aozora trigger glyphs + CRLF + decorative rule rows | "render is total", Tier A/B, setext promotion, construct recovery |
 //! | [`pathological_aozora`] | unbalanced brackets, unpaired container opens | malformed input never panics |
 //! | [`commonmark_adversarial`] | adversarial CommonMark/GFM, including blocks that carry Aozora notation | the two grammars sharing one document |
 //!
@@ -50,6 +50,13 @@ pub fn kanji_fragment(max_len: usize) -> impl Strategy<Value = String> {
 /// bracket shapes as readily as balanced ones. Properties that need
 /// well-formed input gate on the parse diagnostics instead of on the
 /// generator.
+///
+/// The CR-bearing line breaks are here for a reason beyond coverage of an
+/// encoding: 青空文庫 source is historically CRLF, and CRLF is one of the
+/// rewrites that decide whether the renderer can address a construct by
+/// slicing the caller's own source or has to recover it. Drawn against the
+/// decorative rule rows below, they reach the recovery path — where a
+/// construct that cannot be placed is dropped, text and all.
 const AOZORA_ATOMS: &[&str] = &[
     "｜",
     "《",
@@ -65,6 +72,8 @@ const AOZORA_ATOMS: &[&str] = &[
     "1234",
     "\n",
     "\n\n",
+    "\r\n",
+    "\r\n\r\n",
     "、",
     "。",
     " ",

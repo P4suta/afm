@@ -92,6 +92,32 @@ impl Diagnostic {
             span: Span { start: 0, end: 0 },
         }
     }
+
+    /// aozora-flavored-markdown host-level diagnostic: `count` constructs
+    /// were recognised but their source text could not be located, so they
+    /// were left out of the output.
+    ///
+    /// This crate renders a construct by handing its source run back to the
+    /// parser (see `crate::fragment`). On a document the parser rewrites
+    /// before lexing — a decorative rule gaining a blank line, an accent
+    /// digraph combining — the ranges it reports address that rewritten
+    /// text rather than the caller's, and a run that cannot be recovered
+    /// from the caller's own source is dropped rather than guessed at.
+    /// Document-scoped: the ranges that would locate the losses are the
+    /// ones that could not be trusted in the first place.
+    #[must_use]
+    pub(crate) fn constructs_unresolved(count: usize) -> Self {
+        Self {
+            severity: Severity::Warning,
+            source: DiagnosticSource::Source,
+            code: "aozora-md::constructs_unresolved",
+            message: format!(
+                "{count} 青空文庫 construct(s) could not be located in the source \
+                 and were left out of the output"
+            ),
+            span: Span { start: 0, end: 0 },
+        }
+    }
 }
 
 impl From<&aozora::Diagnostic> for Diagnostic {
