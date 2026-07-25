@@ -105,7 +105,7 @@ _aozora-flavored-markdown() {
             return 0
             ;;
         aozora__subcmd__flavored__subcmd__markdown__subcmd__check)
-            opts="-v -q -h --encoding --strict --color --verbose --quiet --format --help <INPUT>"
+            opts="-v -q -h --encoding --strict --color --verbose --quiet --format --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -241,7 +241,7 @@ _aozora-flavored-markdown() {
             return 0
             ;;
         aozora__subcmd__flavored__subcmd__markdown__subcmd__render)
-            opts="-o -v -q -h --output --encoding --strict --color --verbose --quiet --format --help <INPUT>"
+            opts="-o -v -q -h --output --encoding --strict --color --verbose --quiet --format --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
