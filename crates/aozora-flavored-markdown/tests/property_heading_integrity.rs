@@ -28,10 +28,10 @@
 //! The generator over-samples the indent-followed-by-heading shape so
 //! the indent-leakage failure mode is exercised heavily.
 
-use aozora::proptest::config::default_config;
-use aozora::proptest::generators::kanji_fragment;
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::check_heading_integrity;
+use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::generators::kanji_fragment;
 use proptest::prelude::*;
 
 /// Generate an indent / alignment decorator as a single atom.

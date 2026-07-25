@@ -24,10 +24,10 @@
 //! (no bare `［＃` leak) and Tier B (no PUA sentinel leak), gated on
 //! a clean lexer parse so unbalanced inputs don't sabotage the test.
 
-use aozora::proptest::config::default_config;
-use aozora::proptest::generators::aozora_fragment;
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
+use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::generators::aozora_fragment;
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_html_tag_balance, check_no_bare_bracket, check_no_sentinel_leak,
 };

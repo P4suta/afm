@@ -153,15 +153,14 @@ fn every_emitted_class_is_in_the_pinned_contract() {
 
 #[test]
 fn both_renderers_satisfy_tier_a_no_bare_bracket() {
-    use aozora_flavored_markdown_test_support::strip_annotation_wrappers;
+    use aozora_flavored_markdown_test_support::check_no_bare_bracket;
     for (label, src) in pure_aozora_fixtures() {
         for (renderer, html) in [
             ("aozora", aozora_only_render(src)),
             ("aozora-md", md_html::render_to_string(src)),
         ] {
-            let stripped = strip_annotation_wrappers(&html);
             assert!(
-                !stripped.contains("［＃"),
+                check_no_bare_bracket(&html).is_ok(),
                 "{renderer} Tier A leaked ［＃ on {label} ({src:?}): {html}"
             );
         }

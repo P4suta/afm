@@ -384,8 +384,10 @@ mod proptests {
     //!    pass unchanged.
 
     use super::*;
-    use aozora::proptest::config::default_config;
-    use aozora::proptest::generators::{aozora_fragment, commonmark_adversarial};
+    use aozora_flavored_markdown_test_support::config::default_config;
+    use aozora_flavored_markdown_test_support::generators::{
+        aozora_fragment, commonmark_adversarial,
+    };
     use proptest::prelude::*;
 
     /// Combined input strategy — Aozora fragments mixed with CommonMark

@@ -16,18 +16,7 @@
 //! leaking) across every shape.
 
 use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown_test_support::strip_annotation_wrappers;
-
-/// Strip aozora-md-annotation wrappers then assert no `［＃` survives.
-/// Wrappers carry the raw markup inside a `hidden` span for round-trip
-/// fidelity; outside them the output must be marker-free.
-fn assert_tier_a(html: &str) {
-    let stripped = strip_annotation_wrappers(html);
-    assert!(
-        !stripped.contains("［＃"),
-        "Tier-A leaked ［＃ outside aozora-md-annotation wrapper. Full HTML: {html:?}"
-    );
-}
+use aozora_flavored_markdown_test_support::assert_no_bare_bracket as assert_tier_a;
 
 // ---------------------------------------------------------------------------
 // ATX headings
@@ -173,43 +162,11 @@ fn fenced_code_block_preserves_aozora_markup_as_code() {
         !html.contains("aozora-md-page-break"),
         "page-break div must NOT appear inside a code fence, got {html:?}"
     );
-    // Tier-A still holds — the brackets inside the code block are
-    // escaped by comrak (they become `＃` + `［` etc but the canary
-    // looks for `［＃` as a pair which also survives as-is inside
-    // <code>).
-    //
-    // NOTE: the canary is intentionally broad — raw brackets in a
-    // code block aren't a Tier-A violation in the spec sense (they
-    // came from the author's literal markdown, not from unparsed
-    // Aozora markup) but we document the current behaviour here.
-    // If this assertion fails in the future, re-evaluate the Tier-A
-    // rule rather than blindly "fixing" the renderer.
-    let stripped = strip_annotation_wrappers(&html);
-    // Brackets inside a <code> block are legitimate literal text.
-    // Check only that outside <code> blocks we stay clean.
-    let outside_code = scrub_code_blocks(&stripped);
-    assert!(
-        !outside_code.contains("［＃"),
-        "bare ［＃ outside <code> block, got {html:?}"
-    );
-}
-
-/// Remove every `<code>…</code>` span (including multi-line code
-/// blocks) so Tier-A checks can ignore legitimate literal markup.
-fn scrub_code_blocks(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(at) = rest.find("<code") {
-        out.push_str(&rest[..at]);
-        let after = &rest[at..];
-        let Some(end) = after.find("</code>") else {
-            out.push_str(after);
-            return out;
-        };
-        rest = &after[end + "</code>".len()..];
-    }
-    out.push_str(rest);
-    out
+    // Tier-A still holds. Brackets inside a `<code>` element came from
+    // the author's literal markdown rather than from unparsed Aozora
+    // markup, so the tier excepts them — that exception now lives in
+    // the shared predicate instead of a local scrub here.
+    assert_tier_a(&html);
 }
 
 // ---------------------------------------------------------------------------

@@ -114,11 +114,9 @@ checksum = "beaab242a8f8f98887a49df7d6a55bb299cfc4ee2aadb36ea87e23ee8785f4a3"
 dependencies = [
  "aozora-encoding",
  "aozora-pipeline",
- "aozora-proptest",
  "aozora-render",
  "aozora-spec",
  "aozora-syntax",
- "proptest",
  "serde",
  "serde_json",
 ]
@@ -204,6 +202,7 @@ name = "aozora-flavored-markdown-test-support"
 version = "0.4.1"
 dependencies = [
  "aozora",
+ "proptest",
 ]
 
 [[package]]
@@ -239,15 +238,6 @@ dependencies = [
  "phf",
  "smallvec",
  "thiserror",
-]
-
-[[package]]
-name = "aozora-proptest"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e2979819c2b46b395ee3e50363eaf4f2708b1173af7822cca53372560de7fa"
-dependencies = [
- "proptest",
 ]
 
 [[package]]

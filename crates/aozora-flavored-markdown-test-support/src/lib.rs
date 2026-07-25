@@ -9,15 +9,20 @@
 //! footing. [`assert_invariants`] runs every predicate and aggregates
 //! their diagnostics.
 //!
-//! The matching *generator* strategies live in the sibling parser repo
-//! so `proptest` does not become a transitive runtime dependency of
-//! `aozora-flavored-markdown`.
+//! The matching *generator* strategies live alongside them in
+//! [`generators`], with the shared [`ProptestConfig`] in [`config`].
+//! Hosting them here — rather than borrowing a parser-side crate — keeps
+//! `proptest` out of `aozora-flavored-markdown`'s runtime dependency graph
+//! while leaving the pools free to cover this dialect's own mixed
+//! CommonMark × Aozora shapes.
+//!
+//! [`ProptestConfig`]: proptest::prelude::ProptestConfig
 //!
 //! # Invariant catalog
 //!
 //! | Tier | Predicate | Shape forbidden in rendered HTML |
 //! |------|-----------|-----------------------------------|
-//! | A    | [`check_no_bare_bracket`]           | Bare `［＃` outside `aozora-md-annotation` wrapper (Tier-A canary). |
+//! | A    | [`check_no_bare_bracket`]           | Bare `［＃` outside `aozora-md-annotation` wrapper, `<code>` regions excepted (Tier-A canary). |
 //! | B    | [`check_no_sentinel_leak`]          | PUA sentinels U+E001–U+E004 (lexer-internal markers). |
 //! | C    | [`check_heading_integrity`]         | `<h1>`–`<h6>` bodies must not carry `aozora-md-indent`, `aozora-md-container-indent`, or `aozora-md-annotation` tokens. |
 //! | D    | [`check_html_tag_balance`]          | Tags must balance ([`check_well_formed`] returns `Ok`). |
@@ -55,6 +60,9 @@
 //! [`AOZORA_MD_CLASSES`]: self::AOZORA_MD_CLASSES
 
 #![forbid(unsafe_code)]
+
+pub mod config;
+pub mod generators;
 
 use core::error::Error;
 use core::fmt;
@@ -119,25 +127,20 @@ pub fn strip_annotation_wrappers(html: &str) -> String {
     out
 }
 
-/// Assert `needle` is absent from `html` once aozora-md-annotation wrappers are stripped.
+/// Assert `html` carries no bare `［＃` — the Tier A canary in assertion
+/// form, for integration tests that want a panic rather than a `Result`.
 ///
-/// The Tier A canary used by every integration test that watches for bracket
-/// leaks: `assert_no_bare(&html, "［＃")`.
+/// Delegates to [`check_no_bare_bracket`] so the tier has exactly one
+/// definition; in particular the `<code>` exception applies here too.
 ///
 /// # Panics
 ///
-/// Panics with a diagnostic snippet (first occurrence + total count) when
-/// `needle` is found in the stripped output.
-pub fn assert_no_bare(html: &str, needle: &str) {
-    let stripped = strip_annotation_wrappers(html);
-    assert!(
-        !stripped.contains(needle),
-        "bare {needle:?} leaked outside the aozora-md-annotation wrapper.\n\
-         first occurrence near:\n{}\n\
-         total occurrences: {}",
-        first_occurrence_context(&stripped, needle, 80),
-        stripped.matches(needle).count(),
-    );
+/// Panics with the [`Violation::BareBracket`] diagnostic (first offset,
+/// context snippet, total count) plus the offending HTML.
+pub fn assert_no_bare_bracket(html: &str) {
+    if let Err(violation) = check_no_bare_bracket(html) {
+        panic!("{violation}\n  full html = {html:?}");
+    }
 }
 
 /// Format a `±window` context snippet around the first `needle` in `haystack`.
@@ -322,9 +325,22 @@ impl Error for Violation {}
 
 /// Tier A — no bare `［＃` outside `aozora-md-annotation` wrappers.
 ///
-/// The Tier-A canary in predicate form. Strips every annotation
-/// wrapper and asserts the remainder contains no `［＃`. Succeeds when
-/// the input has no annotations at all (stripping is a no-op).
+/// The Tier-A canary in predicate form, and the single definition of
+/// the tier: strip every `<code>` region and every annotation wrapper,
+/// then assert the remainder contains no `［＃`. Succeeds when the
+/// input has no annotations at all (stripping is a no-op).
+///
+/// **`<code>` regions are excepted** — both the fenced `<pre><code>`
+/// kind and the inline code span. A code element's body is the user's
+/// bytes verbatim (CommonMark §6.1), so notation typed inside one
+/// *must* surface unwrapped: that is the renderer restoring a literal
+/// context, not leaking an unparsed construct. `literal_context_sentinels`
+/// pins the behaviour and `code_block_mask` carries the round-trip
+/// properties behind it.
+///
+/// The exception is deliberately narrower than a blanket skip: an
+/// unclosed `<code` keeps the rest of the document in scope, so a leak
+/// that happens to follow malformed markup still fires.
 ///
 /// # Errors
 ///
@@ -332,7 +348,7 @@ impl Error for Violation {}
 /// total leak count when a bare `［＃` survives the strip.
 pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
     const NEEDLE: &str = "［＃";
-    let stripped = strip_annotation_wrappers(html);
+    let stripped = strip_annotation_wrappers(&strip_code_regions(html));
     if let Some(offset) = stripped.find(NEEDLE) {
         let total = stripped.matches(NEEDLE).count();
         return Err(Violation::BareBracket {
@@ -745,32 +761,66 @@ pub fn source_contains_html_entity_literal(src: &str) -> bool {
         .any(|ch| ('\u{E000}'..='\u{E004}').contains(&ch))
 }
 
-/// Strip every `<pre><code...>...</code></pre>` region from `html`.
-/// The double-encoded-entity check defers to this helper because code
-/// blocks legitimately host `&amp;amp;` and friends in their literal
-/// payload (CommonMark §6.1: code-block content is verbatim, then
-/// escape-pass-once for output safety).
-fn strip_pre_code_blocks(html: &str) -> Cow<'_, str> {
-    if !html.contains("<pre><code") {
+/// What a scrub does with a region whose closing tag never arrives.
+///
+/// Malformed markup has no right answer, so each caller picks the error
+/// it prefers rather than inheriting one.
+#[derive(Clone, Copy)]
+enum Unclosed {
+    /// Drop the remainder — the caller would rather miss a violation
+    /// than report one against markup it cannot delimit.
+    Swallow,
+    /// Keep the remainder in scope — the caller would rather report.
+    Retain,
+}
+
+/// Remove every `open`…`close` region from `html`.
+///
+/// Substring scanning, not parsing: these predicates read renderer
+/// output, where the tags of interest are emitted in one fixed shape.
+fn strip_regions<'a>(html: &'a str, open: &str, close: &str, unclosed: Unclosed) -> Cow<'a, str> {
+    if !html.contains(open) {
         return Cow::Borrowed(html);
     }
     let mut out = String::with_capacity(html.len());
     let mut cursor = 0;
-    while let Some(rel_open) = html[cursor..].find("<pre><code") {
+    while let Some(rel_open) = html[cursor..].find(open) {
         let abs_open = cursor + rel_open;
         out.push_str(&html[cursor..abs_open]);
-        let after_open = abs_open + "<pre><code".len();
-        if let Some(rel_close) = html[after_open..].find("</code></pre>") {
-            cursor = after_open + rel_close + "</code></pre>".len();
-        } else {
-            // Malformed (unclosed `<pre><code`): treat the remainder
-            // as code-block content so a stray `&amp;amp;` inside the
-            // unclosed block does not false-positive the Tier I gate.
+        let after_open = abs_open + open.len();
+        let Some(rel_close) = html[after_open..].find(close) else {
+            if matches!(unclosed, Unclosed::Retain) {
+                out.push_str(&html[after_open..]);
+            }
             return Cow::Owned(out);
-        }
+        };
+        cursor = after_open + rel_close + close.len();
     }
     out.push_str(&html[cursor..]);
     Cow::Owned(out)
+}
+
+/// Strip every `<pre><code...>...</code></pre>` region from `html`.
+/// The double-encoded-entity check defers to this helper because code
+/// blocks legitimately host `&amp;amp;` and friends in their literal
+/// payload (CommonMark §6.1: code-block content is verbatim, then
+/// escape-pass-once for output safety). An unclosed block swallows the
+/// remainder so a stray `&amp;amp;` behind it cannot false-positive
+/// Tier I.
+fn strip_pre_code_blocks(html: &str) -> Cow<'_, str> {
+    strip_regions(html, "<pre><code", "</code></pre>", Unclosed::Swallow)
+}
+
+/// Strip every `<code...>...</code>` region from `html` — the fenced
+/// `<pre><code>` kind and the inline code span alike.
+///
+/// Tier A defers to this helper: both kinds carry the user's bytes
+/// verbatim, so a `［＃` inside one is literal text rather than a
+/// leaked construct. Unlike [`strip_pre_code_blocks`] an unclosed
+/// `<code` retains the remainder — Tier A is the canary that must not
+/// go quiet.
+fn strip_code_regions(html: &str) -> Cow<'_, str> {
+    strip_regions(html, "<code", "</code>", Unclosed::Retain)
 }
 
 /// Tier J — HTML content-model correctness for the handful of elements
@@ -1335,20 +1385,20 @@ mod tests {
     }
 
     #[test]
-    fn assert_no_bare_passes_for_clean_input() {
-        assert_no_bare("<p>plain paragraph</p>", "［＃");
+    fn assert_no_bare_bracket_passes_for_clean_input() {
+        assert_no_bare_bracket("<p>plain paragraph</p>");
     }
 
     #[test]
-    #[should_panic(expected = "bare")]
-    fn assert_no_bare_panics_on_leak() {
-        assert_no_bare("<p>prefix ［＃改ページ］ suffix</p>", "［＃");
+    #[should_panic(expected = "Tier A")]
+    fn assert_no_bare_bracket_panics_on_leak() {
+        assert_no_bare_bracket("<p>prefix ［＃改ページ］ suffix</p>");
     }
 
     #[test]
-    fn assert_no_bare_tolerates_wrapped_occurrences() {
+    fn assert_no_bare_bracket_tolerates_wrapped_occurrences() {
         let html = r#"<p>prefix <span class="aozora-md-annotation" hidden>［＃改ページ］</span> suffix</p>"#;
-        assert_no_bare(html, "［＃");
+        assert_no_bare_bracket(html);
     }
 
     // -------------------------------------------------------------------
@@ -1380,6 +1430,43 @@ mod tests {
     fn invariant_unit_check_no_bare_bracket_tolerates_wrapper() {
         let html = r#"<span class="aozora-md-annotation" hidden>［＃改ページ］</span>"#;
         check_no_bare_bracket(html).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_no_bare_bracket_tolerates_code_block_content() {
+        // A fenced block's body is the user's bytes verbatim, so notation
+        // typed inside it is supposed to reach the output unwrapped.
+        let html = "<pre><code>｜青梅《おうめ》\n［＃改ページ］\n</code></pre>";
+        check_no_bare_bracket(html).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_no_bare_bracket_tolerates_an_inline_code_span() {
+        // An inline code span restores the literal context just as a fence
+        // does — `render_to_string("`可哀想［＃「可哀想」に傍点］`")` emits
+        // exactly this, and it is the pinned correct output.
+        let html = "<p><code>可哀想［＃「可哀想」に傍点］</code> in a code span</p>";
+        check_no_bare_bracket(html).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_no_bare_bracket_still_fires_outside_a_code_block() {
+        // The code carve-out must not blind the predicate to a leak that
+        // merely shares a document with a code element.
+        let html = "<pre><code>［＃改ページ］\n</code></pre><p>leak ［＃改丁］ here</p>";
+        let Err(Violation::BareBracket { total, .. }) = check_no_bare_bracket(html) else {
+            panic!("expected BareBracket violation");
+        };
+        assert_eq!(total, 1, "only the leak outside the code block counts");
+    }
+
+    #[test]
+    fn invariant_unit_check_no_bare_bracket_still_fires_after_an_unclosed_code_tag() {
+        // Tier A is the canary that must never go quiet: markup it cannot
+        // delimit stays in scope rather than swallowing the rest of the
+        // document (as the Tier I scrub deliberately does).
+        let html = "<pre><code>x<p>［＃改ページ］</p>";
+        check_no_bare_bracket(html).expect_err("unclosed <code must not silence Tier A");
     }
 
     #[test]
