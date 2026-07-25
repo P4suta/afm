@@ -91,12 +91,15 @@ fn warichu_renders_inline_not_as_block_container() {
     // Aozora spec: `［＃割り注］…［＃割り注終わり］` is inline (a
     // small-text side-note flowing with the surrounding prose). The
     // renderer must emit a single `<span class="aozora-md-warichu">` pair
-    // inside the host paragraph — *not* a block `<div>` that would
-    // split the sentence mid-stream.
+    // inside the host paragraph — *not* a block `<div>` that would split
+    // the sentence mid-stream — and the side-note's own text must be
+    // *inside* that span. The parser reports the two markers as separate
+    // nodes, so the body only reaches the wrapper because `constructs`
+    // folds the pair into one construct before tiling.
     let html = render_to_string("黄色い鑑札（［＃割り注］淫売婦の鑑札［＃割り注終わり］）をもって");
     assert!(
         html.contains(r#"<span class="aozora-md-warichu">淫売婦の鑑札</span>"#),
-        "warichu must render as inline span: {html}"
+        "warichu must wrap its side-note text in an inline span: {html}"
     );
     assert!(
         !html.contains(r#"<div class="aozora-md-container aozora-md-container-warichu">"#),

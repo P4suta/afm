@@ -23,11 +23,11 @@ export interface OutlineEntry {
  * node, so the heading text is read back out of the fragment. Two kinds of
  * markup are stripped first, because `textContent` reports both and neither
  * is text the reader sees: `<rt>` / `<rp>` hold the ruby reading (`おうめ`),
- * and an `aozora-md-annotation` wrapper is `hidden`.
+ * and an `aozora-md-directive` wrapper is `hidden`.
  */
 function aozoraText(html: string): string {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  for (const el of doc.querySelectorAll('rt, rp, .aozora-md-annotation')) el.remove();
+  for (const el of doc.querySelectorAll('rt, rp, .aozora-md-directive')) el.remove();
   return doc.body.textContent ?? '';
 }
 

@@ -4,7 +4,7 @@
 //! into an `<h1>` / `<h2>` / `<h3>`. The contract is that any random
 //! composition of indent markers and heading hints must produce
 //! headings whose bodies carry only the target text (no `aozora-md-indent`,
-//! `aozora-md-container-indent`, or `aozora-md-annotation` tokens). A regression
+//! `aozora-md-container-indent`, or `aozora-md-directive` tokens). A regression
 //! test in `tests/heading_promotion.rs` guards a specific shape; this
 //! property test generalises.
 //!
@@ -73,7 +73,7 @@ proptest! {
 
     /// For every heading-biased input, the rendered `<h1>`/`<h2>`/`<h3>`
     /// must carry only the target text — no `aozora-md-indent` /
-    /// `aozora-md-container-indent` / `aozora-md-annotation` class should appear
+    /// `aozora-md-container-indent` / `aozora-md-directive` class should appear
     /// inside the heading body.
     #[test]
     fn heading_body_never_carries_forbidden_classes(src in heading_biased_src()) {

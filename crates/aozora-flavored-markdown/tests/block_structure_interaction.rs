@@ -113,9 +113,9 @@ fn list_item_with_inline_ruby_carries_ruby() {
 #[test]
 fn list_item_with_unknown_annotation_wraps_inside_item() {
     let html = render_to_string("- 一［＃ほげ］\n- 二［＃ふが］");
-    // Each list item gets its own aozora-md-annotation wrapper.
+    // Each list item gets its own aozora-md-directive wrapper.
     assert_eq!(
-        html.matches(r#"<span class="aozora-md-annotation" hidden>"#)
+        html.matches(r#"<span class="aozora-md-directive" hidden>"#)
             .count(),
         2,
         "each list item must wrap its own annotation, got {html:?}"

@@ -5,8 +5,12 @@
 //! class token the renderer can emit. Without this contract a renderer
 //! change silently ships unstyled markup.
 //!
-//! The pinned list (`AOZORA_MD_CLASSES`) is hand-curated so that adding
-//! a class forces an explicit update here.
+//! `AOZORA_MD_CLASSES` is derived from the parser's own `AOZORA_CLASSES`
+//! (ADR-0011), so the contract cannot drift from what the renderer emits.
+//! What can drift is the *themes*: a class the parser grows arrives here
+//! with no CSS behind it. `UNSTYLED_CLASSES` names the ones this repo has
+//! not styled yet (the ADR-0020 follow-up), and the tests below hold that
+//! list to shrinking only.
 
 use core::str;
 use std::collections::HashSet;
@@ -14,7 +18,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown_test_support::{AOZORA_MD_CLASSES, check_css_class_contract};
+use aozora_flavored_markdown_test_support::{
+    AOZORA_MD_CLASSES, UNSTYLED_CLASSES, check_css_class_contract, styled_classes,
+};
 
 /// Absolute path to one of the repo-root `theme/` CSS files. Resolving
 /// via `CARGO_MANIFEST_DIR` keeps the test stable regardless of the
@@ -60,14 +66,19 @@ fn collect_class_selectors(css: &str) -> HashSet<String> {
     out
 }
 
+/// The `.aozora-md-…` selectors both shipped themes define.
+fn theme_selectors(name: &str) -> HashSet<String> {
+    let css = fs::read_to_string(theme_path(name))
+        .unwrap_or_else(|_| panic!("{name} must exist under theme/"));
+    collect_class_selectors(&css)
+}
+
 #[test]
-fn every_emitted_class_has_a_horizontal_theme_rule() {
-    let css = fs::read_to_string(theme_path("aozora-md-horizontal.css"))
-        .expect("aozora-md-horizontal.css must exist under theme/");
-    let selectors = collect_class_selectors(&css);
-    let missing: Vec<&&str> = AOZORA_MD_CLASSES
-        .iter()
-        .filter(|c| !selectors.contains(**c))
+fn every_styled_class_has_a_horizontal_theme_rule() {
+    let selectors = theme_selectors("aozora-md-horizontal.css");
+    let missing: Vec<&str> = styled_classes()
+        .into_iter()
+        .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
         missing.is_empty(),
@@ -76,13 +87,11 @@ fn every_emitted_class_has_a_horizontal_theme_rule() {
 }
 
 #[test]
-fn every_emitted_class_has_a_vertical_theme_rule() {
-    let css = fs::read_to_string(theme_path("aozora-md-vertical.css"))
-        .expect("aozora-md-vertical.css must exist under theme/");
-    let selectors = collect_class_selectors(&css);
-    let missing: Vec<&&str> = AOZORA_MD_CLASSES
-        .iter()
-        .filter(|c| !selectors.contains(**c))
+fn every_styled_class_has_a_vertical_theme_rule() {
+    let selectors = theme_selectors("aozora-md-vertical.css");
+    let missing: Vec<&str> = styled_classes()
+        .into_iter()
+        .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
         missing.is_empty(),
@@ -91,20 +100,51 @@ fn every_emitted_class_has_a_vertical_theme_rule() {
 }
 
 #[test]
-fn pinned_classes_are_sorted_and_unique() {
-    // Hygiene: the pinned list is kept in sorted order + no dupes
-    // for review friendliness. A sorted list also makes PR diffs
-    // trivial to review.
-    let mut copy: Vec<&str> = AOZORA_MD_CLASSES.to_vec();
-    copy.sort_unstable();
-    assert_eq!(
-        AOZORA_MD_CLASSES.to_vec(),
-        copy,
-        "AOZORA_MD_CLASSES must stay sorted"
+fn the_unstyled_backlog_only_shrinks() {
+    // An entry that turns out to be styled has to leave the list, or the
+    // list stops meaning what it says and the coverage tests above stop
+    // covering it.
+    let horizontal = theme_selectors("aozora-md-horizontal.css");
+    let vertical = theme_selectors("aozora-md-vertical.css");
+    let styled: Vec<&str> = UNSTYLED_CLASSES
+        .iter()
+        .copied()
+        .filter(|c| horizontal.contains(*c) && vertical.contains(*c))
+        .collect();
+    assert!(
+        styled.is_empty(),
+        "UNSTYLED_CLASSES entries both themes already style — drop them: {styled:?}"
     );
+}
+
+#[test]
+fn the_unstyled_backlog_names_real_classes() {
+    // A stale entry would silently exempt nothing while looking like work
+    // that is still owed.
+    let contract: HashSet<&str> = AOZORA_MD_CLASSES.iter().map(String::as_str).collect();
+    let unknown: Vec<&str> = UNSTYLED_CLASSES
+        .iter()
+        .copied()
+        .filter(|c| !contract.contains(*c))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "UNSTYLED_CLASSES entries the renderer cannot emit — drop them: {unknown:?}"
+    );
+}
+
+#[test]
+fn the_contract_is_the_parsers_own_list_rebranded() {
+    // The derivation itself, pinned: every class the parser publishes has
+    // exactly one branded counterpart here, in the same order.
+    let expected: Vec<String> = aozora::AOZORA_CLASSES
+        .iter()
+        .map(|class| class.replacen("aozora-", "aozora-md-", 1))
+        .collect();
+    assert_eq!(*AOZORA_MD_CLASSES, expected);
     let mut seen: HashSet<&str> = HashSet::new();
-    for &c in AOZORA_MD_CLASSES {
-        assert!(seen.insert(c), "duplicate entry in AOZORA_MD_CLASSES: {c}");
+    for class in AOZORA_MD_CLASSES.iter() {
+        assert!(seen.insert(class), "duplicate entry: {class}");
     }
 }
 
@@ -131,17 +171,13 @@ fn collect_class_selectors_tolerates_trailing_hyphen() {
 // ---------------------------------------------------------------------------
 // Render-direction contract: construct → aozora-md-* class → AOZORA_MD_CLASSES
 //
-// The theme tests above prove AOZORA_MD_CLASSES ⊆ CSS. The two tests below
-// close the other half of the loop:
-//
-//   (1) every aozora-md-* class a known construct emits is recognised by
-//       AOZORA_MD_CLASSES — a *new* upstream class surfaces here by name the
-//       moment the corpus reaches it (pin bump), instead of shipping silent
-//       unstyled markup; and
-//   (2) every AOZORA_MD_CLASSES entry is actually emitted by some construct —
-//       a *stale* entry (e.g. `aozora-md-double-ruby` after an upstream
-//       rename) surfaces here — modulo the documented UNEXERCISED gaps.
-//
+// The theme tests above prove the styled classes ⊆ CSS. The test below
+// closes the other half of the loop: every aozora-md-* class a known
+// construct emits is recognised by the contract — including the classes
+// this crate authors itself (an orphan bracket's `aozora-md-directive`
+// wrapper) and the family-suffix variants the parser composes at render
+// time (`aozora-md-indent-2`), neither of which appears in the derived
+// list verbatim.
 // Sources are copied verbatim from existing passing tests / the sibling
 // renderer's own tests at the pinned SHA — none authored from memory.
 // ---------------------------------------------------------------------------
@@ -175,41 +211,9 @@ const RENDER_CORPUS: &[(&str, &str)] = &[
         "warichu (inline)",
         "黄色い鑑札（［＃割り注］淫売婦の鑑札［＃割り注終わり］）をもって",
     ),
-    ("double ruby", "《《強調》》"),
+    ("body end", "本文\n\n［＃本文終わり］\n\n奥付"),
+    ("illustration", "［＃挿絵（fig1.png）入る］"),
 ];
-
-/// `AOZORA_MD_CLASSES` entries the curated corpus does not (yet) emit at the
-/// current pin, each with a justification. Keep this short — an entry here is
-/// a known coverage gap, not license to skip new classes.
-const UNEXERCISED: &[&str] = &[
-    // 割り注 renders inline (`aozora-md-warichu`); the deprecated block form
-    // `［＃ここから割り注］…` is not pinned in this corpus.
-    "aozora-md-container-warichu",
-    // The leaf indent span is emitted only via a directly-constructed
-    // indent node — no source-string trigger is pinned. The
-    // *container* form (`aozora-md-container-indent`) is exercised above.
-    "aozora-md-indent",
-    // Kanbun 返り点: no verified source trigger surfaces it through the render
-    // path at the current pin. (Candidate follow-up.)
-    "aozora-md-kaeriten",
-];
-
-/// Collect every `aozora-md-*` class token appearing in a `class="..."`
-/// attribute in `html`. (The corpus emits no `<pre><code>` blocks, so a plain
-/// scan is sufficient here.)
-fn collect_class_tokens(html: &str, out: &mut HashSet<String>) {
-    let mut rest = html;
-    while let Some(i) = rest.find("class=\"") {
-        let after = &rest[i + "class=\"".len()..];
-        let Some(end) = after.find('"') else { break };
-        for tok in after[..end].split_whitespace() {
-            if tok.starts_with("aozora-md-") {
-                out.insert(tok.to_owned());
-            }
-        }
-        rest = &after[end + 1..];
-    }
-}
 
 #[test]
 fn every_rendered_class_is_recognised() {
@@ -222,27 +226,4 @@ fn every_rendered_class_is_recognised() {
             );
         }
     }
-}
-
-#[test]
-fn every_class_is_exercised_by_the_corpus() {
-    let mut emitted = HashSet::new();
-    for (_label, src) in RENDER_CORPUS {
-        collect_class_tokens(&render_to_string(src), &mut emitted);
-    }
-    let exercised = |base: &str| {
-        emitted
-            .iter()
-            .any(|t| t == base || t.starts_with(&format!("{base}-")))
-    };
-    let stale: Vec<&str> = AOZORA_MD_CLASSES
-        .iter()
-        .copied()
-        .filter(|base| !exercised(base) && !UNEXERCISED.contains(base))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "AOZORA_MD_CLASSES entries no construct emits — remove the stale entry, \
-         add a corpus source, or document it in UNEXERCISED: {stale:?}"
-    );
 }

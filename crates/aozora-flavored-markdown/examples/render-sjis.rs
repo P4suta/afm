@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use aozora::encoding::decode_sjis;
+use aozora::decode_sjis;
 use aozora_flavored_markdown::html::render_to_string;
 
 fn main() -> ExitCode {

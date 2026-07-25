@@ -74,10 +74,10 @@
 .aozora-md-bouten-right { text-emphasis-position: over; }
 .aozora-md-bouten-left  { text-emphasis-position: under; }
 
-/* ----- Tate-chu-yoko (横中 inside 縦) ---------------------------- */
+/* ----- Combine-upright (縦中横: 横中 inside 縦) ------------------- */
 
-.aozora-md-tcy {
-  /* In horizontal mode, TCY has no orientation effect; it still
+.aozora-md-combine-upright {
+  /* In horizontal mode this has no orientation effect; the run still
      reads left-to-right. Wrapping in a span keeps styling hooks
      available for vertical-mode overrides. */
   text-combine-upright: all;
@@ -97,7 +97,7 @@
   margin: 0 0.1em;
 }
 
-.aozora-md-annotation {
+.aozora-md-directive {
   /*
    * The renderer emits this with an inline `hidden` attribute for
    * accessibility; it never appears visually by default. Keeping
@@ -106,11 +106,34 @@
   display: none;
 }
 
-/* ----- Double angle brackets ------------------------------------- */
+/* ----- Heading hint / body end / illustration --------------------- */
 
-.aozora-md-double-ruby {
-  /* Academic double-angle brackets ≪≫ inherit the base typography. */
-  font-style: italic;
+.aozora-md-heading-hint {
+  /*
+   * A hint names the heading around it rather than carrying content of
+   * its own; the renderer promotes the run it names, so the marker
+   * itself never shows.
+   */
+  display: none;
+}
+
+.aozora-md-body-end {
+  /* The main body ends here and the colophon follows. */
+  display: block;
+  margin: 3em 0 1em;
+  border-top: 1px solid currentColor;
+  opacity: 0.3;
+}
+
+.aozora-md-illustration {
+  display: block;
+  margin: 1.5em auto;
+  text-align: center;
+}
+
+.aozora-md-illustration img {
+  max-width: 100%;
+  height: auto;
 }
 
 /* ----- Block leaves: page / section break ------------------------- */

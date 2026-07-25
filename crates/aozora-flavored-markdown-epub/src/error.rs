@@ -75,5 +75,5 @@ pub enum Error {
 
     #[error("Shift_JIS source could not be decoded")]
     #[diagnostic(code(aozora_flavored_markdown_epub::render::sjis))]
-    Sjis(#[from] aozora_encoding::DecodeError),
+    Sjis(#[from] aozora::DecodeError),
 }

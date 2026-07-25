@@ -74,6 +74,20 @@ pub mod sentinels {
     pub const BLOCK_OPEN: char = constructs::BLOCK_OPEN_SENTINEL;
     /// Paired-container close line (e.g. `［＃ここで字下げ終わり］`).
     pub const BLOCK_CLOSE: char = constructs::BLOCK_CLOSE_SENTINEL;
+
+    /// Every sentinel this crate substitutes, in declaration order.
+    ///
+    /// A leak check reads the set from here rather than re-listing the
+    /// codepoints, so a sentinel added later is checked without the
+    /// checker being edited.
+    ///
+    /// ```
+    /// use aozora_flavored_markdown::sentinels;
+    ///
+    /// assert!(sentinels::ALL.contains(&sentinels::INLINE));
+    /// assert!(sentinels::ALL.iter().all(|c| ('\u{E000}'..='\u{F8FF}').contains(c)));
+    /// ```
+    pub const ALL: [char; 4] = [INLINE, BLOCK_LEAF, BLOCK_OPEN, BLOCK_CLOSE];
 }
 
 #[doc(inline)]
@@ -81,8 +95,6 @@ pub use diagnostics::{Diagnostic, DiagnosticSource, Severity, Span};
 
 use core::mem;
 
-use aozora::Arena;
-use aozora::render::serialize as aozora_serialize;
 use comrak::nodes::AstNode;
 
 use crate::constructs::Constructs;
@@ -448,7 +460,7 @@ pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
 /// renderer, an `IrDocument` for the IR renderer).
 fn drive_pipeline<F, T>(input: &str, options: &Options, project: F) -> (String, Vec<Diagnostic>, T)
 where
-    F: for<'a, 'src> FnOnce(&'a AstNode<'a>, &Constructs<'src>) -> T,
+    F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
 {
     if !options.aozora_enabled {
         let comrak_arena = comrak::Arena::new();
@@ -472,14 +484,11 @@ where
     // of those parses; the call is idempotent and free once warm.
     aozora::prewarm();
 
-    let arena = Arena::new();
-    let lex_out = aozora::lex_into_arena(&masked_source, &arena);
-
     // Substitute one sentinel per construct, in source coordinates. The
     // masked source is the single coordinate space from here on: it is
     // char-for-char the caller's input, so a construct's byte range is one
     // the caller can slice (see `crate::constructs`).
-    let constructs = Constructs::build(&masked_source, Some(&lex_out));
+    let constructs = Constructs::build(&masked_source);
 
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, constructs.text(), &options.comrak);
@@ -500,12 +509,7 @@ where
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
     let html = format_root(root, options, Some(mask_originals.as_slice()));
-    // Read after both walks, so the table has been asked about every
-    // construct either of them reached.
-    let mut diagnostics: Vec<Diagnostic> =
-        lex_out.diagnostics.iter().map(Diagnostic::from).collect();
-    diagnostics.extend(constructs.diagnostics());
-    (html, diagnostics, extra)
+    (html, constructs.diagnostics().to_vec(), extra)
 }
 
 /// Common HTML finalisation: comrak-format the root (per top-level
@@ -604,11 +608,10 @@ pub fn render_blocks_to_ir(
     }
 
     let (masked_source, _mask_originals) = code_block_mask::mask_code_block_triggers(input);
-    let arena = Arena::new();
-    let lex_out = aozora::lex_into_arena(&masked_source, &arena);
+    aozora::prewarm();
     // The builder owns the construct table; the splice below borrows the
     // same one, so both outputs of this call describe the same document.
-    let mut builder = ir::StreamingIrBuilder::new(Some(&lex_out), &masked_source);
+    let mut builder = ir::StreamingIrBuilder::new(&masked_source);
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, builder.constructs().text(), &options.comrak);
     // IR projection runs before AST mutation so it walks the
@@ -623,19 +626,14 @@ pub fn render_blocks_to_ir(
         .map(|child| builder.walk_block(child))
         .collect();
     ast_splice::splice_into_ast(root, &comrak_arena, builder.constructs());
-    // Read while the builder still owns the table, and after both walks:
-    // the drain below asks it only about the one notation that always
-    // resolves, so nothing is lost by reading here.
-    let unresolved = builder.constructs().diagnostics();
+    // Read while the builder still owns the table.
+    let diagnostics = builder.constructs().diagnostics().to_vec();
     // End-of-document drain. The splicer appends one synthesised close
     // per still-open container as a fresh top-level child, so each one
     // becomes its own `RenderedBlock`; giving the drain the same shape
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
     let blocks = collect_rendered_blocks(root, options, blocks_ir);
-    let mut diagnostics: Vec<Diagnostic> =
-        lex_out.diagnostics.iter().map(Diagnostic::from).collect();
-    diagnostics.extend(unresolved);
     (blocks, diagnostics)
 }
 
@@ -675,20 +673,25 @@ fn collect_rendered_blocks<'a>(
     blocks
 }
 
-/// Round-trip an aozora-flavored-markdown source through the lexer and back to canonical
-/// aozora-md-source text.
+/// Round-trip an aozora-flavored-markdown source through the parser and back
+/// to canonical aozora-md-source text.
 ///
-/// Delegates to the upstream serializer — the inverse of the lexing pass.
-/// Plain CommonMark portions of the input pass through verbatim because the
-/// lexer leaves them untouched.
+/// Delegates to the parser's own formatter — the inverse of the parse, and
+/// canonicalising: notation the author wrote in a longer form comes back in
+/// the shortest spelling that reads the same (below, the ruby's explicit
+/// base marker is dropped because the base is unambiguous without it).
+/// Plain CommonMark portions pass through verbatim because the parser
+/// leaves them untouched, and the output is a fixed point — serializing it
+/// again returns it unchanged.
 ///
 /// # Examples
 ///
 /// ```
 /// use aozora_flavored_markdown::serialize;
 ///
-/// let source = "彼は｜青梅《おうめ》に行った。";
-/// assert_eq!(serialize(source), source);
+/// let canonical = serialize("彼は｜青梅《おうめ》に行った。");
+/// assert_eq!(canonical, "彼は青梅《おうめ》に行った。");
+/// assert_eq!(serialize(&canonical), canonical);
 /// ```
 ///
 /// # Oversized input
@@ -704,9 +707,9 @@ pub fn serialize(input: &str) -> String {
     if !source_within_span_budget(input) {
         return String::new();
     }
-    let arena = Arena::new();
-    let lex_out = aozora::lex_into_arena(input, &arena);
-    aozora_serialize::serialize(&lex_out)
+    aozora::parse(input.to_owned())
+        .map(|document| document.snapshot().to_source())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -745,7 +748,7 @@ mod tests {
     fn unknown_annotation_keeps_brackets_inside_wrapper() {
         let r = render("前［＃ほげふが］後", &Options::default());
         // The annotation HTML carries the original text inside an
-        // `aozora-md-annotation` wrapper, so the bracket character may
+        // `aozora-md-directive` wrapper, so the bracket character may
         // appear, but never bare in body text.
         assert!(
             !contains_bare_bracket(&r.html),
@@ -808,10 +811,10 @@ mod tests {
     fn contains_bare_bracket_helper_detects_leaked_marker() {
         // Pins the "bare bracket leaked" branch of the helper itself.
         // The needle appears outside any tag and outside an
-        // `aozora-md-annotation` wrapper.
+        // `aozora-md-directive` wrapper.
         assert!(contains_bare_bracket("plain ［＃ leak"));
         assert!(!contains_bare_bracket(
-            "<span class=\"aozora-md-annotation\" hidden>［＃</span>"
+            "<span class=\"aozora-md-directive\" hidden>［＃</span>"
         ));
         assert!(!contains_bare_bracket("no marker at all"));
     }
@@ -893,10 +896,10 @@ mod tests {
     }
 
     /// Tier-A canary: every occurrence of `［＃` must be inside an
-    /// `aozora-md-annotation` wrapper — never in raw body text.
+    /// `aozora-md-directive` wrapper — never in raw body text.
     fn contains_bare_bracket(html: &str) -> bool {
         let needle = "［＃";
-        let wrapper_open = "aozora-md-annotation";
+        let wrapper_open = "aozora-md-directive";
         let mut pos = 0;
         while let Some(idx) = html[pos..].find(needle) {
             let abs = pos + idx;

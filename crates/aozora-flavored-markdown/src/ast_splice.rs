@@ -44,20 +44,24 @@
 //!    didn't mask) drop silently.
 //! 4. **Orphan `［＃...］`**: a bracket run the lexer never claimed.
 //!    Split the `Text` and replace the bracket span with a `Raw` node
-//!    containing `<span class="aozora-md-annotation" hidden>...</span>`.
+//!    containing `<span class="aozora-md-directive" hidden>...</span>`.
 //!    No cursor advance — by construction the orphan has no
 //!    matching construct.
 
 use core::mem;
 use std::borrow::Cow;
 
-use aozora::{HeadingHint, NodeRef};
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeHeading, NodeValue};
 
+/// The wrapper an orphan `［＃…］` run — one no notation claimed — is
+/// hidden behind. Spelled the way the parser spells its own unclaimed
+/// bracket runs, so a reader sees one markup shape for one situation.
+const ORPHAN_WRAPPER_OPEN: &str = r#"<span class="aozora-md-directive" hidden>"#;
+
 use crate::constructs::{
-    BlockSentinelKind, ConstructCursor, Constructs, INLINE_SENTINEL, ParaScan, inline_is_dropped,
-    is_sentinel_char, paragraph_sole_block_sentinel,
+    BlockSentinelKind, ConstructCursor, Constructs, HeadingHint, INLINE_SENTINEL, ParaScan,
+    block_sentinel_of, inline_is_dropped, is_sentinel_char, paragraph_sole_block_sentinel,
 };
 
 /// Splice every Aozora sentinel embedded in `root`'s text descendants
@@ -71,14 +75,14 @@ use crate::constructs::{
 /// ask the same table for the construct's source text instead, since the
 /// notation must render verbatim there rather than as interpreted Aozora
 /// HTML.
-pub(crate) fn splice_into_ast<'a, 'src>(
+pub(crate) fn splice_into_ast<'a>(
     root: &'a AstNode<'a>,
     arena: &'a Arena<'a>,
-    constructs: &Constructs<'src>,
+    constructs: &Constructs,
 ) {
-    let mut splicer = AstSplicer::<'a, '_, 'src> {
+    let mut splicer = AstSplicer::<'a, '_> {
         cursor: constructs.cursor(),
-        open_containers: 0,
+        open_containers: Vec::new(),
         in_heading_depth: 0,
         arena,
     };
@@ -88,16 +92,17 @@ pub(crate) fn splice_into_ast<'a, 'src>(
 
 /// AST mutator that consumes the construct table in source
 /// order and weaves rendered Aozora HTML into the comrak tree.
-struct AstSplicer<'a, 't, 'src> {
-    cursor: ConstructCursor<'t, 'src>,
-    /// How many paired containers are still open. Incremented on
-    /// `BlockOpen`, decremented on `BlockClose`; whatever remains at end
-    /// of document is closed for the source. A count is enough because
-    /// every container closes the same way — the closing markup comes
-    /// from the notation, not from what was opened.
-    open_containers: usize,
+struct AstSplicer<'a, 't> {
+    cursor: ConstructCursor<'t>,
+    /// The markup each still-open container closes with, innermost last.
+    /// Pushed on `BlockOpen`, popped on `BlockClose`; whatever remains at
+    /// end of document is closed for the source. The close is carried
+    /// rather than looked up because a close marker renders to nothing on
+    /// its own — the tag that closes a container comes from the marker that
+    /// opened it.
+    open_containers: Vec<String>,
     /// Number of `Heading` ancestors the walker is currently inside.
-    /// Heading bodies must satisfy Tier C (no `aozora-md-annotation`
+    /// Heading bodies must satisfy Tier C (no `aozora-md-directive`
     /// contamination) AND Tier A (no bare `［＃` leak), so when
     /// orphan brackets surface in heading text we silently drop the
     /// run rather than wrap it. The legitimate Aozora-into-heading
@@ -107,7 +112,7 @@ struct AstSplicer<'a, 't, 'src> {
     arena: &'a Arena<'a>,
 }
 
-impl<'a, 'src> AstSplicer<'a, '_, 'src> {
+impl<'a> AstSplicer<'a, '_> {
     /// Depth-first traversal over an explicit work stack rather than
     /// recursion.
     ///
@@ -190,7 +195,7 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
         }
         let scan = ParaScan::run(paragraph, &self.cursor);
         if let Some(hint) = scan.first_heading_hint {
-            self.handle_heading_hint(paragraph, hint, scan.total_sentinels);
+            self.handle_heading_hint(paragraph, &hint, scan.total_sentinels);
             return;
         }
         // Case 3: ordinary paragraph — descend to children for inline
@@ -213,27 +218,20 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     fn block_html(&mut self, kind: BlockSentinelKind) -> Option<String> {
         // Table exhausted: nothing stands behind this sentinel.
         let hit = self.cursor.next()?;
-        match (kind, hit.node) {
-            (BlockSentinelKind::Leaf, NodeRef::BlockLeaf(_)) => hit.html(),
-            (BlockSentinelKind::Open, NodeRef::BlockOpen(_)) => {
+        match (kind, block_sentinel_of(hit.kind)?) {
+            (BlockSentinelKind::Leaf, BlockSentinelKind::Leaf) => hit.html(),
+            (BlockSentinelKind::Open, BlockSentinelKind::Open) => {
                 // A marker that renders to nothing opens nothing, so the
                 // drain does not owe it a close.
-                let html = hit.html()?;
-                self.open_containers += 1;
-                Some(html)
+                let (open, close) = hit.container_halves()?;
+                self.open_containers.push(close);
+                Some(open)
             }
-            (BlockSentinelKind::Close, NodeRef::BlockClose(_)) if self.open_containers > 0 => {
-                self.open_containers -= 1;
-                // A close carries no payload — every container closes the
-                // same way, which is what lets the drain close them all
-                // with one fragment — so the canonical close notation
-                // stands in for a run the table could not recover. The
-                // container is closed either way.
-                Some(hit.html().unwrap_or_else(|| self.cursor.container_close()))
-            }
-            // Mismatch (table/AST drift) or orphan close (no matching
-            // open): emit nothing rather than an unbalanced close tag
-            // (Tier-D protection).
+            // The close the matching open carried. An orphan close (no
+            // matching open) emits nothing rather than an unbalanced close
+            // tag (Tier-D protection).
+            (BlockSentinelKind::Close, BlockSentinelKind::Close) => self.open_containers.pop(),
+            // Mismatch (table/AST drift): emit nothing.
             _ => None,
         }
     }
@@ -241,7 +239,7 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     fn handle_heading_hint(
         &mut self,
         paragraph: &'a AstNode<'a>,
-        hint: &'src HeadingHint<'src>,
+        hint: &HeadingHint,
         sentinels_to_consume: usize,
     ) {
         self.cursor.advance(sentinels_to_consume);
@@ -252,8 +250,8 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
         // escaped. `Raw` stays inert through `format_html`, so the
         // `<h{level}>...</h{level}>` framing is generated by comrak around
         // our pre-escaped body.
-        let mut escaped = String::with_capacity(hint.target.as_str().len());
-        push_html_escaped(&mut escaped, hint.target.as_str());
+        let mut escaped = String::with_capacity(hint.target.len());
+        push_html_escaped(&mut escaped, &hint.target);
         let children: Vec<&'a AstNode<'a>> = paragraph.children().collect();
         for child in children {
             child.detach();
@@ -277,13 +275,13 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
                     continue;
                 };
                 if ch == INLINE_SENTINEL
-                    && let NodeRef::Inline(aozora) = hit.node
-                    // Ruby / Bouten / Tcy / Gaiji / Kaeriten / DoubleRuby
+                    && block_sentinel_of(hit.kind).is_none()
+                    // Ruby / bouten / TCY / gaiji / kaeriten / angle quote
                     // are explicitly allowed inside a heading per Tier C's
                     // documented contract; `inline_is_dropped` names the
                     // two kinds that are not, and the IR walker asks it
                     // the same question.
-                    && !inline_is_dropped(aozora, self.in_heading_depth > 0)
+                    && !inline_is_dropped(hit.kind, self.in_heading_depth > 0)
                     && let Some(html) = hit.html()
                 {
                     segments.push(self.new_raw_node(html));
@@ -295,7 +293,7 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
                 chars.next(); // consume ＃
                 if self.in_heading_depth > 0 {
                     // Heading bodies must satisfy both Tier A (no bare
-                    // `［＃` leak) and Tier C (no `aozora-md-annotation`
+                    // `［＃` leak) and Tier C (no `aozora-md-directive`
                     // contamination). The wrapper would resolve Tier A
                     // but break Tier C, and emitting the literal run
                     // would break Tier A. Silently consume the orphan
@@ -319,7 +317,7 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
                 }
                 self.flush_text(&mut current, &mut segments);
                 let mut html = String::with_capacity(bracket_body.len() + 64);
-                html.push_str("<span class=\"aozora-md-annotation\" hidden>");
+                html.push_str(ORPHAN_WRAPPER_OPEN);
                 push_html_escaped(&mut html, &bracket_body);
                 html.push_str("</span>");
                 segments.push(self.new_raw_node(html));
@@ -354,7 +352,7 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
         for ch in s.chars() {
             if is_sentinel_char(ch) {
                 if let Some(literal) = self.cursor.next_literal() {
-                    out.push_str(&literal);
+                    out.push_str(literal);
                 }
             } else {
                 out.push(ch);
@@ -420,12 +418,9 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
     }
 
     fn drain_unclosed_containers(&mut self, root: &'a AstNode<'a>) {
-        if self.open_containers == 0 {
-            return;
-        }
-        let html = self.cursor.container_close();
-        for _ in 0..mem::take(&mut self.open_containers) {
-            root.append(self.new_raw_node(html.clone()));
+        // Innermost first, so the tags nest the way the source opened them.
+        for close in mem::take(&mut self.open_containers).into_iter().rev() {
+            root.append(self.new_raw_node(close));
         }
     }
 
@@ -555,7 +550,6 @@ fn push_html_escaped(out: &mut String, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aozora::{Arena as AozoraArena, lex_into_arena};
 
     use crate::code_block_mask;
     use crate::constructs::BLOCK_LEAF_SENTINEL;
@@ -567,9 +561,7 @@ mod tests {
     /// boundary the production renderer uses.
     fn render_via_ast_splice(input: &str) -> String {
         let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
-        let aozora_arena = AozoraArena::new();
-        let lex_out = lex_into_arena(&masked, &aozora_arena);
-        let constructs = Constructs::build(&masked, Some(&lex_out));
+        let constructs = Constructs::build(&masked);
         let comrak_arena: Arena<'_> = Arena::new();
         let opts = comrak::Options::default();
         let root = comrak::parse_document(&comrak_arena, constructs.text(), &opts);
@@ -654,8 +646,8 @@ mod tests {
     fn atx_heading_with_orphan_bracket_drops_wrapper() {
         let html = render_via_ast_splice("# header［＃orphan］tail");
         assert!(
-            !html.contains("aozora-md-annotation"),
-            "aozora-md-annotation leaked into heading: {html}"
+            !html.contains("aozora-md-directive"),
+            "aozora-md-directive leaked into heading: {html}"
         );
     }
 
@@ -668,8 +660,8 @@ mod tests {
         // to fire on setext as well as ATX headings.
         let html = render_via_ast_splice("text［＃orphan］more\n===");
         assert!(
-            !html.contains("aozora-md-annotation"),
-            "aozora-md-annotation leaked into setext heading: {html}"
+            !html.contains("aozora-md-directive"),
+            "aozora-md-directive leaked into setext heading: {html}"
         );
     }
 
@@ -691,14 +683,14 @@ mod tests {
         // paragraph splits the wrap because comrak emits `Text("［＃")` +
         // `SoftBreak` + `Text("※")`, so wrap scope is structural, not
         // byte-positional. This still satisfies the Tier-A canary (no bare
-        // `［＃` survives outside an `aozora-md-annotation` wrapper).
+        // `［＃` survives outside an `aozora-md-directive` wrapper).
         let html = render_via_ast_splice("［＃\n※");
         assert!(
-            html.contains("<span class=\"aozora-md-annotation\" hidden>［＃</span>"),
+            html.contains("<span class=\"aozora-md-directive\" hidden>［＃</span>"),
             "wrapped run did not honour Text-node boundary: {html}"
         );
         assert!(
-            !html.contains("<span class=\"aozora-md-annotation\" hidden>［＃\n※"),
+            !html.contains("<span class=\"aozora-md-directive\" hidden>［＃\n※"),
             "wrap leaked across SoftBreak: {html}"
         );
     }

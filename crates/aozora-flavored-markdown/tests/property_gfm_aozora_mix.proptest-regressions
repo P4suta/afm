@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 8d759b579e0e170f43a032834486c407f32ff69c93d46567dc9e9ddb4e905d96 # shrinks to src = "| col-a | col-b |\n| --- | --- |\n|  |  |\n| \r \r    | ｜青梅《おうめ》 |\n\n"
+cc 277ac747f838080f8b88e42a5c5ce16520c16a0f3803a18a91cb1c3211c484ca # shrinks to src = "Visit https://example.com/path between ~~~~ and ［＃.\n\n"
+cc 9a6339559cd1012b289fdd89fc4a19a4e70209b081af139453e20b128f5717ec # shrinks to src = "- top-level: \n  - nested: \n- another: ［＃\n\n"
+cc eb3f01079f71ce43e66fd7490b830ddcf4a10a654ba718c7f52e5498f1097462 # shrinks to src = "| col-a | col-b |\n| --- | --- |\n|  | ［＃ |\n|  |  |\n\n"

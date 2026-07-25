@@ -27,11 +27,11 @@ aozora-flavored-markdown   = { workspace = true, features = ["tsify"] }
 # Editor-assist surface (completion catalogue + the source-coordinate
 # Document API used by the playground's hover / inlay / outline / fold
 # features). aozora-flavored-markdown composes aozora; here it also re-exposes aozora's own
-# Document/wire so the editor can query 青空文庫 spans in source
+# Document so the editor can query 青空文庫 spans in source
 # coordinates — a separate path from `render` (which goes through
-# comrak and loses source offsets). The `wire` feature pulls in the
-# `aozora::wire::serialize_*` JSON projection (and serde/serde_json).
-aozora         = { workspace = true, features = ["wire"] }
+# comrak and loses source offsets). The `json` feature pulls in the
+# `aozora::json` projection (and serde/serde_json).
+aozora         = { workspace = true, features = ["json"] }
 wasm-bindgen   = { workspace = true }
 # Derives `Tsify` on this crate's wire-envelope structs so wasm-pack emits
 # their `.d.ts` directly (ADR-0017). The lib's IR/diagnostic types derive it

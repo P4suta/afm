@@ -33,22 +33,22 @@ import {
  * Kinds not in this table are skipped (they carry no visual styling),
  * which keeps this the single source of truth for what gets highlighted.
  *
- * Mapping note: the wire format uses camelCase ("aozoraHeading"); we fold
+ * Mapping note: the wire format uses camelCase ("headingHint"); we fold
  * the prefix here so the cm-aozora-* class names stay short and readable.
  */
 const KIND_TO_CLASS: Record<string, string> = {
   ruby: 'cm-aozora-ruby',
-  doubleRuby: 'cm-aozora-double-ruby',
+  angleQuote: 'cm-aozora-double-ruby',
   bouten: 'cm-aozora-bouten',
   gaiji: 'cm-aozora-gaiji',
-  tateChuYoko: 'cm-aozora-tcy',
-  sashie: 'cm-aozora-sashie',
-  warichu: 'cm-aozora-warichu',
+  combineUpright: 'cm-aozora-tcy',
+  illustration: 'cm-aozora-sashie',
   kaeriten: 'cm-aozora-kaeriten',
-  annotation: 'cm-aozora-annotation',
-  aozoraHeading: 'cm-aozora-aozora-heading',
+  directive: 'cm-aozora-annotation',
+  heading: 'cm-aozora-aozora-heading',
   headingHint: 'cm-aozora-heading-hint',
   sectionBreak: 'cm-aozora-section-break',
+  bodyEnd: 'cm-aozora-section-break',
   pageBreak: 'cm-aozora-page-break',
   containerOpen: 'cm-aozora-container-marker',
   containerClose: 'cm-aozora-container-marker',

@@ -281,8 +281,8 @@ fn render_unknown_annotation_wraps_in_hidden_span() {
     assert!(out.status.success());
     let stdout = stdout_of(&out);
     assert!(
-        stdout.contains(r#"<span class="aozora-md-annotation" hidden>"#),
-        "unknown ［＃...］ must wrap as aozora-md-annotation span, got {stdout:?}"
+        stdout.contains(r#"<span class="aozora-md-directive" hidden>"#),
+        "unknown ［＃...］ must wrap as aozora-md-directive span, got {stdout:?}"
     );
 }
 

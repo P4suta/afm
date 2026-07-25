@@ -16,7 +16,7 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process::ExitCode};
 
-use aozora::encoding::decode_sjis;
+use aozora::decode_sjis;
 use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Options, Severity, Span, render};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result, WrapErr};

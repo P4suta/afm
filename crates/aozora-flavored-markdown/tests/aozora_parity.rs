@@ -22,18 +22,44 @@
 //!   be `aozora-bouten-goma` there, the same number of times);
 //! * every `data-*` attribute value, counted (a gaiji's codepoint, an
 //!   indent's amount, an alignment's offset — the payload that does not
-//!   reach a class name).
+//!   reach a class name);
+//! * the text each branded element *contains*, counted — because a wrapper
+//!   is only right if the author's words are inside it, and counting the
+//!   wrappers alone cannot tell a full one from an empty one;
+//! * the document's own words, in order — because a construct that renders
+//!   its target twice, or not at all, keeps every wrapper intact while
+//!   changing what the reader reads.
 //!
-//! Where the two are *meant* to differ, they differ in unbranded markup and
-//! this test stays quiet by construction: a heading hint promotes a
-//! paragraph to `<h1>` here and renders as a comment there; an orphan
-//! container close is dropped here and emitted unbalanced there; a container
-//! the source never closes is closed here. None of those carry a class or a
-//! `data-` attribute.
+//! The last two are what make this a gate on the *composition* rather than
+//! on the vocabulary. A construct the parser reports as two nodes — an
+//! inline bracket pair, a forward reference whose target is not adjacent —
+//! renders correctly only if this crate reads the two as one; read
+//! separately, the wrappers still come out one for one.
+//!
+//! Where the two are *meant* to differ, they mostly differ in unbranded
+//! markup and this test stays quiet by construction: an orphan container
+//! close is dropped here and emitted unbalanced there; a container the
+//! source never closes is closed here. Neither carries a class or a `data-`
+//! attribute.
+//!
+//! One divergence *is* branded, and is listed by name in
+//! [`PROMOTED_BY_THIS_CRATE`]: a heading hint promotes its paragraph to an
+//! `<h1>` here, where the parser keeps the hint as a marker element of its
+//! own. That is this crate's whole reason for reading the hint, so the
+//! markup comparison is skipped for those fixtures — every other check in
+//! this file still runs on them.
 
 use std::collections::{HashMap, HashSet};
 
-use aozora::Document;
+use aozora::Snapshot;
+
+/// The parser's own reading of `src`. The fixtures are small, so the
+/// only way to fail is a source past the parser's span budget.
+fn parse(src: &str) -> Snapshot {
+    aozora::parse(src.to_owned())
+        .expect("a fixture is never past the parser's span budget")
+        .snapshot()
+}
 use aozora_flavored_markdown::Options;
 use aozora_flavored_markdown::html as md_html;
 use aozora_flavored_markdown_test_support::{AOZORA_MD_CLASSES, check_html_tag_balance};
@@ -55,78 +81,134 @@ use aozora_flavored_markdown_test_support::{AOZORA_MD_CLASSES, check_html_tag_ba
 /// crate rewrites on its behalf (CRLF), and the combination every real
 /// 青空文庫 file is — CRLF plus a decorative rule — where the two rewrites
 /// cancel out into an offset that lands outside the block it names.
-fn pure_aozora_fixtures() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("plain ASCII", "Hello, world."),
-        ("plain Japanese", "親譲りの無鉄砲"),
-        ("explicit ruby", "｜青梅《おうめ》"),
-        ("implicit ruby", "親譲《おやゆず》り"),
-        (
-            "two ruby in one paragraph",
-            "｜青梅《おうめ》と｜鶴見《つるみ》の間",
-        ),
-        (
-            "the same ruby twice",
-            "｜青梅《おうめ》から｜青梅《おうめ》まで",
-        ),
-        ("forward bouten", "可哀想［＃「可哀想」に傍点］"),
-        ("bouten on the left", "可哀想［＃「可哀想」の左に傍点］"),
-        ("tate chu yoko", "20［＃「20」は縦中横］"),
-        ("kaeriten", "天［＃レ］"),
-        ("gaiji", "※［＃「木＋吶のつくり」、第3水準1-85-54］の字"),
-        ("sashie", "［＃挿絵（fig1.png）入る］"),
-        ("unknown annotation", "［＃本文終わり］"),
-        ("warichu", "［＃割り注］うえ／＼した［＃割り注終わり］"),
-        ("page break standalone", "［＃改ページ］"),
-        ("page break mid", "前［＃改ページ］後"),
-        ("section break choho", "［＃改丁］"),
-        ("indent leaf", "［＃地付き］"),
-        ("indent amount leaf", "［＃３字下げ］"),
-        ("align end leaf", "［＃地から３字上げ］"),
-        (
-            "indent container",
-            "［＃ここから2字下げ］\n\n本文\n\n［＃ここで字下げ終わり］",
-        ),
-        (
-            "align end container",
-            "［＃ここから地から２字上げ］\n\n本文\n\n［＃ここで地から２字上げ終わり］",
-        ),
-        (
-            "container holding notation",
-            "［＃ここから3字下げ］\n\n｜青梅《おうめ》\n\n［＃ここで字下げ終わり］",
-        ),
-        (
-            "container the source never closes",
-            "［＃ここから字下げ］\n\n本文",
-        ),
-        ("close with no open", "本文\n\n［＃ここで字下げ終わり］"),
-        ("heading hint", "第一篇［＃「第一篇」は大見出し］"),
-        ("multi paragraph", "first\n\nsecond"),
-        ("CRLF line endings", "｜青梅《おうめ》\r\n｜鶴見《つるみ》"),
-        ("accent digraph", "〔e'tude〕と｜青梅《おうめ》"),
-        (
-            "accent digraph above a container",
-            "［＃ここから２字下げ］\n\n〔e'tude〕本文\n\n［＃ここで字下げ終わり］",
-        ),
-        (
-            "CRLF plus a decorative rule",
-            "本文\r\n----------\r\n｜青梅《おうめ》",
-        ),
-        (
-            "CRLF plus a decorative rule, with blocks",
-            "夏目漱石\r\n\r\n----------\r\n\r\n｜親譲《おやゆず》りの無鉄砲で\r\n\r\n［＃改ページ］\r\n\r\n可哀想［＃「可哀想」に傍点］だ",
-        ),
-        (
-            "CRLF plus a decorative rule, around a container",
-            "本文\r\n----------\r\n［＃ここから２字下げ］\r\n\r\n｜青梅《おうめ》\r\n\r\n［＃ここで字下げ終わり］",
-        ),
-    ]
+fn pure_aozora_fixtures() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    NOTATION_FIXTURES.iter().chain(STRUCTURE_FIXTURES)
 }
+
+/// One document per inline notation, and per notation the parser reports as
+/// more than one node.
+const NOTATION_FIXTURES: &[(&str, &str)] = &[
+    ("plain ASCII", "Hello, world."),
+    ("plain Japanese", "親譲りの無鉄砲"),
+    ("explicit ruby", "｜青梅《おうめ》"),
+    ("implicit ruby", "親譲《おやゆず》り"),
+    (
+        "two ruby in one paragraph",
+        "｜青梅《おうめ》と｜鶴見《つるみ》の間",
+    ),
+    (
+        "the same ruby twice",
+        "｜青梅《おうめ》から｜青梅《おうめ》まで",
+    ),
+    ("forward bouten", "可哀想［＃「可哀想」に傍点］"),
+    ("bouten on the left", "可哀想［＃「可哀想」の左に傍点］"),
+    ("tate chu yoko", "20［＃「20」は縦中横］"),
+    ("kaeriten", "天［＃レ］"),
+    ("gaiji", "※［＃「木＋吶のつくり」、第3水準1-85-54］の字"),
+    ("sashie", "［＃挿絵（fig1.png）入る］"),
+    ("unknown annotation", "［＃本文終わり］"),
+    ("warichu", "［＃割り注］うえ／＼した［＃割り注終わり］"),
+    (
+        "warichu mid-sentence",
+        "黄色い鑑札（［＃割り注］淫売婦の鑑札［＃割り注終わり］）をもって",
+    ),
+    ("tcy bracket pair", "前［＃縦中横］20［＃縦中横終わり］後"),
+    ("paired heading", "［＃中見出し］見出し［＃中見出し終わり］"),
+    (
+        "paired heading, large",
+        "［＃大見出し］題［＃大見出し終わり］",
+    ),
+    (
+        "paired heading over two lines",
+        "［＃６字下げ］［＃中見出し］七　その後\n二行目［＃中見出し終わり］",
+    ),
+    (
+        "forward bouten, target apart",
+        "可哀想な人［＃「可哀想」に傍点］",
+    ),
+    (
+        "forward font size, target apart",
+        "その大きな文字はここ［＃「大きな文字」は大文字］",
+    ),
+    (
+        "forward gothic, target apart",
+        "この行は［＃「この行」はゴシック体］",
+    ),
+    ("angle quote", "≪強調≫"),
+    ("futoji", "強調［＃「強調」は太字］"),
+    ("centred page", "［＃ページの左右中央］"),
+];
+
+/// The block leaves, the paired containers, the three ways a container can
+/// go wrong, and the inputs that decide *how* a construct's source run is
+/// found.
+const STRUCTURE_FIXTURES: &[(&str, &str)] = &[
+    ("page break standalone", "［＃改ページ］"),
+    ("page break mid", "前［＃改ページ］後"),
+    ("section break choho", "［＃改丁］"),
+    ("indent leaf", "［＃地付き］"),
+    ("indent amount leaf", "［＃３字下げ］"),
+    ("align end leaf", "［＃地から３字上げ］"),
+    (
+        "indent container",
+        "［＃ここから2字下げ］\n\n本文\n\n［＃ここで字下げ終わり］",
+    ),
+    (
+        "align end container",
+        "［＃ここから地から２字上げ］\n\n本文\n\n［＃ここで地から２字上げ終わり］",
+    ),
+    (
+        "container holding notation",
+        "［＃ここから3字下げ］\n\n｜青梅《おうめ》\n\n［＃ここで字下げ終わり］",
+    ),
+    (
+        "container the source never closes",
+        "［＃ここから字下げ］\n\n本文",
+    ),
+    ("close with no open", "本文\n\n［＃ここで字下げ終わり］"),
+    ("heading hint", "第一篇［＃「第一篇」は大見出し］"),
+    ("multi paragraph", "first\n\nsecond"),
+    ("CRLF line endings", "｜青梅《おうめ》\r\n｜鶴見《つるみ》"),
+    ("accent digraph", "〔e'tude〕と｜青梅《おうめ》"),
+    (
+        "accent digraph above a container",
+        "［＃ここから２字下げ］\n\n〔e'tude〕本文\n\n［＃ここで字下げ終わり］",
+    ),
+    (
+        "CRLF plus a decorative rule",
+        "本文\r\n----------\r\n｜青梅《おうめ》",
+    ),
+    (
+        "CRLF plus a decorative rule, with blocks",
+        "夏目漱石\r\n\r\n----------\r\n\r\n｜親譲《おやゆず》りの無鉄砲で\r\n\r\n［＃改ページ］\r\n\r\n可哀想［＃「可哀想」に傍点］だ",
+    ),
+    (
+        "CRLF plus a decorative rule, around a container",
+        "本文\r\n----------\r\n［＃ここから２字下げ］\r\n\r\n｜青梅《おうめ》\r\n\r\n［＃ここで字下げ終わり］",
+    ),
+];
+
+/// Fixtures whose 青空文庫 markup this crate deliberately replaces rather
+/// than reproduces. A heading hint is a directive *about* the run it names,
+/// and acting on it — promoting the paragraph to a heading — is what this
+/// crate is for; the parser has no paragraph to promote and keeps the hint
+/// as an element instead.
+const PROMOTED_BY_THIS_CRATE: &[&str] = &["heading hint"];
+
+/// Fixtures carrying a decorative rule (`----------`). CommonMark reads one
+/// as a thematic break, so here it is markup and there it is ten hyphens of
+/// text — a difference in *words* that is block structure doing its job, and
+/// the one place the word-for-word comparison has to look away.
+const RULE_IS_MARKUP_HERE: &[&str] = &[
+    "CRLF plus a decorative rule",
+    "CRLF plus a decorative rule, with blocks",
+    "CRLF plus a decorative rule, around a container",
+];
 
 /// Render `src` through the parser's own front door — the whole of the
 /// surface this crate is allowed to reach for.
 fn aozora_only_render(src: &str) -> String {
-    Document::new(src).parse().to_html()
+    parse(src).to_html()
 }
 
 /// The parser's output under this crate's brand (ADR-0011).
@@ -181,10 +263,185 @@ fn data_attribute_histogram(html: &str) -> HashMap<String, usize> {
     hist
 }
 
+/// `html` with every tag removed and the five character references read
+/// back — the words a reader sees, with the markup taken away.
+fn text_content(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        match rest[at..].find('>') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => return unescape(&out),
+        }
+    }
+    out.push_str(rest);
+    unescape(&out)
+}
+
+/// The five references either renderer emits, read back so the two can be
+/// compared as text. `&#x27;` and `&#39;` are both listed because the two
+/// renderers spell the apostrophe differently.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// `text` with every ASCII whitespace run dropped.
+///
+/// Block structure is comrak's here and the parser's there, and the two
+/// lay a document out with different line breaks and indentation. The
+/// *words* are what both must agree on.
+fn packed(text: &str) -> String {
+    text.split_ascii_whitespace().collect()
+}
+
+/// Tally the text content of every element carrying a class token under
+/// `prefix`, keyed by the class stem.
+///
+/// A histogram of the wrappers alone says a `warichu` span was emitted; this
+/// says what was inside it. Nesting is tracked by tag name so an element
+/// that contains another closes at the right place.
+fn element_text_histogram(html: &str, prefix: &str) -> HashMap<String, Vec<String>> {
+    let mut hist: HashMap<String, Vec<String>> = HashMap::new();
+    let mut at = 0usize;
+    while let Some(open) = html[at..].find('<') {
+        let start = at + open;
+        let Some(close) = html[start..].find('>') else {
+            break;
+        };
+        let tag = &html[start + 1..start + close];
+        at = start + close + 1;
+        if tag.starts_with('/') || tag.ends_with('/') {
+            continue;
+        }
+        let Some(name) = tag
+            .split([' ', '\t', '\n'])
+            .next()
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        let stems: Vec<String> = class_tokens(tag)
+            .filter_map(|token| token.strip_prefix(prefix).map(str::to_owned))
+            .collect();
+        if stems.is_empty() {
+            continue;
+        }
+        let body = &html[at..element_end(html, at, name)];
+        for stem in stems {
+            hist.entry(stem)
+                .or_default()
+                .push(packed(&text_content(body)));
+        }
+    }
+    for bodies in hist.values_mut() {
+        bodies.sort();
+    }
+    hist
+}
+
+/// Every class token in a start tag's `class` attribute.
+fn class_tokens(tag: &str) -> impl Iterator<Item = &str> {
+    tag.split_once("class=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value)
+        .unwrap_or_default()
+        .split_ascii_whitespace()
+}
+
+/// Where the element named `name` that opened just before `from` closes,
+/// as an offset into `html`. Counts nested opens of the same name so a
+/// `<span>` inside a `<span>` does not close the outer one.
+fn element_end(html: &str, from: usize, name: &str) -> usize {
+    let open = format!("<{name}");
+    let close = format!("</{name}");
+    let mut depth = 1usize;
+    let mut at = from;
+    while at < html.len() {
+        let next_open = html[at..].find(&open).map(|i| at + i);
+        let next_close = html[at..].find(&close).map(|i| at + i);
+        match (next_open, next_close) {
+            (_, None) => return html.len(),
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                at = o + open.len();
+            }
+            (_, Some(c)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return c;
+                }
+                at = c + close.len();
+            }
+        }
+    }
+    html.len()
+}
+
+#[test]
+fn both_renderers_agree_on_the_text_inside_every_aozora_element() {
+    // The regression this exists for: a construct the parser reports as two
+    // nodes — `［＃割り注］…［＃割り注終わり］`, a forward reference whose
+    // target is not adjacent — renders one wrapper either way, so the class
+    // histogram agrees while the body sits outside the wrapper.
+    let mut diffs = Vec::new();
+    for (label, src) in pure_aozora_fixtures() {
+        if PROMOTED_BY_THIS_CRATE.contains(label) {
+            continue;
+        }
+        let aozora = element_text_histogram(&aozora_only_render(src), "aozora-");
+        let md = element_text_histogram(&md_html::render_to_string(src), "aozora-md-");
+        if aozora != md {
+            diffs.push(format!(
+                "{label} ({src:?})\n  aozora:    {aozora:?}\n  aozora-md: {md:?}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "the two renderers disagree on what a notation wraps:\n\n{}",
+        diffs.join("\n\n"),
+    );
+}
+
+#[test]
+fn both_renderers_agree_on_the_words_of_the_document() {
+    // The other half of the same regression: a forward reference resolved
+    // against its own copy of the target renders the target a second time.
+    // Every wrapper is intact and correctly filled; the reader reads the
+    // words twice.
+    let mut diffs = Vec::new();
+    for (label, src) in pure_aozora_fixtures() {
+        if PROMOTED_BY_THIS_CRATE.contains(label) || RULE_IS_MARKUP_HERE.contains(label) {
+            continue;
+        }
+        let aozora = packed(&text_content(&aozora_only_render(src)));
+        let md = packed(&text_content(&md_html::render_to_string(src)));
+        if aozora != md {
+            diffs.push(format!(
+                "{label} ({src:?})\n  aozora:    {aozora:?}\n  aozora-md: {md:?}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "the two renderers disagree on what the document says:\n\n{}",
+        diffs.join("\n\n"),
+    );
+}
+
 #[test]
 fn both_renderers_agree_on_the_aozora_markup_of_pure_aozora_input() {
     let mut diffs = Vec::new();
     for (label, src) in pure_aozora_fixtures() {
+        if PROMOTED_BY_THIS_CRATE.contains(label) {
+            continue;
+        }
         let aozora_out = aozora_only_render(src);
         let md_out = md_html::render_to_string(src);
         let aozora_classes = class_stem_histogram(&aozora_out, "aozora-");
@@ -215,7 +472,7 @@ fn every_emitted_class_is_in_the_pinned_contract() {
     // this crate emits. The `aozora-*` brand from the parser is
     // checked against the same stems with a `aozora-` prefix strip — same
     // family of stems, different brand prefix.
-    let known: HashSet<&'static str> = AOZORA_MD_CLASSES.iter().copied().collect();
+    let known: HashSet<&str> = AOZORA_MD_CLASSES.iter().map(String::as_str).collect();
     let mut violations = Vec::new();
     for (label, src) in pure_aozora_fixtures() {
         for (renderer, html, prefix) in [
@@ -335,7 +592,7 @@ fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
     // `aozora_flavored_markdown::serialize` is a thin delegate, so the two
     // must produce identical bytes for the same source.
     for (label, src) in pure_aozora_fixtures() {
-        let aozora_out = Document::new(*src).parse().serialize();
+        let aozora_out = parse(src).to_source();
         let md_out = aozora_flavored_markdown::serialize(src);
         assert_eq!(
             md_out, aozora_out,

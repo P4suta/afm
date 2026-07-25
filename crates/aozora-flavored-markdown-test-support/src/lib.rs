@@ -22,11 +22,11 @@
 //!
 //! | Tier | Predicate | Shape forbidden in rendered HTML |
 //! |------|-----------|-----------------------------------|
-//! | A    | [`check_no_bare_bracket`]           | Bare `［＃` outside `aozora-md-annotation` wrapper, `<code>` regions excepted (Tier-A canary). |
+//! | A    | [`check_no_bare_bracket`]           | Bare `［＃` outside `aozora-md-directive` wrapper, `<code>` regions excepted (Tier-A canary). |
 //! | B    | [`check_no_sentinel_leak`]          | PUA sentinels U+E001–U+E004 (lexer-internal markers). |
-//! | C    | [`check_heading_integrity`]         | `<h1>`–`<h6>` bodies must not carry `aozora-md-indent`, `aozora-md-container-indent`, or `aozora-md-annotation` tokens. |
+//! | C    | [`check_heading_integrity`]         | `<h1>`–`<h6>` bodies must not carry `aozora-md-indent`, `aozora-md-container-indent`, or `aozora-md-directive` tokens. |
 //! | D    | [`check_html_tag_balance`]          | Tags must balance ([`check_well_formed`] returns `Ok`). |
-//! | E    | [`check_annotation_wrapper_shape`]  | `aozora-md-annotation` wrappers must close, carry `hidden`, and never nest. |
+//! | E    | [`check_directive_wrapper_shape`]  | `aozora-md-directive` wrappers must close, carry `hidden`, and never nest. |
 //! | F    | [`check_no_xss_marker`]             | Raw `<script`, `javascript:`, or `on<event>=` must never appear. |
 //! | G    | [`check_css_class_contract`]        | Every `aozora-md-*` class token must be in the pinned [`AOZORA_MD_CLASSES`] list. |
 //! | I    | [`check_escape_invariants`]         | No double-encoded entities (`&amp;lt;`, `&amp;amp;`, …). |
@@ -64,64 +64,168 @@
 pub mod config;
 pub mod generators;
 
+use aozora_flavored_markdown::sentinels;
 use core::error::Error;
 use core::fmt;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
-// The complete `aozora-md-*` CSS-class contract emitted by the renderer, pinned here
-// so `tests/css_class_contract.rs` can assert every emitted `class="aozora-md-…"`
-// token appears in this list. When that test fails after an upstream bump, add
-// the new class here and to the matching rule in
-// `theme/aozora-md-{horizontal,vertical}.css`.
-pub const AOZORA_MD_CLASSES: &[&str] = &[
-    "aozora-md-align-end",
-    "aozora-md-annotation",
-    "aozora-md-bouten",
-    "aozora-md-bouten-goma",
-    "aozora-md-bouten-left",
-    "aozora-md-bouten-right",
-    "aozora-md-container",
-    "aozora-md-container-align-end",
-    "aozora-md-container-indent",
-    "aozora-md-container-keigakomi",
-    "aozora-md-container-warichu",
-    "aozora-md-double-ruby",
-    "aozora-md-gaiji",
-    "aozora-md-indent",
-    "aozora-md-kaeriten",
-    "aozora-md-page-break",
-    "aozora-md-section-break",
-    "aozora-md-tcy",
-    "aozora-md-warichu",
+/// The complete `aozora-md-*` CSS-class contract the renderer can emit.
+///
+/// Derived from the parser's own `AOZORA_CLASSES` rather than written out,
+/// because under ADR-0011 the two lists *are* the same list: this crate's
+/// HTML is the parser's HTML with the brand rewritten, so a class exists
+/// here exactly when it exists there.
+///
+/// A hand-kept copy drifts silently at every upstream bump, and the Tier G
+/// predicate that reads it is asserted by the fuzz targets and the corpus
+/// sweep — so drift surfaces as a panic on real input rather than as a
+/// failing contract test. Deriving removes the failure mode instead of
+/// re-checking for it.
+pub static AOZORA_MD_CLASSES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    aozora::AOZORA_CLASSES
+        .iter()
+        .map(|class| {
+            class
+                .strip_prefix(BRAND)
+                .map_or_else(|| (*class).to_owned(), |stem| format!("{REBRAND}{stem}"))
+        })
+        .collect()
+});
+
+/// The class a heading the notation asked for carries, marking it as the
+/// parser's own markup rather than a heading this crate composed.
+const AOZORA_MD_HEADING: &str = "aozora-md-heading";
+
+/// The parser's brand (ADR-0011).
+const BRAND: &str = "aozora-";
+/// This crate's brand.
+const REBRAND: &str = "aozora-md-";
+
+/// Classes in [`AOZORA_MD_CLASSES`] the shipped themes do not style yet —
+/// the 青空文庫 v0.5.0 vocabulary this repo has not written CSS for.
+///
+/// This is the ADR-0020 follow-up work list, enumerated so that it is
+/// visible and so that it can only shrink: the class-contract test fails if
+/// an entry here turns out to be styled after all, and a class that is in
+/// neither the themes nor this list fails the coverage test. Emptying it
+/// deletes the constant.
+pub const UNSTYLED_CLASSES: &[&str] = &[
+    "aozora-md-accent",
+    "aozora-md-accent-dot",
+    "aozora-md-angle-quote",
+    "aozora-md-bouten-batsu",
+    "aozora-md-bouten-bosen",
+    "aozora-md-bouten-both",
+    "aozora-md-bouten-hasen",
+    "aozora-md-bouten-kurosankaku",
+    "aozora-md-bouten-kusarisen",
+    "aozora-md-bouten-maru",
+    "aozora-md-bouten-namisen",
+    "aozora-md-bouten-nijubosen",
+    "aozora-md-bouten-nijumaru",
+    "aozora-md-bouten-shirogoma",
+    "aozora-md-bouten-shiromaru",
+    "aozora-md-bouten-shirosankaku",
+    "aozora-md-bunsu",
+    "aozora-md-caption",
+    "aozora-md-center",
+    "aozora-md-container-center",
+    "aozora-md-container-columns",
+    "aozora-md-container-font-larger",
+    "aozora-md-container-font-smaller",
+    "aozora-md-container-futoji",
+    "aozora-md-container-goshikku",
+    "aozora-md-container-line-kumi",
+    "aozora-md-container-line-width",
+    "aozora-md-container-shatai",
+    "aozora-md-container-table",
+    "aozora-md-container-wrap-indent",
+    "aozora-md-container-yokogumi",
+    "aozora-md-editor-note",
+    "aozora-md-enclosure-circle",
+    "aozora-md-enclosure-circle-dotted",
+    "aozora-md-enclosure-double-rule",
+    "aozora-md-font-extra-large",
+    "aozora-md-font-large",
+    "aozora-md-font-larger",
+    "aozora-md-font-medium",
+    "aozora-md-font-small",
+    "aozora-md-font-smaller",
+    "aozora-md-futoji",
+    "aozora-md-goshikku",
+    "aozora-md-heading",
+    "aozora-md-heading-large",
+    "aozora-md-heading-medium",
+    "aozora-md-heading-same-line",
+    "aozora-md-heading-small",
+    "aozora-md-heading-window",
+    "aozora-md-keigakomi-box",
+    "aozora-md-keigakomi-inline",
+    "aozora-md-kogaki-left",
+    "aozora-md-kogaki-right",
+    "aozora-md-line-font-extra-large",
+    "aozora-md-line-font-large",
+    "aozora-md-line-font-medium",
+    "aozora-md-line-font-small",
+    "aozora-md-line-futoji",
+    "aozora-md-line-goshikku",
+    "aozora-md-margin-note",
+    "aozora-md-ruby-left",
+    "aozora-md-ruby-note",
+    "aozora-md-section-break-kaicho",
+    "aozora-md-section-break-kaidan",
+    "aozora-md-section-break-kaimihiraki",
+    "aozora-md-shatai",
+    "aozora-md-shitatsuki",
+    "aozora-md-uwatsuki",
+    "aozora-md-yokogumi",
 ];
+
+/// The classes the shipped themes are required to style: everything the
+/// renderer emits, less the [`UNSTYLED_CLASSES`] backlog.
+#[must_use]
+pub fn styled_classes() -> Vec<&'static str> {
+    AOZORA_MD_CLASSES
+        .iter()
+        .map(String::as_str)
+        .filter(|class| !UNSTYLED_CLASSES.contains(class))
+        .collect()
+}
+
+/// Whether `class` is a class the renderer can emit, exactly as spelled.
+#[must_use]
+pub fn is_contract_class(class: &str) -> bool {
+    AOZORA_MD_CLASSES.iter().any(|known| known == class)
+}
 
 // ---------------------------------------------------------------------------
 // Rendered-HTML post-processing
 // ---------------------------------------------------------------------------
 
-const AOZORA_MD_ANNOTATION_OPEN: &str = r#"<span class="aozora-md-annotation" hidden>"#;
-const AOZORA_MD_ANNOTATION_CLOSE: &str = "</span>";
+const AOZORA_MD_DIRECTIVE_OPEN: &str = r#"<span class="aozora-md-directive" hidden>"#;
+const AOZORA_MD_DIRECTIVE_CLOSE: &str = "</span>";
 
-/// Remove `<span class="aozora-md-annotation" hidden>…</span>` wrappers from `html`.
+/// Remove `<span class="aozora-md-directive" hidden>…</span>` wrappers from `html`.
 ///
 /// Leaves the caller with "bare" output — useful for asserting that no `［＃`
-/// leaked outside an annotation wrapper (Tier A invariant). Idempotent: a
+/// leaked outside a directive wrapper (Tier A invariant). Idempotent: a
 /// second pass on already-stripped output returns the same string.
 #[must_use]
-pub fn strip_annotation_wrappers(html: &str) -> String {
+pub fn strip_directive_wrappers(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
-    while let Some(at) = rest.find(AOZORA_MD_ANNOTATION_OPEN) {
+    while let Some(at) = rest.find(AOZORA_MD_DIRECTIVE_OPEN) {
         out.push_str(&rest[..at]);
-        let after_open = &rest[at + AOZORA_MD_ANNOTATION_OPEN.len()..];
-        let Some(close_at) = after_open.find(AOZORA_MD_ANNOTATION_CLOSE) else {
+        let after_open = &rest[at + AOZORA_MD_DIRECTIVE_OPEN.len()..];
+        let Some(close_at) = after_open.find(AOZORA_MD_DIRECTIVE_CLOSE) else {
             // Malformed — preserve remainder so a Tier-A assertion can fire on
             // the leaked bracket.
             out.push_str(rest);
             return out;
         };
-        rest = &after_open[close_at + AOZORA_MD_ANNOTATION_CLOSE.len()..];
+        rest = &after_open[close_at + AOZORA_MD_DIRECTIVE_CLOSE.len()..];
     }
     out.push_str(rest);
     out
@@ -206,7 +310,7 @@ pub const fn snap_right(s: &str, mut i: usize) -> usize {
 /// not hold large values in flight during long searches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
-    /// Tier A — a bare `［＃` leaked outside any `aozora-md-annotation` wrapper.
+    /// Tier A — a bare `［＃` leaked outside any `aozora-md-directive` wrapper.
     BareBracket {
         first_offset: usize,
         snippet: String,
@@ -226,8 +330,8 @@ pub enum Violation {
     },
     /// Tier D — a tag-balance violation from [`check_well_formed`].
     UnbalancedTag(WellFormedError),
-    /// Tier E — the `aozora-md-annotation` wrapper shape is malformed.
-    AnnotationWrapper {
+    /// Tier E — the `aozora-md-directive` wrapper shape is malformed.
+    DirectiveWrapper {
         violation: &'static str,
         snippet: String,
     },
@@ -262,7 +366,7 @@ impl fmt::Display for Violation {
                 first_offset,
             } => write!(
                 f,
-                "Tier A: bare `［＃` leaked outside aozora-md-annotation wrapper \
+                "Tier A: bare `［＃` leaked outside aozora-md-directive wrapper \
                  ({total} occurrence(s); first near offset {first_offset}): {snippet}",
             ),
             Self::SentinelLeak {
@@ -284,10 +388,10 @@ impl fmt::Display for Violation {
                 "Tier C: <h{level}> body carries forbidden class `{forbidden_class}`: {snippet}",
             ),
             Self::UnbalancedTag(e) => write!(f, "Tier D: {e}"),
-            Self::AnnotationWrapper { violation, snippet } => {
+            Self::DirectiveWrapper { violation, snippet } => {
                 write!(
                     f,
-                    "Tier E: aozora-md-annotation wrapper {violation}: {snippet}"
+                    "Tier E: aozora-md-directive wrapper {violation}: {snippet}"
                 )
             }
             Self::XssLeak {
@@ -323,12 +427,12 @@ impl Error for Violation {}
 // Predicates — one per tier
 // ---------------------------------------------------------------------------
 
-/// Tier A — no bare `［＃` outside `aozora-md-annotation` wrappers.
+/// Tier A — no bare `［＃` outside `aozora-md-directive` wrappers.
 ///
 /// The Tier-A canary in predicate form, and the single definition of
-/// the tier: strip every `<code>` region and every annotation wrapper,
+/// the tier: strip every `<code>` region and every directive wrapper,
 /// then assert the remainder contains no `［＃`. Succeeds when the
-/// input has no annotations at all (stripping is a no-op).
+/// input has no directives at all (stripping is a no-op).
 ///
 /// **`<code>` regions are excepted** — both the fenced `<pre><code>`
 /// kind and the inline code span. A code element's body is the user's
@@ -348,7 +452,7 @@ impl Error for Violation {}
 /// total leak count when a bare `［＃` survives the strip.
 pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
     const NEEDLE: &str = "［＃";
-    let stripped = strip_annotation_wrappers(&strip_code_regions(html));
+    let stripped = strip_directive_wrappers(&strip_code_regions(html));
     if let Some(offset) = stripped.find(NEEDLE) {
         let total = stripped.matches(NEEDLE).count();
         return Err(Violation::BareBracket {
@@ -367,7 +471,7 @@ pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
 /// the character, so the sentinel may flow through to the output. This
 /// predicate is therefore meaningful only on sources that produced no
 /// lexer diagnostics. Property tests that feed random input should
-/// gate on `aozora_lexer::lex(src).diagnostics.is_empty()` before calling.
+/// gate on an empty `Rendered::diagnostics` before calling.
 ///
 /// # Errors
 ///
@@ -375,11 +479,11 @@ pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
 /// and a snippet when any of U+E001, U+E002, U+E003, or U+E004 appears
 /// in `html`.
 pub fn check_no_sentinel_leak(html: &str) -> Result<(), Violation> {
-    // Single source of truth: the PUA sentinel set is owned by aozora
-    // (the wire contract), re-exported as `aozora::ALL_SENTINELS`. A new
-    // sentinel kind added upstream flows in here automatically instead of
-    // silently going unchecked against a hardcoded U+E001..U+E004 copy.
-    for &c in &aozora::ALL_SENTINELS {
+    // Single source of truth: the substitution is the library's, so the
+    // set it publishes is what a leak is measured against. A sentinel added
+    // there flows in here automatically instead of silently going unchecked
+    // against a hardcoded U+E001..U+E004 copy.
+    for &c in &sentinels::ALL {
         let mut buf = [0u8; 4];
         let needle: &str = c.encode_utf8(&mut buf);
         if let Some(offset) = html.find(needle) {
@@ -396,10 +500,19 @@ pub fn check_no_sentinel_leak(html: &str) -> Result<(), Violation> {
 /// Tier C — heading bodies carry only legitimate classes.
 ///
 /// `<h1>`–`<h6>` bodies must not contain `aozora-md-indent`,
-/// `aozora-md-container-indent`, or `aozora-md-annotation` as class tokens. Other
+/// `aozora-md-container-indent`, or `aozora-md-directive` as class tokens. Other
 /// Aozora markup (bouten, gaiji, tcy, kaeriten) is allowed inside a
-/// heading — only indent markers and raw-annotation wrappers are
+/// heading — only indent markers and raw-directive wrappers are
 /// bugs here.
+///
+/// **A heading the parser rendered whole is exempt.**
+/// `［＃中見出し］…［＃中見出し終わり］` is a heading the notation asks for, and
+/// its body is whatever the parser put there — including the hidden wrapper
+/// an editor's note written inside the heading renders to. That is not this
+/// crate composing a heading out of parts, which is what the tier is
+/// written against; it arrives as one fragment and is held to the parser's
+/// own output by `tests/aozora_parity.rs`. Such a heading carries
+/// `aozora-md-heading`, which is how it is told apart from a markdown one.
 ///
 /// # Errors
 ///
@@ -409,7 +522,7 @@ pub fn check_heading_integrity(html: &str) -> Result<(), Violation> {
     const FORBIDDEN: &[&str] = &[
         "aozora-md-indent",
         "aozora-md-container-indent",
-        "aozora-md-annotation",
+        "aozora-md-directive",
     ];
     for level in 1u8..=6 {
         let open_marker = format!("<h{level}");
@@ -438,6 +551,13 @@ pub fn check_heading_integrity(html: &str) -> Result<(), Violation> {
             };
             let body_end = body_start + close_rel;
             let body = &html[body_start..body_end];
+            // A heading the notation asked for, rendered whole by the
+            // parser: its body is the parser's markup, not a composition
+            // this tier can speak to.
+            if collect_class_tokens(&html[tag_start..body_start]).contains(AOZORA_MD_HEADING) {
+                search_from = body_end + close_marker.len();
+                continue;
+            }
             let tokens = collect_class_tokens(body);
             for &forbidden in FORBIDDEN {
                 if tokens.contains(forbidden) {
@@ -471,61 +591,59 @@ pub fn check_html_tag_balance(html: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-/// Tier E — `aozora-md-annotation` wrappers are well-shaped.
+/// Tier E — `aozora-md-directive` wrappers are well-shaped.
 ///
-/// Asserts that every `<span class="aozora-md-annotation" hidden>` has a
+/// Asserts that every `<span class="aozora-md-directive" hidden>` has a
 /// matching `</span>`, that no such wrapper is nested inside another
 /// (stripping would be non-idempotent), and that every wrapper carries
 /// the `hidden` attribute.
 ///
-/// Idempotency is verified by running [`strip_annotation_wrappers`]
+/// Idempotency is verified by running [`strip_directive_wrappers`]
 /// twice and comparing — if the stripper is idempotent on this input,
 /// the wrapper shape is sane.
 ///
 /// # Errors
 ///
-/// Returns [`Violation::AnnotationWrapper`] describing the specific
+/// Returns [`Violation::DirectiveWrapper`] describing the specific
 /// shape violation.
-pub fn check_annotation_wrapper_shape(html: &str) -> Result<(), Violation> {
-    let once = strip_annotation_wrappers(html);
-    let twice = strip_annotation_wrappers(&once);
+pub fn check_directive_wrapper_shape(html: &str) -> Result<(), Violation> {
+    let once = strip_directive_wrappers(html);
+    let twice = strip_directive_wrappers(&once);
     if once != twice {
-        return Err(Violation::AnnotationWrapper {
-            violation: "strip_annotation_wrappers is not idempotent",
-            snippet: first_occurrence_context(html, AOZORA_MD_ANNOTATION_OPEN, 80),
+        return Err(Violation::DirectiveWrapper {
+            violation: "strip_directive_wrappers is not idempotent",
+            snippet: first_occurrence_context(html, AOZORA_MD_DIRECTIVE_OPEN, 80),
         });
     }
     // Nested wrapper detection: an open occurring before the next close.
     let mut search_from = 0;
-    while let Some(rel) = html[search_from..].find(AOZORA_MD_ANNOTATION_OPEN) {
+    while let Some(rel) = html[search_from..].find(AOZORA_MD_DIRECTIVE_OPEN) {
         let open_at = search_from + rel;
-        let after_open = &html[open_at + AOZORA_MD_ANNOTATION_OPEN.len()..];
-        let next_open = after_open.find(AOZORA_MD_ANNOTATION_OPEN);
-        let next_close = after_open.find(AOZORA_MD_ANNOTATION_CLOSE);
+        let after_open = &html[open_at + AOZORA_MD_DIRECTIVE_OPEN.len()..];
+        let next_open = after_open.find(AOZORA_MD_DIRECTIVE_OPEN);
+        let next_close = after_open.find(AOZORA_MD_DIRECTIVE_CLOSE);
         match (next_open, next_close) {
             (Some(no), Some(nc)) if no < nc => {
-                return Err(Violation::AnnotationWrapper {
-                    violation: "nested aozora-md-annotation open before the enclosing close",
+                return Err(Violation::DirectiveWrapper {
+                    violation: "nested aozora-md-directive open before the enclosing close",
                     snippet: first_occurrence_context_bytes(html, open_at, 80),
                 });
             }
             (_, None) => {
-                return Err(Violation::AnnotationWrapper {
-                    violation: "aozora-md-annotation open without matching </span>",
+                return Err(Violation::DirectiveWrapper {
+                    violation: "aozora-md-directive open without matching </span>",
                     snippet: first_occurrence_context_bytes(html, open_at, 80),
                 });
             }
             (_, Some(nc)) => {
-                search_from = open_at
-                    + AOZORA_MD_ANNOTATION_OPEN.len()
-                    + nc
-                    + AOZORA_MD_ANNOTATION_CLOSE.len();
+                search_from =
+                    open_at + AOZORA_MD_DIRECTIVE_OPEN.len() + nc + AOZORA_MD_DIRECTIVE_CLOSE.len();
             }
         }
     }
-    // Check for `<span class="aozora-md-annotation"` *without* the `hidden` attribute
+    // Check for `<span class="aozora-md-directive"` *without* the `hidden` attribute
     // — the exact shape is the only one we emit, so anything else is a bug.
-    let variant = r#"<span class="aozora-md-annotation""#;
+    let variant = r#"<span class="aozora-md-directive""#;
     let mut scan_from = 0;
     while let Some(rel) = html[scan_from..].find(variant) {
         let at = scan_from + rel;
@@ -533,8 +651,8 @@ pub fn check_annotation_wrapper_shape(html: &str) -> Result<(), Violation> {
         let after = &html[at + variant.len()..];
         let trimmed = after.trim_start();
         if !trimmed.starts_with("hidden>") && !trimmed.starts_with("hidden ") {
-            return Err(Violation::AnnotationWrapper {
-                violation: "aozora-md-annotation span missing `hidden` attribute",
+            return Err(Violation::DirectiveWrapper {
+                violation: "aozora-md-directive span missing `hidden` attribute",
                 snippet: first_occurrence_context_bytes(html, at, 80),
             });
         }
@@ -561,7 +679,7 @@ pub fn check_annotation_wrapper_shape(html: &str) -> Result<(), Violation> {
 ///   would act on it.
 /// * `on<event>=` (`onerror=`, `onload=`, `onclick=`, …) inside an
 ///   attribute position. Same tag-context requirement as above — the
-///   `onerror=alert(1)` text inside a `<span hidden>` annotation
+///   `onerror=alert(1)` text inside a `<span hidden>` directive
 ///   wrapper is harmless plain text, not a handler.
 ///
 /// # Errors
@@ -700,8 +818,8 @@ pub fn assert_html_invariants(src: &str, html: &str) {
     if let Err(e) = check_html_tag_balance(html) {
         report("Tier D (tag balance)", e);
     }
-    if let Err(e) = check_annotation_wrapper_shape(html) {
-        report("Tier E (annotation wrapper)", e);
+    if let Err(e) = check_directive_wrapper_shape(html) {
+        report("Tier E (directive wrapper)", e);
     }
     if let Err(e) = check_no_xss_marker(html) {
         report("Tier F (xss marker)", e);
@@ -928,7 +1046,7 @@ pub fn assert_invariants(html: &str) -> Result<(), Vec<Violation>> {
         check_no_sentinel_leak,
         check_heading_integrity,
         check_html_tag_balance,
-        check_annotation_wrapper_shape,
+        check_directive_wrapper_shape,
         check_no_xss_marker,
         check_css_class_contract,
         check_escape_invariants,
@@ -1011,7 +1129,7 @@ fn collect_class_tokens(html: &str) -> HashSet<String> {
 /// or of the form `<listed-base>-N` where `N` is a non-negative
 /// decimal integer.
 fn is_recognised_class(class: &str) -> bool {
-    if AOZORA_MD_CLASSES.contains(&class) {
+    if is_contract_class(class) {
         return true;
     }
     // Family-suffix variants: any `<base>-<suffix>` where `<base>` is
@@ -1023,7 +1141,7 @@ fn is_recognised_class(class: &str) -> bool {
     if let Some(stem_end) = class.rfind('-') {
         let stem = &class[..stem_end];
         let suffix = &class[stem_end + 1..];
-        if !suffix.is_empty() && AOZORA_MD_CLASSES.contains(&stem) {
+        if !suffix.is_empty() && is_contract_class(stem) {
             return true;
         }
     }
@@ -1336,28 +1454,28 @@ mod tests {
     use super::*;
 
     // -------------------------------------------------------------------
-    // strip_annotation_wrappers (existing)
+    // strip_directive_wrappers (existing)
     // -------------------------------------------------------------------
 
     #[test]
     fn strip_returns_text_outside_wrappers() {
         let html =
-            r#"<p>hello <span class="aozora-md-annotation" hidden>［＃改ページ］</span> world</p>"#;
-        assert_eq!(strip_annotation_wrappers(html), "<p>hello  world</p>");
+            r#"<p>hello <span class="aozora-md-directive" hidden>［＃改ページ］</span> world</p>"#;
+        assert_eq!(strip_directive_wrappers(html), "<p>hello  world</p>");
     }
 
     #[test]
     fn strip_is_idempotent() {
-        let html = r#"a <span class="aozora-md-annotation" hidden>X</span> b"#;
-        let once = strip_annotation_wrappers(html);
-        let twice = strip_annotation_wrappers(&once);
+        let html = r#"a <span class="aozora-md-directive" hidden>X</span> b"#;
+        let once = strip_directive_wrappers(html);
+        let twice = strip_directive_wrappers(&once);
         assert_eq!(once, twice);
     }
 
     #[test]
     fn strip_handles_malformed_open_without_close() {
-        let html = r#"a <span class="aozora-md-annotation" hidden>X b"#;
-        let out = strip_annotation_wrappers(html);
+        let html = r#"a <span class="aozora-md-directive" hidden>X b"#;
+        let out = strip_directive_wrappers(html);
         assert!(out.contains("X b"));
     }
 
@@ -1397,7 +1515,7 @@ mod tests {
 
     #[test]
     fn assert_no_bare_bracket_tolerates_wrapped_occurrences() {
-        let html = r#"<p>prefix <span class="aozora-md-annotation" hidden>［＃改ページ］</span> suffix</p>"#;
+        let html = r#"<p>prefix <span class="aozora-md-directive" hidden>［＃改ページ］</span> suffix</p>"#;
         assert_no_bare_bracket(html);
     }
 
@@ -1428,7 +1546,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_no_bare_bracket_tolerates_wrapper() {
-        let html = r#"<span class="aozora-md-annotation" hidden>［＃改ページ］</span>"#;
+        let html = r#"<span class="aozora-md-directive" hidden>［＃改ページ］</span>"#;
         check_no_bare_bracket(html).unwrap();
     }
 
@@ -1509,7 +1627,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_heading_integrity_fires_on_annotation_leak() {
-        let html = r#"<h2><span class="aozora-md-annotation" hidden>［＃X］</span>第一篇</h2>"#;
+        let html = r#"<h2><span class="aozora-md-directive" hidden>［＃X］</span>第一篇</h2>"#;
         let Err(Violation::HeadingContaminated {
             level,
             forbidden_class,
@@ -1519,7 +1637,7 @@ mod tests {
             panic!("expected HeadingContaminated");
         };
         assert_eq!(level, 2);
-        assert_eq!(forbidden_class, "aozora-md-annotation");
+        assert_eq!(forbidden_class, "aozora-md-directive");
     }
 
     #[test]
@@ -1535,23 +1653,23 @@ mod tests {
     }
 
     #[test]
-    fn invariant_unit_check_annotation_wrapper_shape_passes_on_well_formed() {
-        let html = r#"a <span class="aozora-md-annotation" hidden>X</span> b"#;
-        check_annotation_wrapper_shape(html).unwrap();
+    fn invariant_unit_check_directive_wrapper_shape_passes_on_well_formed() {
+        let html = r#"a <span class="aozora-md-directive" hidden>X</span> b"#;
+        check_directive_wrapper_shape(html).unwrap();
     }
 
     #[test]
-    fn invariant_unit_check_annotation_wrapper_shape_fires_on_missing_hidden() {
-        let html = r#"a <span class="aozora-md-annotation">X</span> b"#;
-        let err = check_annotation_wrapper_shape(html).expect_err("must fire");
-        assert!(matches!(err, Violation::AnnotationWrapper { .. }));
+    fn invariant_unit_check_directive_wrapper_shape_fires_on_missing_hidden() {
+        let html = r#"a <span class="aozora-md-directive">X</span> b"#;
+        let err = check_directive_wrapper_shape(html).expect_err("must fire");
+        assert!(matches!(err, Violation::DirectiveWrapper { .. }));
     }
 
     #[test]
-    fn invariant_unit_check_annotation_wrapper_shape_fires_on_unclosed() {
-        let html = r#"a <span class="aozora-md-annotation" hidden>X b"#;
-        let err = check_annotation_wrapper_shape(html).expect_err("must fire");
-        assert!(matches!(err, Violation::AnnotationWrapper { .. }));
+    fn invariant_unit_check_directive_wrapper_shape_fires_on_unclosed() {
+        let html = r#"a <span class="aozora-md-directive" hidden>X b"#;
+        let err = check_directive_wrapper_shape(html).expect_err("must fire");
+        assert!(matches!(err, Violation::DirectiveWrapper { .. }));
     }
 
     #[test]
@@ -1663,7 +1781,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_assert_invariants_aggregates_clean_pass() {
-        let html = r#"<ruby>青<rp>(</rp><rt>あ</rt><rp>)</rp></ruby><span class="aozora-md-tcy">20</span>"#;
+        let html = r#"<ruby>青<rp>(</rp><rt>あ</rt><rp>)</rp></ruby><span class="aozora-md-combine-upright">20</span>"#;
         assert_invariants(html).unwrap();
     }
 

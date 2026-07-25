@@ -102,9 +102,9 @@ fn implicit_and_explicit_ruby_share_one_kind() {
 }
 
 #[test]
-fn double_ruby_projects_with_its_own_kind() {
-    let blocks = ir("《《強調》》");
-    let (_, html) = find_inline_kind(first_paragraph_inlines(&blocks), "doubleRuby");
+fn angle_quote_projects_with_its_own_kind() {
+    let blocks = ir("≪強調≫");
+    let (_, html) = find_inline_kind(first_paragraph_inlines(&blocks), "angleQuote");
     assert!(html.contains("強調"), "html: {html}");
 }
 
@@ -127,9 +127,9 @@ fn bouten_projects_with_rebranded_classes() {
 }
 
 #[test]
-fn tcy_projects_with_its_own_kind() {
+fn combine_upright_projects_with_its_own_kind() {
     let blocks = ir("20［＃「20」は縦中横］");
-    let (_, html) = find_inline_kind(first_paragraph_inlines(&blocks), "tateChuYoko");
+    let (_, html) = find_inline_kind(first_paragraph_inlines(&blocks), "combineUpright");
     assert!(html.contains("20"), "html: {html}");
 }
 
@@ -147,7 +147,7 @@ fn gaiji_projects_with_its_own_kind() {
 fn unclassified_annotation_projects_with_its_payload_in_the_html() {
     const SRC: &str = "前［＃ほげふが］後";
     let blocks = ir(SRC);
-    let (span, html) = find_inline_kind(first_paragraph_inlines(&blocks), "annotation");
+    let (span, html) = find_inline_kind(first_paragraph_inlines(&blocks), "directive");
     assert_eq!(slice(SRC, span), "［＃ほげふが］");
     assert!(
         html.contains("ほげふが"),
@@ -599,7 +599,7 @@ fn every_projected_fragment_appears_in_the_rendered_html() {
 
 #[test]
 fn annotation_inside_a_heading_is_suppressed_like_the_html_does() {
-    // Tier C bars `aozora-md-annotation` markup from a heading body, so the
+    // Tier C bars `aozora-md-directive` markup from a heading body, so the
     // splicer drops the notation there. The IR has to make the same call:
     // a consumer rendering the heading from the IR would otherwise put a
     // wrapper inside `<h1>` that `render` never emits.
@@ -652,38 +652,20 @@ fn heading_hint_promotes_a_nested_paragraph_too() {
         [IrInline::Text { value, .. }] if value == "第一篇"
     ));
 }
-
+/// The parser reads a document against a text it canonicalises first —
+/// CRLF folded, a leading BOM dropped — and maps every range it reports
+/// back to the text the caller actually holds. So a CRLF or BOM-prefixed
+/// source publishes ranges just like its plain twin, and each one slices
+/// the notation the author wrote.
 #[test]
-fn spans_are_withheld_when_normalisation_moves_the_bytes() {
-    // 青空文庫 source is historically Shift_JIS + CRLF, and the parser
-    // measures spans against its own LF-folded text. Publishing those
-    // offsets as source offsets would hand a consumer an index two bytes
-    // past where the notation actually starts — here, one that lands
-    // inside a codepoint and panics on slicing. No span is the honest
-    // answer; the LF twin still gets one.
-    const CRLF: &str = "前\r\n\r\n｜青梅《おうめ》へ";
-    const LF: &str = "前\n\n｜青梅《おうめ》へ";
-
-    let crlf_blocks = ir(CRLF);
-    let paragraph = crlf_blocks
-        .iter()
-        .find_map(|b| match b {
-            IrBlock::Paragraph { children, .. } if !aozora_inlines(children).is_empty() => {
-                Some(children.as_slice())
-            }
-            _ => None,
-        })
-        .expect("the ruby still projects");
-    let (span, html) = find_inline_kind(paragraph, "ruby");
-    assert!(span.is_none(), "CRLF input must not report a source span");
-    assert!(
-        html.contains("おうめ"),
-        "the fragment is unaffected: {html}"
-    );
-
-    let lf_blocks = ir(LF);
-    let (lf_span, _) = find_inline_kind(
-        lf_blocks
+fn a_canonicalised_source_still_reports_ranges_into_the_callers_text() {
+    for src in [
+        "前\r\n\r\n｜青梅《おうめ》へ",
+        "\u{feff}｜青梅《おうめ》へ",
+        "前\n\n｜青梅《おうめ》へ",
+    ] {
+        let blocks = ir(src);
+        let paragraph = blocks
             .iter()
             .find_map(|b| match b {
                 IrBlock::Paragraph { children, .. } if !aozora_inlines(children).is_empty() => {
@@ -691,20 +673,18 @@ fn spans_are_withheld_when_normalisation_moves_the_bytes() {
                 }
                 _ => None,
             })
-            .expect("the ruby projects"),
-        "ruby",
-    );
-    assert_eq!(slice(LF, lf_span), "｜青梅《おうめ》");
-}
-
-#[test]
-fn spans_are_withheld_for_a_bom_prefixed_source() {
-    // The BOM case is the quiet one: the offsets stay on codepoint
-    // boundaries, so slicing succeeds and returns three bytes' worth of
-    // the wrong text instead of failing loudly.
-    let blocks = ir("\u{feff}｜青梅《おうめ》へ");
-    let (span, _) = find_inline_kind(first_paragraph_inlines(&blocks), "ruby");
-    assert!(span.is_none(), "BOM input must not report a source span");
+            .unwrap_or_else(|| panic!("the ruby projects for {src:?}"));
+        let (span, html) = find_inline_kind(paragraph, "ruby");
+        assert_eq!(
+            slice(src, span),
+            "｜青梅《おうめ》",
+            "the range must address the caller's own text for {src:?}"
+        );
+        assert!(
+            html.contains("おうめ"),
+            "the fragment is unaffected: {html}"
+        );
+    }
 }
 
 #[test]
@@ -732,17 +712,15 @@ fn render_blocks_to_ir_emits_aozora_block_per_top_level_block() {
 fn streaming_ir_builder_threads_cursor_across_blocks() {
     // Two top-level blocks, each with its own inline sentinel: the cursor
     // must thread so the second block resolves against the second entry.
-    use aozora::{Arena, lex_into_arena};
     use aozora_flavored_markdown::ir::StreamingIrBuilder;
     use comrak::parse_document;
 
     let src = "｜A《a》\n\n｜B《b》";
-    let arena = Arena::new();
-    let lex_out = lex_into_arena(src, &arena);
+    let builder = StreamingIrBuilder::new(src);
     let comrak_arena = comrak::Arena::new();
     let opts = comrak::Options::default();
-    let root = parse_document(&comrak_arena, lex_out.normalized, &opts);
-    let mut builder = StreamingIrBuilder::new(Some(&lex_out), src);
+    let root = parse_document(&comrak_arena, builder.text(), &opts);
+    let mut builder = builder;
     let mut block_iter = root.children();
     let first = builder.walk_block(block_iter.next().expect("first block"));
     let second = builder.walk_block(block_iter.next().expect("second block"));

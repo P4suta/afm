@@ -74,15 +74,14 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Bump the `P4suta/aozora.git` rev pin to a new commit SHA across the
-    /// workspace manifest (the umbrella `aozora` dep) and the cargo-fuzz
-    /// crate in one pass, then refresh `Cargo.lock`. Keeping both pins on
-    /// the same SHA stops a sync from silently leaving the fuzz crate
-    /// behind the workspace.
+    /// Bump the published `aozora` version across the workspace manifest
+    /// (the umbrella `aozora` dep) and the cargo-fuzz crate in one pass,
+    /// then refresh `Cargo.lock`. Keeping both pins on the same version
+    /// stops a sync from silently leaving the fuzz crate behind the
+    /// workspace.
     AozoraBump {
-        /// Full 40-character lowercase hex commit SHA from `P4suta/aozora`'s
-        /// `main` branch (or any other branch you intend to track).
-        sha: String,
+        /// Published `major.minor.patch` version from crates.io.
+        version: String,
     },
     /// Generate (or, with `--check`, drift-check) the release assets bundled
     /// into the dist archives: shell completions and the man page, written
@@ -114,7 +113,7 @@ fn main() -> Result<()> {
             println!("spec-refresh: wrote {n} examples to {}", output.display());
             Ok(())
         }
-        Command::AozoraBump { sha } => aozora_bump(&sha),
+        Command::AozoraBump { version } => aozora_bump(&version),
         Command::GenDistAssets { check } => gen_dist_assets(check),
     }
 }
@@ -658,36 +657,37 @@ fn today_yyyy_mm_dd() -> Result<String> {
         .to_owned())
 }
 
-/// Manifests carrying a `P4suta/aozora.git` rev pin. Post-B1 (PR #43) aozora-flavored-markdown
-/// depends on the single umbrella `aozora` crate — not the old six
-/// internal crates — pinned in the workspace manifest; the
-/// workspace-external cargo-fuzz crate pins the same rev independently.
+/// Manifests carrying an `aozora` version pin. The workspace manifest
+/// declares the umbrella crate for every member; the workspace-external
+/// cargo-fuzz crate declares the same version independently.
 /// `aozora-bump` rewrites both in one pass so a sync can't leave the fuzz
 /// crate behind, then refreshes Cargo.lock. Idempotent: if every pin
-/// already matches the target SHA, nothing is written and `cargo update`
-/// is skipped.
+/// already matches the target version, nothing is written and
+/// `cargo update` is skipped.
 const AOZORA_PINNED_MANIFESTS: [&str; 2] = [
     "Cargo.toml",
     "crates/aozora-flavored-markdown/fuzz/Cargo.toml",
 ];
 
-fn aozora_bump(new_sha: &str) -> Result<()> {
-    // Accept only fully-spelled lowercase hex SHAs — short / mixed-case
-    // SHAs would resolve fine via cargo update but make Cargo.toml diffs
-    // harder to grep and Cargo.lock entries inconsistent.
-    if new_sha.len() != 40
-        || !new_sha
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
-    {
-        bail!("aozora-bump: SHA must be exactly 40 lowercase hex characters, got: {new_sha:?}");
+/// Rewrite the `aozora` version pin in [`AOZORA_PINNED_MANIFESTS`].
+///
+/// The `=` an exact-version requirement carries is preserved, so the fuzz
+/// crate keeps pinning the workspace's version exactly while the workspace
+/// itself stays on a caret requirement.
+fn aozora_pin_pattern() -> regex::Regex {
+    regex::Regex::new(r#"(?m)^(aozora\s*=\s*\{\s*version\s*=\s*"=?)(\d+\.\d+\.\d+)(")"#)
+        .expect("aozora version pattern compiles")
+}
+
+fn aozora_bump(new_version: &str) -> Result<()> {
+    // Accept only a fully-spelled `major.minor.patch` — a bare `0.5` would
+    // resolve fine but leaves the two manifests textually different and the
+    // `verify-version-pins` gate unable to compare them.
+    if !is_semver_triple(new_version) {
+        bail!("aozora-bump: version must be a full major.minor.patch triple, got: {new_version:?}");
     }
 
-    let pattern = regex::Regex::new(
-        r#"(git = "https://github\.com/P4suta/aozora\.git", rev = ")([0-9a-f]{40})(")"#,
-    )
-    .expect("aozora rev pattern compiles");
-
+    let pattern = aozora_pin_pattern();
     let mut total_found = 0_usize;
     let mut rewritten = 0_usize;
     for manifest in AOZORA_PINNED_MANIFESTS {
@@ -699,10 +699,10 @@ fn aozora_bump(new_sha: &str) -> Result<()> {
         let mut already = 0_usize;
         let updated = pattern.replace_all(&original, |caps: &regex::Captures<'_>| {
             found += 1;
-            if &caps[2] == new_sha {
+            if &caps[2] == new_version {
                 already += 1;
             }
-            format!("{}{new_sha}{}", &caps[1], &caps[3])
+            format!("{}{new_version}{}", &caps[1], &caps[3])
         });
 
         // Each manifest pins the umbrella `aozora` exactly once. A
@@ -710,7 +710,7 @@ fn aozora_bump(new_sha: &str) -> Result<()> {
         // than rewrite an unexpected shape and leave Cargo.lock inconsistent.
         if found != 1 {
             bail!(
-                "aozora-bump: expected exactly one `P4suta/aozora.git` rev pin in {}, \
+                "aozora-bump: expected exactly one `aozora` version pin in {}, \
                  found {found}. The aozora dependency may have been refactored — update \
                  `AOZORA_PINNED_MANIFESTS` / the regex in xtask/src/main.rs and re-run.",
                 path.display(),
@@ -721,12 +721,15 @@ fn aozora_bump(new_sha: &str) -> Result<()> {
             fs::write(&path, updated.as_ref())
                 .with_context(|| format!("writing {}", path.display()))?;
             rewritten += 1;
-            println!("aozora-bump: rewrote {} to rev = {new_sha}", path.display());
+            println!(
+                "aozora-bump: rewrote {} to version = {new_version}",
+                path.display()
+            );
         }
     }
 
     if rewritten == 0 {
-        println!("aozora-bump: all {total_found} pins already at {new_sha}; no change.");
+        println!("aozora-bump: all {total_found} pins already at {new_version}; no change.");
         return Ok(());
     }
 
@@ -744,13 +747,64 @@ fn aozora_bump(new_sha: &str) -> Result<()> {
              network issue."
         );
     }
-    println!("aozora-bump: Cargo.lock refreshed against {new_sha}");
+    println!("aozora-bump: Cargo.lock refreshed against {new_version}");
     Ok(())
+}
+
+/// Whether `s` is exactly three dot-separated runs of ASCII digits.
+fn is_semver_triple(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let triple = [parts.next(), parts.next(), parts.next()];
+    parts.next().is_none()
+        && triple.iter().all(|part| {
+            part.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RETIRED_UPSTREAM_PATHS, fold_separators, scan_comments};
+    use super::{
+        RETIRED_UPSTREAM_PATHS, aozora_pin_pattern, fold_separators, is_semver_triple,
+        scan_comments,
+    };
+
+    #[test]
+    fn semver_triple_accepts_a_full_version_and_rejects_the_rest() {
+        assert!(is_semver_triple("0.5.0"));
+        assert!(is_semver_triple("10.20.30"));
+        assert!(!is_semver_triple("0.5"));
+        assert!(!is_semver_triple("0.5.0.1"));
+        assert!(!is_semver_triple("0.5.x"));
+        assert!(!is_semver_triple("0..0"));
+        assert!(!is_semver_triple(""));
+    }
+
+    /// The bump rewrites both manifest spellings — the workspace's caret
+    /// requirement and the fuzz crate's exact one — and preserves the `=`.
+    #[test]
+    fn pin_pattern_rewrites_both_manifest_spellings() {
+        let pattern = aozora_pin_pattern();
+        let workspace = r#"aozora = { version = "0.4.1", default-features = false }"#;
+        let fuzz =
+            r#"aozora                    = { version = "=0.4.1", default-features = false }"#;
+        assert_eq!(
+            pattern.replace_all(workspace, "${1}0.5.0${3}"),
+            r#"aozora = { version = "0.5.0", default-features = false }"#
+        );
+        assert_eq!(
+            pattern.replace_all(fuzz, "${1}0.5.0${3}"),
+            r#"aozora                    = { version = "=0.5.0", default-features = false }"#
+        );
+    }
+
+    /// A sibling crate whose name merely starts with `aozora` must not be
+    /// rewritten — the pattern anchors on the umbrella crate's own line.
+    #[test]
+    fn pin_pattern_leaves_sibling_crates_alone() {
+        let pattern = aozora_pin_pattern();
+        let sibling = "aozora-flavored-markdown = { version = \"0.4.1\", path = \"crates/aozora-flavored-markdown\" }";
+        assert_eq!(pattern.find(sibling), None);
+    }
 
     /// A banned entry that is spelled with a `-`, i.e. one whose intra-doc
     /// spelling differs from its manifest spelling.
