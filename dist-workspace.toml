@@ -15,3 +15,16 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 # and README): pre-generated shell completions and the man page. Regenerate with
 # `just dist-assets` (drift-gated by `just dist-assets-check` in CI).
 include = ["dist/assets/completions", "dist/assets/man"]
+
+# Action refs for the generated `.github/workflows/release.yml`. dist's
+# templates reference floating major tags (`actions/checkout@v6`); this table
+# overrides each ref with an immutable commit, so the release pipeline resolves
+# an exact tree rather than whatever the tag points at on the day it runs. The
+# generator emits these values, so `dist plan`'s drift check stays green — the
+# file is both pinned and drift-free. Bump them by hand (tag -> commit via
+# `gh api repos/<action>/git/ref/tags/<tag> --jq .object.sha`) — Dependabot does
+# not read this file.
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"          # v7.0.1
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"   # v7.0.1
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" # v8.0.1

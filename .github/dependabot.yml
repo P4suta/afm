@@ -19,6 +19,27 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # `.github/workflows/release.yml` is a cargo-dist GENERATED file: its whole
+    # contents come from the generator pinned as `cargo-dist-version` in
+    # `dist-workspace.toml`, and every PR runs `dist plan`, which fails the
+    # build when the committed file differs from what that generator emits. A
+    # Dependabot edit inside it is therefore permanently red (#143 raised
+    # `actions/checkout` v6 → v7 against a generator that emits v6), so the
+    # file is excluded here. Every hand-written workflow stays in scope.
+    #
+    # This is NOT an exemption from the repo's SHA-pinning rule. The action
+    # refs in release.yml are pinned by `[dist.github-action-commits]` in
+    # `dist-workspace.toml`, which overrides each ref with an immutable commit
+    # before the template renders — so the generated file carries commit pins,
+    # not floating major tags, and `dist plan` still agrees with it.
+    #
+    # Caveat: `exclude-paths` is a version-updates-only option. A Dependabot
+    # SECURITY PR can still rewrite release.yml, and it will fail `dist plan`
+    # with `has out of date contents`. Close it; bump the SHA in
+    # `dist-workspace.toml` and re-run `dist generate` instead.
+    # `.github/workflows/release-pins.yml` watches both pins for staleness.
+    exclude-paths:
+      - ".github/workflows/release.yml"
     # Keep SHA pins fresh; human-readable tag comments are updated automatically.
     groups:
       actions-sha-bumps:
