@@ -168,7 +168,7 @@ fn tier_a_holds_for_every_static_fixture() {
 // Property tests
 // ---------------------------------------------------------------------------
 
-fn lexer_is_well_formed(src: &str) -> bool {
+fn parse_is_well_formed(src: &str) -> bool {
     render_with_diag(src, &Options::default())
         .diagnostics
         .is_empty()
@@ -178,21 +178,24 @@ proptest! {
     /// Arbitrary combinations of Aozora triggers must:
     ///
     /// 1. Not panic `render_to_string` — the pipeline must be total.
-    /// 2. Not leak any sentinel character into the rendered HTML for
-    ///    well-formed inputs.
+    /// 2. Not leak any sentinel character into the rendered HTML. A source
+    ///    cannot contribute one of its own (a PUA codepoint an author types
+    ///    is replaced with U+FFFD), so this holds for malformed input too —
+    ///    and malformed input is the interesting half, because the recovery
+    ///    path is where an unresolved construct survives.
     /// 3. For well-formed inputs (matched brackets), not leak `［＃`
     ///    into rendered HTML (Tier-A canary).
     #[test]
     fn render_survives_arbitrary_aozora_shaped_input(src in aozora_fragment(16)) {
         let html = render_to_string(&src);
-        if lexer_is_well_formed(&src) {
-            for s in [sentinels::INLINE, sentinels::BLOCK_LEAF, sentinels::BLOCK_OPEN, sentinels::BLOCK_CLOSE] {
-                prop_assert!(
-                    !html.contains(s),
-                    "sentinel {:?} leaked for src {:?}, html {:?}",
-                    s, src, html,
-                );
-            }
+        for s in [sentinels::INLINE, sentinels::BLOCK_LEAF, sentinels::BLOCK_OPEN, sentinels::BLOCK_CLOSE] {
+            prop_assert!(
+                !html.contains(s),
+                "sentinel {:?} leaked for src {:?}, html {:?}",
+                s, src, html,
+            );
+        }
+        if parse_is_well_formed(&src) {
             prop_assert!(
                 tier_a_holds(&html),
                 "Tier-A leaked for src {:?}, html {:?}",

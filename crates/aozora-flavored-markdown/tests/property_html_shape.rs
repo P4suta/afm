@@ -7,7 +7,7 @@
 //! * [`aozora_fragment`] — balanced and unbalanced mixes of Aozora
 //!   triggers, plus long `-`/`=`/`_` decorative rule rows for Tier H.
 //! * [`pathological_aozora`] — deliberately malformed shapes that
-//!   stress-test the lexer's error path.
+//!   stress-test the parser's error path.
 //! * A combined strategy — `prop_oneof![aozora_fragment, commonmark_adversarial]`
 //!   for "Aozora × CommonMark interaction" coverage.
 //!
@@ -17,19 +17,17 @@
 //!
 //! # What this property does *not* promise
 //!
-//! * Tier B (PUA sentinel leak) fires meaningfully only on sources
-//!   that produced no lexer diagnostics — the lexer allows a user to
-//!   type a literal U+E001, but emits a diagnostic and does not strip
-//!   it, so the sentinel may survive to the output legitimately. The
-//!   property gates on `aozora_lexer::lex(src).diagnostics.is_empty()`
-//!   before calling `check_no_sentinel_leak`.
-//!
-//! * Tier A likewise only applies when the bracket pairing is
-//!   well-formed (per [`aozora_flavored_markdown_test_support::check_no_bare_bracket`]'s
+//! * Tier A only applies when the bracket pairing is well-formed (per
+//!   [`aozora_flavored_markdown_test_support::check_no_bare_bracket`]'s
 //!   own documented contract). Malformed inputs may legitimately leave
-//!   bare `［＃` because the lexer's fallback classifier does not wrap
-//!   them. For those inputs we only assert the predicate does not
-//!   panic.
+//!   bare `［＃` because the fallback classifier does not wrap them. For
+//!   those inputs we only assert the predicate does not panic.
+//!
+//! Tier B is *not* on that list. A source may not contribute a sentinel
+//! of its own — a PUA codepoint an author types is replaced with U+FFFD
+//! before substitution — so a leak is a bug whatever diagnostics the
+//! input raised, and the check runs on every draw, malformed ones
+//! included.
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
@@ -37,39 +35,34 @@ use aozora_flavored_markdown_test_support::config::default_config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
 };
-use aozora_flavored_markdown_test_support::{
-    assert_html_invariants, check_no_bare_bracket, check_no_sentinel_leak,
-};
+use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_bare_bracket};
 use proptest::prelude::*;
 
-/// Whether the lexer raised any diagnostic for `src`. Gates Tier A /
-/// Tier B assertions so malformed-input boundary behaviour does not
-/// sabotage otherwise-valid properties.
-fn lexer_is_well_formed(src: &str) -> bool {
+/// Whether the render raised any diagnostic for `src`. Gates the Tier A
+/// assertion so malformed-input boundary behaviour does not sabotage an
+/// otherwise-valid property.
+fn parse_is_well_formed(src: &str) -> bool {
     render_to_diagnostics(src, &Options::default())
         .diagnostics
         .is_empty()
 }
 
-/// Assert every always-on shape predicate. Tier A / B are conditionally
-/// asserted by the caller because they have input preconditions
-/// documented above. Tier I is gated on
+/// Assert every always-on shape predicate, Tier B among them. Tier A is
+/// asserted by the caller because it has an input precondition documented
+/// above. Tier I is gated on
 /// [`aozora_flavored_markdown_test_support::source_contains_html_entity_literal`]
 /// inside [`assert_html_invariants`].
 fn assert_always_on(html: &str, src: &str) {
     assert_html_invariants(src, html);
 }
 
-/// Assert input-gated predicates (Tier A, Tier B) when the lexer
-/// reports a clean parse.
+/// Assert Tier A, which holds only where the bracket pairing is well-formed.
 fn assert_gated(html: &str, src: &str) {
-    if !lexer_is_well_formed(src) {
+    if !parse_is_well_formed(src) {
         return;
     }
     check_no_bare_bracket(html)
         .unwrap_or_else(|e| panic!("Tier A (bare ［＃ leak) violated for src={src:?}: {e}"));
-    check_no_sentinel_leak(html)
-        .unwrap_or_else(|e| panic!("Tier B (PUA sentinel leak) violated for src={src:?}: {e}"));
 }
 
 proptest! {
@@ -87,10 +80,10 @@ proptest! {
 
     /// Pathological shapes: deep bracket stacking, paired-container
     /// opens without closes, ruby permutations the classifier must
-    /// reject gracefully. These routinely emit lexer diagnostics, so
-    /// Tier A / B are skipped here — the interesting property is that
-    /// the always-on shape invariants hold regardless of how malformed
-    /// the input is.
+    /// reject gracefully. These routinely emit diagnostics, so Tier A is
+    /// skipped here — the interesting property is that the always-on
+    /// invariants, Tier B's "no sentinel survived the recovery path"
+    /// among them, hold regardless of how malformed the input is.
     #[test]
     fn html_shape_invariants_hold_for_pathological_aozora(src in pathological_aozora(6)) {
         let html = render_to_string(&src);

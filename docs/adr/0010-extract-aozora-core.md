@@ -19,6 +19,10 @@ conditions held. Three things made extraction worth doing now:
 
 ## Decision
 
+> The crate names and topology below are as of 2026-04-25. See the **Note** at
+> the end for what `aozora` 0.5.0 curated them into — none of the build-block
+> crates named here is published today.
+
 Extract the parser into a new sibling repo `aozora`, with crates renamed
 `aozora-syntax` / `-lexer` / `-parser` / `-encoding` / `-corpus` / `-test-utils`.
 Rename the remaining `aozora-md-parser` crate to `aozora-flavored-markdown`. History is preserved
@@ -54,8 +58,23 @@ or markdown; the comrak adapter lives in `aozora-flavored-markdown`.
 - ADR-0008 (zero parser hooks) moves to aozora as its foundation ADR; aozora-flavored-markdown keeps
   a redirect stub.
 
+## Note
+
+The crate decomposition named above is **historical**. `aozora` 0.5.0 curated
+its published crates down to `aozora` / `aozora-cli` / `tree-sitter-aozora`;
+the build-block crates this ADR lists are no longer published, and the parser's
+public surface is `parse` / `Document` / `Snapshot` plus a flat projection over
+them. The extraction decision — parser core in its own repo, this workspace
+composing it — is unaffected; what the composition may reach for is settled by
+[ADR-0021](0021-aozora-boundary-is-the-public-surface.md). The three-layer
+topology is two layers now: `aozora-tools` was absorbed by `aozora` and
+archived (see the Note on
+[ADR-0009](0009-authoring-tools-live-in-sibling-repositories.md)).
+
 ## References
 
 - ADR-0001 — fork/vendor comrak. Stays in aozora-flavored-markdown.
 - ADR-0008 — zero-parser-hook pipeline. Moved to aozora.
+- [ADR-0021](0021-aozora-boundary-is-the-public-surface.md) — what this
+  workspace may depend on across that boundary.
 - ADR-0009 — authoring tools in sibling repos.

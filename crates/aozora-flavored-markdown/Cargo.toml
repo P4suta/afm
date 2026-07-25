@@ -15,10 +15,10 @@ categories.workspace   = true
 workspace = true
 
 [dependencies]
-# The single umbrella front door for the aozora parser (its designated
-# public surface). Reached via `aozora::{pipeline, syntax, render,
-# encoding}` + the top-level re-exports — never the internal
-# `publish = false` build-block crates. See the workspace manifest.
+# The sibling 青空文庫記法 parser, reached only through its published
+# surface — `parse` / `Document` / `Snapshot` and the flat projection on
+# top of them (ADR-0021). The crates it is built from are not published,
+# so there is nothing else to depend on. See the workspace manifest.
 aozora    = { workspace = true }
 comrak    = { workspace = true }
 # Used by the IR module to derive Serialize on `IrDocument`. Pulled

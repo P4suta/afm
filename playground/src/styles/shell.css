@@ -787,7 +787,7 @@ body {
  */
 
 .cm-aozora-ruby,
-.cm-aozora-double-ruby {
+.cm-aozora-angle-quote {
   color: var(--aozora-md-pg-accent);
   font-weight: 500;
 }

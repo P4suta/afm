@@ -1,5 +1,11 @@
-# git-cliff config — generates CHANGELOG.md (`just changelog`) and GitHub
-# release notes (release.yml) from Conventional Commits. Shared so both agree.
+# git-cliff config — drafts the unreleased section from Conventional Commits
+# for `just changelog`, which prints it rather than writing CHANGELOG.md.
+#
+# CHANGELOG.md itself is hand-written (Keep a Changelog): a consumer needs to
+# be told what broke and what to do about it, and a commit subject does not
+# say that. The draft is a checklist — "did the hand-written section miss a
+# commit?" — not the file. Release notes are not generated from here either:
+# release.yml is dist-generated and reads CHANGELOG.md directly.
 
 [changelog]
 header = """

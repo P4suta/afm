@@ -52,8 +52,8 @@ explicit_outlives_requirements = "warn"
 # Misc quality gates.
 let_underscore_drop        = "warn"  # `let _ = ...` silently drops Drop types
 keyword_idents_2024        = "warn"  # 2024-edition reserved keywords as idents
-# Kept stricter than aozora on purpose: aozora `allow`s this for an
-# aozora-lexer enum whose largest variant trips the heuristic; aozora-flavored-markdown has no
+# Kept stricter than aozora on purpose: the sibling parser `allow`s this for
+# a token enum whose largest variant trips the heuristic; aozora-flavored-markdown has no
 # such enum, so we keep the `warn` and `Box` large variants if one appears.
 variant_size_differences   = "warn"  # large enum variants — push to `Box`
 ambiguous_negative_literals = "warn" # `-1.pow(2)` precedence traps

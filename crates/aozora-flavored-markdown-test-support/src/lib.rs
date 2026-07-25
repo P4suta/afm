@@ -23,7 +23,7 @@
 //! | Tier | Predicate | Shape forbidden in rendered HTML |
 //! |------|-----------|-----------------------------------|
 //! | A    | [`check_no_bare_bracket`]           | Bare `［＃` outside `aozora-md-directive` wrapper, `<code>` regions excepted (Tier-A canary). |
-//! | B    | [`check_no_sentinel_leak`]          | PUA sentinels U+E001–U+E004 (lexer-internal markers). |
+//! | B    | [`check_no_sentinel_leak`]          | PUA sentinels U+E001–U+E004 (this workspace's own construct markers). |
 //! | C    | [`check_heading_integrity`]         | `<h1>`–`<h6>` bodies must not carry `aozora-md-indent`, `aozora-md-container-indent`, or `aozora-md-directive` tokens. |
 //! | D    | [`check_html_tag_balance`]          | Tags must balance ([`check_well_formed`] returns `Ok`). |
 //! | E    | [`check_directive_wrapper_shape`]  | `aozora-md-directive` wrappers must close, carry `hidden`, and never nest. |
@@ -339,14 +339,17 @@ pub fn check_no_bare_bracket(html: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-/// Tier B — rendered HTML contains no lexer PUA sentinel (U+E001–U+E004).
+/// Tier B — rendered HTML contains no PUA sentinel (U+E001–U+E004).
 ///
-/// **Caveat**: if the source itself contained one of these codepoints,
-/// the lexer's Phase 0 sanitize emits a diagnostic but does not strip
-/// the character, so the sentinel may flow through to the output. This
-/// predicate is therefore meaningful only on sources that produced no
-/// lexer diagnostics. Property tests that feed random input should
-/// gate on an empty `Rendered::diagnostics` before calling.
+/// **Unconditional: no input may legitimately leak one.** A sentinel means
+/// "a construct stood here" only inside this workspace's own substitution.
+/// An author who types U+E001 into a source does not get one back — the
+/// parser reports it *and* overwrites the character with U+FFFD, in a code
+/// span and in running text alike. Every sentinel that reaches the output
+/// was therefore written by the substitution and never resolved, which is a
+/// bug on any input — most of all on one that also produced diagnostics,
+/// because the recovery path is where an unresolved construct is likeliest
+/// to survive. Callers must not gate this predicate on a clean parse.
 ///
 /// # Errors
 ///
@@ -670,6 +673,11 @@ pub fn check_escape_invariants(html: &str) -> Result<(), Violation> {
 /// [`source_contains_html_entity_literal`]: a source carrying entity
 /// literals legitimately produces `&amp;{lt,gt,amp,…};` on output.
 ///
+/// Tier A is the one predicate deliberately left out: a bare `［＃` is
+/// legitimate output for a source whose bracket pairing is malformed, so
+/// its precondition belongs to the caller. Every other tier here holds on
+/// arbitrary bytes, [`check_no_sentinel_leak`] included.
+///
 /// # Panics
 ///
 /// Panics on the first invariant violation. The panic message is
@@ -691,6 +699,9 @@ pub fn assert_html_invariants(src: &str, html: &str) {
     let report = |tier: &str, e: Violation| -> ! {
         panic!("{tier} violated:{}\n  details = {e:?}", context())
     };
+    if let Err(e) = check_no_sentinel_leak(html) {
+        report("Tier B (PUA sentinel leak)", e);
+    }
     if let Err(e) = check_html_tag_balance(html) {
         report("Tier D (tag balance)", e);
     }

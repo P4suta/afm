@@ -289,7 +289,15 @@ impl<'a> AstSplicer<'a, '_> {
                 // Block sentinel surviving into inline context, or
                 // inline-position table mismatch: drop silently.
             } else if ch == '［' && chars.peek() == Some(&'＃') {
-                // Orphan `［＃...］` run the lexer never claimed.
+                // Orphan `［＃...］` run no notation claimed.
+                //
+                // An unclaimed run may still *contain* a claimed construct —
+                // `［＃改［＃「」は大見出し］` is an unclaimed prefix wrapped
+                // around a heading hint — so every sentinel inside the run is
+                // consumed here as well. Copying one through would publish the
+                // codepoint (the run is emitted as literal text) *and* leave
+                // the cursor pointing at a construct the rest of the document
+                // then reads as someone else's.
                 chars.next(); // consume ＃
                 if self.in_heading_depth > 0 {
                     // Heading bodies must satisfy both Tier A (no bare
@@ -302,6 +310,10 @@ impl<'a> AstSplicer<'a, '_> {
                     // heading-hint promotion path (Case 2), not a raw
                     // bracket run that survives lexer parsing.
                     for b in chars.by_ref() {
+                        if is_sentinel_char(b) {
+                            self.cursor.next();
+                            continue;
+                        }
                         if b == '］' {
                             break;
                         }
@@ -310,6 +322,18 @@ impl<'a> AstSplicer<'a, '_> {
                 }
                 let mut bracket_body = String::from("［＃");
                 for b in chars.by_ref() {
+                    if is_sentinel_char(b) {
+                        // The run reaches the reader as the author's own
+                        // bytes, so a construct inside it is restored to the
+                        // source it was written as — the same answer the
+                        // other literal contexts give (`rewrite_literal_context`).
+                        // Its own `］` does not close the run: the run's
+                        // brackets are the ones in the substituted text.
+                        if let Some(literal) = self.cursor.next_literal() {
+                            bracket_body.push_str(literal);
+                        }
+                        continue;
+                    }
                     bracket_body.push(b);
                     if b == '］' {
                         break;

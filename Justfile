@@ -361,11 +361,12 @@ coverage-branch:
 [group('lint')]
 lint: fmt-check clippy typos strict-code comment-discipline
 
-# Comment drift gate. Fails when a `//` / `///` / `//!` comment names a path
-# that used to exist inside the sibling parser but is no longer on its public
-# API (ADR-0021). The compiler catches the same drift in *code*; comments rot
-# silently, so they get their own gate. The banned list lives in
-# `crates/xtask/src/main.rs` (RETIRED_UPSTREAM_PATHS).
+# Comment drift gate. Fails when a Rust comment (`//` / `///` / `//!`) or a
+# TOML manifest comment (`#`) names a path that used to exist inside the
+# sibling parser but is no longer on its public API (ADR-0021). The compiler
+# catches the same drift in *code*; comments rot silently, so they get their
+# own gate. The banned list lives in `crates/xtask/src/main.rs`
+# (RETIRED_UPSTREAM_PATHS).
 [group('lint')]
 comment-discipline:
     {{_dev}} cargo run --package xtask --quiet -- comment-discipline
@@ -729,10 +730,17 @@ spec-refresh:
 adr TITLE:
     {{_dev}} cargo run --package xtask --quiet -- new-adr {{TITLE}}
 
-# Regenerate CHANGELOG.md from Conventional-Commits history (see cliff.toml).
+# Draft the unreleased section from Conventional-Commits history, to stdout.
+#
+# CHANGELOG.md is written by hand, for humans (Keep a Changelog): the entries
+# that matter to a consumer explain what broke and what to do about it, which
+# no commit subject carries. So this prints a draft — one line per commit, in
+# cliff.toml's grouping — to check the hand-written section against before a
+# release. It deliberately does NOT write the file: `-o CHANGELOG.md` would
+# regenerate the whole thing and take every explanation with it.
 [group('docs')]
 changelog:
-    {{_dev}} git-cliff -o CHANGELOG.md
+    {{_dev}} git-cliff --unreleased
 
 # --- release assets ----------------------------------------------------------
 

@@ -40,7 +40,7 @@ pub enum DiagnosticSource {
     Internal,
 }
 
-/// Byte-offset range into the (sanitized) source, end-exclusive.
+/// Byte-offset range into the source text, end-exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +71,7 @@ pub struct Diagnostic {
     pub code: &'static str,
     /// Human-readable message. Not part of the stability contract.
     pub message: String,
-    /// Byte range in the sanitized source.
+    /// Byte range in the source text this crate was handed.
     pub span: Span,
 }
 

@@ -36,17 +36,17 @@ In scope:
 - Crashes, panics, or non-termination on any UTF-8 or Shift_JIS input
   within 10 MiB.
 - HTML-escape bypass in the renderer (the splice surface in
-  `crates/aozora-flavored-markdown/src/ast_splice.rs` and the upstream
-  per-node writer in sibling `aozora-render`), since rendered output
-  is embedded in web pages.
+  `crates/aozora-flavored-markdown/src/ast_splice.rs`, the fragment
+  renderer in `src/fragment.rs`, and the sibling parser's own HTML
+  output), since rendered output is embedded in web pages.
 - Internal PUA sentinel (`U+E001..=U+E004`) leaking into rendered HTML.
-  The lexer collapses each Aozora notation into a sentinel before comrak
-  parses; the splicer must resolve every sentinel — including those that
-  comrak routes into literal contexts (inline code spans, link/image
-  destinations), where the notation renders as its original source rather
-  than interpreted HTML. A surviving sentinel (or a desynced registry
-  cursor that swaps one notation's content for another's) is a bug, gated
-  by the `check_no_sentinel_leak` invariant on clean-lexer input.
+  `src/constructs.rs` replaces each Aozora construct with a sentinel
+  before comrak parses; the splicer must resolve every sentinel —
+  including those that comrak routes into literal contexts (inline code
+  spans, link/image destinations), where the notation renders as its
+  original source rather than interpreted HTML. A surviving sentinel (or
+  a desynced construct cursor that swaps one notation's content for
+  another's) is a bug, gated by the `check_no_sentinel_leak` invariant.
 - CommonMark / GFM conformance regressions that enable a bypass.
 - Integer overflow, out-of-bounds reads (we `#![forbid(unsafe_code)]`
   in our own crates; `upstream/comrak/` is unsafe-free too).
