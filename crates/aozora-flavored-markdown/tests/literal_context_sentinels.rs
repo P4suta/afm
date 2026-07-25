@@ -138,6 +138,53 @@ fn notation_in_link_url_does_not_desync_link_text() {
 // byte offsets — slicing the raw input panicked (out-of-bounds / non-char
 // boundary), a SECURITY-scoped crash on untrusted input.
 // ---------------------------------------------------------------------------
+// Code blocks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ruby_inside_an_indented_code_block_renders_literally() {
+    // A code block is literal markdown for the same reason a code span is.
+    // A fenced block never reaches the splice carrying a sentinel — the
+    // mask hides the triggers inside a fence before the lexer runs
+    // (ADR-0010) — but an indented block is context that mask deliberately
+    // does not reproduce, and comrak reads one out of any four-space line.
+    let html = render_to_string("本文\n\n    ｜青梅《おうめ》\n");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("<pre><code>｜青梅《おうめ》\n</code></pre>"),
+        "the code block must carry the source the author typed, got {html:?}"
+    );
+}
+
+#[test]
+fn a_code_block_reads_the_same_fenced_or_indented() {
+    // Two spellings of the same block, one masked and one spliced. They
+    // reach the reader by different routes and must arrive the same.
+    let fenced = render_to_string("```\n｜青梅《おうめ》\n```\n");
+    let indented = render_to_string("本文\n\n    ｜青梅《おうめ》\n");
+    assert!(
+        indented.ends_with(fenced.trim_end_matches('\n')) || indented.contains(&fenced),
+        "fenced {fenced:?} vs indented {indented:?}"
+    );
+}
+
+#[test]
+fn a_code_block_does_not_desync_the_notation_after_it() {
+    // The block consumes its own construct, so the ruby that follows still
+    // gets its own.
+    let html = render_to_string("本文\n\n    ｜青梅《おうめ》\n\n｜鶴見《つるみ》\n");
+    assert_no_sentinel(&html);
+    assert!(
+        html.contains("<pre><code>｜青梅《おうめ》\n</code></pre>"),
+        "the block keeps its literal, got {html:?}"
+    );
+    assert!(
+        html.contains("<ruby>鶴見<rp>(</rp><rt>つるみ</rt>"),
+        "the ruby after it still renders, got {html:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 
 #[test]
 fn crlf_before_notation_does_not_panic_and_renders() {

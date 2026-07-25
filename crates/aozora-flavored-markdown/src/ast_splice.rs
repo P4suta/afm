@@ -363,15 +363,18 @@ impl<'a, 'src> AstSplicer<'a, '_, 'src> {
         out
     }
 
-    /// Inline code span (`` `…` ``): rewrite sentinels in the code literal
-    /// back to their original source. Inline code is literal markdown, so
-    /// `` `｜青梅《おうめ》` `` must render as the literal text, not as an
-    /// interpreted ruby — and the sentinel must never leak into `<code>`.
+    /// Code span (`` `…` ``) or code block: rewrite sentinels in the
+    /// literal back to their original source. Code is literal markdown, so
+    /// `` `｜青梅《おうめ》` `` must render as the text the author typed,
+    /// not as an interpreted ruby — and the sentinel must never leak into
+    /// `<code>`.
     fn splice_code_literal(&mut self, node: &'a AstNode<'a>, literal: &str) {
         let rewritten = self.rewrite_literal_context(literal);
         let mut data = node.data.borrow_mut();
-        if let NodeValue::Code(code) = &mut data.value {
-            code.literal = rewritten;
+        match &mut data.value {
+            NodeValue::Code(code) => code.literal = rewritten,
+            NodeValue::CodeBlock(code) => code.literal = rewritten,
+            _ => {}
         }
     }
 
@@ -471,8 +474,8 @@ enum DispatchAction {
     /// `［＃` prefix. The captured `String` is the text body, ready
     /// to feed into [`AstSplicer::split_text_node`] without re-borrow.
     TextWith(String),
-    /// Inline code span whose literal carries at least one sentinel. The
-    /// captured `String` is the code literal, fed to
+    /// Code span or code block whose literal carries at least one
+    /// sentinel. The captured `String` is the literal, fed to
     /// [`AstSplicer::splice_code_literal`] which rewrites each sentinel to
     /// its original source.
     CodeWith(String),
@@ -513,10 +516,25 @@ fn classify(value: &NodeValue) -> DispatchAction {
         // (not child text). Recurse into the children first, then rewrite
         // the fields, so cursor consumption matches source order.
         NodeValue::Link(_) | NodeValue::Image(_) => DispatchAction::RecurseLink,
-        NodeValue::CodeBlock(_)
-        | NodeValue::HtmlBlock(_)
-        | NodeValue::HtmlInline(_)
-        | NodeValue::Raw(_) => DispatchAction::Skip,
+        // A code block is literal markdown for the same reason a code
+        // span is. A *fenced* one never carries a sentinel — the mask
+        // hides the triggers inside a fence before the lexer runs
+        // (ADR-0010) — but an *indented* one is context the mask
+        // deliberately does not reproduce (see `crate::code_block_mask`),
+        // and comrak reads one out of any four-space line. A sentinel
+        // that lands there has to be written back as the source the
+        // author typed, or it reaches the reader as a private-use
+        // codepoint (Tier B).
+        NodeValue::CodeBlock(c) => {
+            if c.literal.chars().any(is_sentinel_char) {
+                DispatchAction::CodeWith(c.literal.clone())
+            } else {
+                DispatchAction::Skip
+            }
+        }
+        NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) | NodeValue::Raw(_) => {
+            DispatchAction::Skip
+        }
         _ => DispatchAction::Recurse,
     }
 }

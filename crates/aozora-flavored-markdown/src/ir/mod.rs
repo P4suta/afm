@@ -437,11 +437,11 @@ impl<'t, 'src> IrWalker<'t, 'src> {
             }
             NodeValue::CodeBlock(code) => {
                 let lang = (!code.info.is_empty()).then(|| code.info.clone());
-                let value = code.literal.clone();
+                let literal = code.literal.clone();
                 drop(data);
                 Some(IrBlock::CodeBlock {
                     lang,
-                    value,
+                    value: self.code_block_value(literal),
                     source_line,
                     range,
                 })
@@ -557,6 +557,20 @@ impl<'t, 'src> IrWalker<'t, 'src> {
         }
         self.depth -= 1;
         out
+    }
+
+    /// A code block's text, with any sentinel in it written back to the
+    /// source the author typed.
+    ///
+    /// Literal markdown, like an inline code span: the notation projects as
+    /// its own source and consumes its table entry, so later sentinels stay
+    /// in lockstep with the splice. Only an indented block can reach this —
+    /// a fenced one is masked before the lexer runs (ADR-0010).
+    fn code_block_value(&mut self, literal: String) -> String {
+        if literal.chars().any(is_sentinel_char) {
+            return self.rewrite_literal_context(&literal);
+        }
+        literal
     }
 
     fn emit_inline<'a>(&mut self, node: &'a AstNode<'a>, out: &mut Vec<IrInline>) {
