@@ -1,16 +1,16 @@
 //! Class-contract test between renderer and themes.
 //!
-//! `theme/` ships two CSS themes (`aozora-md-horizontal.css` and
-//! `aozora-md-vertical.css`) whose class selectors must cover every
-//! class token the renderer can emit. Without this contract a renderer
-//! change silently ships unstyled markup.
+//! This crate ships two CSS themes (`theme/aozora-md-horizontal.css` and
+//! `theme/aozora-md-vertical.css`, published as `theme::HORIZONTAL_CSS` /
+//! `theme::VERTICAL_CSS` behind the `theme` feature) whose class selectors
+//! must cover every class token the renderer can emit — and cover nothing
+//! else. Without this contract a renderer change silently ships unstyled
+//! markup, or leaves a rule behind for a class that has been renamed away.
 //!
 //! `AOZORA_MD_CLASSES` is derived from the parser's own `AOZORA_CLASSES`
-//! (ADR-0011), so the contract cannot drift from what the renderer emits.
-//! What can drift is the *themes*: a class the parser grows arrives here
-//! with no CSS behind it. `UNSTYLED_CLASSES` names the ones this repo has
-//! not styled yet (the ADR-0020 follow-up), and the tests below hold that
-//! list to shrinking only.
+//! (ADR-0011), so the contract cannot drift from what the renderer emits;
+//! the themes are what can drift, in either direction, and the two sweeps
+//! below pin both.
 
 use core::str;
 use std::collections::HashSet;
@@ -18,17 +18,22 @@ use std::fs;
 use std::path::PathBuf;
 
 use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown_test_support::{
-    AOZORA_MD_CLASSES, UNSTYLED_CLASSES, check_css_class_contract, styled_classes,
-};
+use aozora_flavored_markdown::{AOZORA_MD_CLASSES, is_contract_class};
+use aozora_flavored_markdown_test_support::check_css_class_contract;
 
-/// Absolute path to one of the repo-root `theme/` CSS files. Resolving
-/// via `CARGO_MANIFEST_DIR` keeps the test stable regardless of the
-/// runner's working directory.
+/// Classes the themes define that the renderer never emits: the host-page
+/// opt-in root the themes scope every other rule under. Kept as an explicit
+/// list so a stale selector cannot hide behind it.
+const THEME_ONLY_CLASSES: &[&str] = &["aozora-md-root"];
+
+/// The two shipped themes, by file name.
+const THEMES: &[&str] = &["aozora-md-horizontal.css", "aozora-md-vertical.css"];
+
+/// Absolute path to one of this crate's `theme/` CSS files. Resolving via
+/// `CARGO_MANIFEST_DIR` keeps the test stable regardless of the runner's
+/// working directory, and reads the same bytes the `theme` feature embeds.
 fn theme_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/aozora-flavored-markdown → crates/
-    p.pop(); // crates/ → repo root
     p.push("theme");
     p.push(name);
     p
@@ -66,18 +71,37 @@ fn collect_class_selectors(css: &str) -> HashSet<String> {
     out
 }
 
-/// The `.aozora-md-…` selectors both shipped themes define.
+/// The `.aozora-md-…` selectors one shipped theme defines.
 fn theme_selectors(name: &str) -> HashSet<String> {
     let css = fs::read_to_string(theme_path(name))
-        .unwrap_or_else(|_| panic!("{name} must exist under theme/"));
+        .unwrap_or_else(|_| panic!("{name} must exist under this crate's theme/"));
     collect_class_selectors(&css)
 }
 
+/// Whether a selector a theme defines is one it is allowed to define: an
+/// emitted class exactly, a numeric modifier of an open-ended family
+/// (`aozora-md-indent-2` for the `aozora-md-indent` stem), or the themes'
+/// own opt-in root.
+fn is_theme_selector(class: &str) -> bool {
+    if is_contract_class(class) || THEME_ONLY_CLASSES.contains(&class) {
+        return true;
+    }
+    match class.rsplit_once('-') {
+        Some((stem, suffix)) => {
+            !suffix.is_empty()
+                && suffix.bytes().all(|b| b.is_ascii_digit())
+                && is_contract_class(stem)
+        }
+        None => false,
+    }
+}
+
 #[test]
-fn every_styled_class_has_a_horizontal_theme_rule() {
+fn every_class_has_a_horizontal_theme_rule() {
     let selectors = theme_selectors("aozora-md-horizontal.css");
-    let missing: Vec<&str> = styled_classes()
-        .into_iter()
+    let missing: Vec<&str> = AOZORA_MD_CLASSES
+        .iter()
+        .map(String::as_str)
         .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
@@ -87,10 +111,11 @@ fn every_styled_class_has_a_horizontal_theme_rule() {
 }
 
 #[test]
-fn every_styled_class_has_a_vertical_theme_rule() {
+fn every_class_has_a_vertical_theme_rule() {
     let selectors = theme_selectors("aozora-md-vertical.css");
-    let missing: Vec<&str> = styled_classes()
-        .into_iter()
+    let missing: Vec<&str> = AOZORA_MD_CLASSES
+        .iter()
+        .map(String::as_str)
         .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
@@ -100,37 +125,58 @@ fn every_styled_class_has_a_vertical_theme_rule() {
 }
 
 #[test]
-fn the_unstyled_backlog_only_shrinks() {
-    // An entry that turns out to be styled has to leave the list, or the
-    // list stops meaning what it says and the coverage tests above stop
-    // covering it.
+fn the_themes_style_nothing_outside_the_contract() {
+    // The other half of the drift gate: a class the parser drops or renames
+    // leaves its rule behind, styling markup that is never emitted again.
+    // Without this sweep only *added* classes are caught.
+    for theme in THEMES {
+        let stale: Vec<String> = theme_selectors(theme)
+            .into_iter()
+            .filter(|class| !is_theme_selector(class))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{theme} styles classes the renderer cannot emit — drop them: {stale:?}"
+        );
+    }
+}
+
+/// Both themes define the same class set, so a host can swap one for the
+/// other without touching its markup.
+#[test]
+fn the_two_themes_define_the_same_classes() {
     let horizontal = theme_selectors("aozora-md-horizontal.css");
     let vertical = theme_selectors("aozora-md-vertical.css");
-    let styled: Vec<&str> = UNSTYLED_CLASSES
-        .iter()
-        .copied()
-        .filter(|c| horizontal.contains(*c) && vertical.contains(*c))
+    let mut only_horizontal: Vec<&str> = horizontal
+        .difference(&vertical)
+        .map(String::as_str)
         .collect();
+    let mut only_vertical: Vec<&str> = vertical
+        .difference(&horizontal)
+        .map(String::as_str)
+        .collect();
+    only_horizontal.sort_unstable();
+    only_vertical.sort_unstable();
     assert!(
-        styled.is_empty(),
-        "UNSTYLED_CLASSES entries both themes already style — drop them: {styled:?}"
+        only_horizontal.is_empty() && only_vertical.is_empty(),
+        "the themes disagree on their class set\n  horizontal only: {only_horizontal:?}\n  vertical only:   {only_vertical:?}"
     );
 }
 
+/// The embedded constants and the editable files are the same bytes — the
+/// `theme` feature ships what a contributor edits, not a stale copy.
+#[cfg(feature = "theme")]
 #[test]
-fn the_unstyled_backlog_names_real_classes() {
-    // A stale entry would silently exempt nothing while looking like work
-    // that is still owed.
-    let contract: HashSet<&str> = AOZORA_MD_CLASSES.iter().map(String::as_str).collect();
-    let unknown: Vec<&str> = UNSTYLED_CLASSES
-        .iter()
-        .copied()
-        .filter(|c| !contract.contains(*c))
-        .collect();
-    assert!(
-        unknown.is_empty(),
-        "UNSTYLED_CLASSES entries the renderer cannot emit — drop them: {unknown:?}"
-    );
+fn the_embedded_themes_are_the_theme_files() {
+    use aozora_flavored_markdown::theme;
+
+    for (name, embedded) in [
+        ("aozora-md-horizontal.css", theme::HORIZONTAL_CSS),
+        ("aozora-md-vertical.css", theme::VERTICAL_CSS),
+    ] {
+        let on_disk = fs::read_to_string(theme_path(name)).expect("theme file must exist");
+        assert_eq!(on_disk, embedded, "{name} differs from its embedded const");
+    }
 }
 
 #[test]
@@ -146,6 +192,16 @@ fn the_contract_is_the_parsers_own_list_rebranded() {
     for class in AOZORA_MD_CLASSES.iter() {
         assert!(seen.insert(class), "duplicate entry: {class}");
     }
+}
+
+#[test]
+fn contract_membership_is_exact() {
+    // The public predicate answers exact spelling only: the numeric
+    // variants of an open-ended family are recognised by their stem, which
+    // is what `is_theme_selector` above (and the Tier G predicate) rely on.
+    assert!(is_contract_class("aozora-md-indent"));
+    assert!(!is_contract_class("aozora-md-indent-2"));
+    assert!(!is_contract_class("aozora-indent"));
 }
 
 #[test]
@@ -171,15 +227,15 @@ fn collect_class_selectors_tolerates_trailing_hyphen() {
 // ---------------------------------------------------------------------------
 // Render-direction contract: construct → aozora-md-* class → AOZORA_MD_CLASSES
 //
-// The theme tests above prove the styled classes ⊆ CSS. The test below
-// closes the other half of the loop: every aozora-md-* class a known
-// construct emits is recognised by the contract — including the classes
+// The theme tests above prove the emitted classes ⊆ CSS ⊆ the contract. The
+// test below closes the other half of the loop: every aozora-md-* class a
+// known construct emits is recognised by the contract — including the classes
 // this crate authors itself (an orphan bracket's `aozora-md-directive`
 // wrapper) and the family-suffix variants the parser composes at render
 // time (`aozora-md-indent-2`), neither of which appears in the derived
 // list verbatim.
 // Sources are copied verbatim from existing passing tests / the sibling
-// renderer's own tests at the pinned SHA — none authored from memory.
+// renderer's own tests at the pinned version — none authored from memory.
 // ---------------------------------------------------------------------------
 
 /// One verified source per class-emitting aozora construct.
@@ -192,7 +248,7 @@ const RENDER_CORPUS: &[(&str, &str)] = &[
     ("kaeriten", "学［＃二、レ点］而時習之"),
     ("unknown annotation", "前［＃ほげふが］後"),
     ("page break", "前\n\n［＃改ページ］\n\n後"),
-    ("section break (choho)", "前\n\n［＃改丁］\n\n後"),
+    ("section break (kaicho)", "前\n\n［＃改丁］\n\n後"),
     ("indent leaf", "前［＃地から１字下げ］後"),
     ("align-end leaf", "前［＃地付き］末尾"),
     (

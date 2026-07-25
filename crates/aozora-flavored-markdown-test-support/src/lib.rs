@@ -57,148 +57,22 @@
 //! so they stay out of the production crate's type-check / lint / `cargo doc`
 //! / coverage surface.
 //!
-//! [`AOZORA_MD_CLASSES`]: self::AOZORA_MD_CLASSES
+//! [`AOZORA_MD_CLASSES`]: aozora_flavored_markdown::AOZORA_MD_CLASSES
 
 #![forbid(unsafe_code)]
 
 pub mod config;
 pub mod generators;
 
-use aozora_flavored_markdown::sentinels;
+use aozora_flavored_markdown::{is_contract_class, sentinels};
 use core::error::Error;
 use core::fmt;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::LazyLock;
-
-/// The complete `aozora-md-*` CSS-class contract the renderer can emit.
-///
-/// Derived from the parser's own `AOZORA_CLASSES` rather than written out,
-/// because under ADR-0011 the two lists *are* the same list: this crate's
-/// HTML is the parser's HTML with the brand rewritten, so a class exists
-/// here exactly when it exists there.
-///
-/// A hand-kept copy drifts silently at every upstream bump, and the Tier G
-/// predicate that reads it is asserted by the fuzz targets and the corpus
-/// sweep — so drift surfaces as a panic on real input rather than as a
-/// failing contract test. Deriving removes the failure mode instead of
-/// re-checking for it.
-pub static AOZORA_MD_CLASSES: LazyLock<Vec<String>> = LazyLock::new(|| {
-    aozora::AOZORA_CLASSES
-        .iter()
-        .map(|class| {
-            class
-                .strip_prefix(BRAND)
-                .map_or_else(|| (*class).to_owned(), |stem| format!("{REBRAND}{stem}"))
-        })
-        .collect()
-});
 
 /// The class a heading the notation asked for carries, marking it as the
 /// parser's own markup rather than a heading this crate composed.
 const AOZORA_MD_HEADING: &str = "aozora-md-heading";
-
-/// The parser's brand (ADR-0011).
-const BRAND: &str = "aozora-";
-/// This crate's brand.
-const REBRAND: &str = "aozora-md-";
-
-/// Classes in [`AOZORA_MD_CLASSES`] the shipped themes do not style yet —
-/// the 青空文庫 v0.5.0 vocabulary this repo has not written CSS for.
-///
-/// This is the ADR-0020 follow-up work list, enumerated so that it is
-/// visible and so that it can only shrink: the class-contract test fails if
-/// an entry here turns out to be styled after all, and a class that is in
-/// neither the themes nor this list fails the coverage test. Emptying it
-/// deletes the constant.
-pub const UNSTYLED_CLASSES: &[&str] = &[
-    "aozora-md-accent",
-    "aozora-md-accent-dot",
-    "aozora-md-angle-quote",
-    "aozora-md-bouten-batsu",
-    "aozora-md-bouten-bosen",
-    "aozora-md-bouten-both",
-    "aozora-md-bouten-hasen",
-    "aozora-md-bouten-kurosankaku",
-    "aozora-md-bouten-kusarisen",
-    "aozora-md-bouten-maru",
-    "aozora-md-bouten-namisen",
-    "aozora-md-bouten-nijubosen",
-    "aozora-md-bouten-nijumaru",
-    "aozora-md-bouten-shirogoma",
-    "aozora-md-bouten-shiromaru",
-    "aozora-md-bouten-shirosankaku",
-    "aozora-md-bunsu",
-    "aozora-md-caption",
-    "aozora-md-center",
-    "aozora-md-container-center",
-    "aozora-md-container-columns",
-    "aozora-md-container-font-larger",
-    "aozora-md-container-font-smaller",
-    "aozora-md-container-futoji",
-    "aozora-md-container-goshikku",
-    "aozora-md-container-line-kumi",
-    "aozora-md-container-line-width",
-    "aozora-md-container-shatai",
-    "aozora-md-container-table",
-    "aozora-md-container-wrap-indent",
-    "aozora-md-container-yokogumi",
-    "aozora-md-editor-note",
-    "aozora-md-enclosure-circle",
-    "aozora-md-enclosure-circle-dotted",
-    "aozora-md-enclosure-double-rule",
-    "aozora-md-font-extra-large",
-    "aozora-md-font-large",
-    "aozora-md-font-larger",
-    "aozora-md-font-medium",
-    "aozora-md-font-small",
-    "aozora-md-font-smaller",
-    "aozora-md-futoji",
-    "aozora-md-goshikku",
-    "aozora-md-heading",
-    "aozora-md-heading-large",
-    "aozora-md-heading-medium",
-    "aozora-md-heading-same-line",
-    "aozora-md-heading-small",
-    "aozora-md-heading-window",
-    "aozora-md-keigakomi-box",
-    "aozora-md-keigakomi-inline",
-    "aozora-md-kogaki-left",
-    "aozora-md-kogaki-right",
-    "aozora-md-line-font-extra-large",
-    "aozora-md-line-font-large",
-    "aozora-md-line-font-medium",
-    "aozora-md-line-font-small",
-    "aozora-md-line-futoji",
-    "aozora-md-line-goshikku",
-    "aozora-md-margin-note",
-    "aozora-md-ruby-left",
-    "aozora-md-ruby-note",
-    "aozora-md-section-break-kaicho",
-    "aozora-md-section-break-kaidan",
-    "aozora-md-section-break-kaimihiraki",
-    "aozora-md-shatai",
-    "aozora-md-shitatsuki",
-    "aozora-md-uwatsuki",
-    "aozora-md-yokogumi",
-];
-
-/// The classes the shipped themes are required to style: everything the
-/// renderer emits, less the [`UNSTYLED_CLASSES`] backlog.
-#[must_use]
-pub fn styled_classes() -> Vec<&'static str> {
-    AOZORA_MD_CLASSES
-        .iter()
-        .map(String::as_str)
-        .filter(|class| !UNSTYLED_CLASSES.contains(class))
-        .collect()
-}
-
-/// Whether `class` is a class the renderer can emit, exactly as spelled.
-#[must_use]
-pub fn is_contract_class(class: &str) -> bool {
-    AOZORA_MD_CLASSES.iter().any(|known| known == class)
-}
 
 // ---------------------------------------------------------------------------
 // Rendered-HTML post-processing
@@ -341,7 +215,8 @@ pub enum Violation {
         first_offset: usize,
         snippet: String,
     },
-    /// Tier G — an `aozora-md-*` class token is not in [`AOZORA_MD_CLASSES`].
+    /// Tier G — an `aozora-md-*` class token is not in the library's
+    /// [`AOZORA_MD_CLASSES`](aozora_flavored_markdown::AOZORA_MD_CLASSES).
     UnknownCssClass { class: String, snippet: String },
     /// Tier I — a double-encoded HTML entity (e.g. `&amp;lt;`) slipped in.
     DoubleEncodedEntity { snippet: String },
@@ -713,8 +588,9 @@ pub fn check_no_xss_marker(html: &str) -> Result<(), Violation> {
 
 /// Tier G — every `aozora-md-*` class token is recognised.
 ///
-/// A class token is recognised when it is either a direct entry in
-/// [`AOZORA_MD_CLASSES`] or of the form `aozora-md-X-N` where `aozora-md-X` is in the
+/// A class token is recognised when it is either a direct entry in the
+/// library's [`AOZORA_MD_CLASSES`](aozora_flavored_markdown::AOZORA_MD_CLASSES)
+/// or of the form `aozora-md-X-N` where `aozora-md-X` is in the
 /// list and `N` is a non-negative integer (covers the numeric-suffix
 /// modifier classes `aozora-md-indent-N`, `aozora-md-align-end-N`,
 /// `aozora-md-container-indent-N`).
@@ -1125,9 +1001,9 @@ fn collect_class_tokens(html: &str) -> HashSet<String> {
     out
 }
 
-/// Accept a class token when it is either directly in [`AOZORA_MD_CLASSES`]
-/// or of the form `<listed-base>-N` where `N` is a non-negative
-/// decimal integer.
+/// Accept a class token when it is either directly in the library's
+/// [`AOZORA_MD_CLASSES`](aozora_flavored_markdown::AOZORA_MD_CLASSES) or of
+/// the form `<listed-base>-N` where `N` is a non-negative decimal integer.
 fn is_recognised_class(class: &str) -> bool {
     if is_contract_class(class) {
         return true;

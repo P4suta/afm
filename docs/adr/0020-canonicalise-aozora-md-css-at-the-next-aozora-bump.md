@@ -1,16 +1,33 @@
 # 0020. Canonicalise the aozora-md CSS at the next aozora bump
 
-- Status: proposed (scheduled — executed in the aozora 0.5.0 follow-through, PR7)
+- Status: accepted (executed 2026-07-25 in the aozora 0.5.0 follow-through, PR7)
 - Date: 2026-06-22
 - Deciders: @P4suta
 - Tags: architecture, epub, css, deferred
 
-> **Scheduling note (2026-07-25):** the "next aozora bump" is 0.5.0. Steps 1–3
-> below land in PR7 of the 0.5.0 follow-through (see [ADR-0021](0021-aozora-boundary-is-the-public-surface.md));
-> `AOZORA_CLASSES` there grew from 19 to 80+ entries and includes the
+> **Execution note (2026-07-25):** the "next aozora bump" was 0.5.0, where
+> `AOZORA_CLASSES` grew from 19 to 91 entries and carried the
 > `aozora-double-ruby` → `aozora-angle-quote` rename this ADR anticipated.
-> Step 4 is already done: the mdbook site was retired and the canonical themes
-> now live at the repo-root `theme/`.
+> All four steps have landed (see
+> [ADR-0021](0021-aozora-boundary-is-the-public-surface.md) for the boundary
+> they sit on):
+>
+> 1. `AOZORA_MD_CLASSES` (+ `is_contract_class`) is public API of
+>    `aozora-flavored-markdown`, derived from the parser's list.
+> 2. The default-off `theme` feature publishes the two stylesheets as
+>    `theme::HORIZONTAL_CSS` / `theme::VERTICAL_CSS`.
+> 3. `aozora-flavored-markdown-epub` enables that feature and its vendored
+>    `assets/*.css` are gone.
+> 4. The canonical themes moved from the repo-root `theme/` into
+>    `crates/aozora-flavored-markdown/theme/` — the same single canonical
+>    pair, relocated because `include_str!` reaching outside a crate's own
+>    directory is not bundled by `cargo publish` (the reason step 3 needs
+>    them inside the library crate at all).
+>
+> The drift gate is now two-directional: `tests/css_class_contract.rs` fails
+> both on a class no theme styles and on a theme rule for a class the
+> renderer cannot emit, so the interim `UNSTYLED_CLASSES` backlog was
+> emptied and deleted.
 
 ## Context
 
@@ -55,7 +72,8 @@ Defer CSS canonicalisation to the next `aozora` dependency bump. At that bump:
 3. Have `aozora-flavored-markdown-epub` (and any future PDF crate) enable
    `features = ["theme"]` and embed the consts, deleting its vendored
    `assets/*.css` copy.
-4. Keep the repo-root `theme/` as that same canonical source (done).
+4. Keep one canonical pair of theme files as that source — living inside the
+   library crate, so `cargo publish` bundles what the `theme` feature embeds.
 
 Until then (against published `aozora` 0.4.1), the EPUB crate keeps its vendored
 CSS copy — necessary for publishability regardless — guarded by a theme-coverage
@@ -66,10 +84,29 @@ maintenance-burden cleanup, not a correctness gap.
 
 ## Consequences
 
-- One pre-existing CSS duplication remains until the bump, with no silent drift
+- One pre-existing CSS duplication remained until the bump, with no silent drift
   (the coverage test fires on a class the themes do not style).
-- The bump becomes the single point where the rename, the public class contract,
-  and the `theme` feature land together — no double work.
+- The bump became the single point where the rename, the public class contract,
+  and the `theme` feature landed together — no double work.
+- The class contract is now public API: adding, renaming or removing an
+  `aozora-md-*` class is a semver-visible change to this crate, and the CSS
+  that answers it ships from the same crate.
+- **The gate binds a lockfile, not a version range.** `AOZORA_MD_CLASSES` is
+  derived at compile time from whichever `aozora` cargo resolves, and the
+  dependency is a caret range (`aozora = "0.5.0"`). A semver-compatible
+  upstream release that adds a class therefore reaches a downstream build's
+  HTML — the contract, the rewrite and the renderer all follow it — while the
+  bundled `theme::{HORIZONTAL_CSS, VERTICAL_CSS}` have no rule for it, so that
+  class ships unstyled. This repo's CI stays green throughout, because its own
+  lockfile still resolves the version the themes were written against; the
+  sweep turns red only when a maintainer updates the lock. That is the deal
+  being accepted, not an oversight: pinning `aozora` exactly under the `theme`
+  feature would force every consumer of this crate onto one patch release of
+  the parser to get its stylesheets, which costs more than an unstyled class
+  in the window before the next bump. The mitigation is release sequencing —
+  both crates have the same author, and an `AOZORA_CLASSES` addition upstream
+  is the signal to bump here. `theme`'s module documentation says so where a
+  downstream reader will meet it.
 
 ## Alternatives considered
 

@@ -24,6 +24,11 @@
 //! would make this crate a second owner of the notation, and every notation
 //! the parser grew would silently render as something else here.
 
+// The two brands live next to the contract they define — the published
+// `AOZORA_MD_CLASSES` is the parser's own list under the rewritten brand —
+// so the rewrite below cannot be changed without the contract following it.
+use crate::classes::{BRAND, REBRAND};
+
 /// The wrapper the renderer puts around a document whose whole content is
 /// inline. The pair is the one HTML shape this crate reads.
 const PARAGRAPH_OPEN: &str = "<p>";
@@ -31,10 +36,6 @@ const PARAGRAPH_OPEN: &str = "<p>";
 const PARAGRAPH_CLOSE: &str = "</p>";
 /// Start of the one attribute whose value carries the parser's brand.
 const CLASS_ATTRIBUTE: &str = "class=\"";
-/// The parser's brand, and this crate's (ADR-0011).
-const BRAND: &str = "aozora-";
-/// This crate's brand.
-const REBRAND: &str = "aozora-md-";
 
 /// The fragment `snapshot` renders to, where `snapshot` is the parser's
 /// reading of exactly one construct's source run.

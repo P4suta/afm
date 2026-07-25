@@ -69,10 +69,11 @@ the same reversal for this repo.)
   still publishes to crates.io as an ordinary library/binary.
 - Mixed versions now live in one workspace (0.4.x parser line + 0.1.x EPUB
   line). Release tooling and tag schemes must account for per-package versions.
-- The theme-coverage test now consumes `AOZORA_MD_CLASSES` from
-  `aozora-flavored-markdown-test-support` (a dev-dep) instead of a hand-copied
+- The theme-coverage test consumes `AOZORA_MD_CLASSES` instead of a hand-copied
   list, so an upstream class change fails the EPUB build automatically. Full CSS
-  canonicalisation is deferred to [ADR-0020](0020-canonicalise-aozora-md-css-at-the-next-aozora-bump.md).
+  canonicalisation followed in [ADR-0020](0020-canonicalise-aozora-md-css-at-the-next-aozora-bump.md):
+  the generator no longer vendors the themes at all — it enables the renderer's
+  `theme` feature and bundles the stylesheets that crate publishes.
 
 ## Alternatives considered
 

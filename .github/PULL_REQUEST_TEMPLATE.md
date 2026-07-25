@@ -27,9 +27,9 @@
       [`P4suta/aozora`](https://github.com/P4suta/aozora) repo first
       (ADR-0010); aozora-md-side follow-up is usually a one-line mapping in
       `aozora_flavored_markdown::ir` plus a test.
-- [ ] If this adds a renderer-emitted class: updated
-      `aozora-flavored-markdown-test-support`'s `AOZORA_MD_CLASSES` and both
-      `theme/` files (`aozora-md-horizontal.css` / `aozora-md-vertical.css`).
+- [ ] If this changes the renderer-emitted class set: styled it in both
+      `crates/aozora-flavored-markdown/theme/` files (`aozora-md-horizontal.css`
+      / `aozora-md-vertical.css`). `AOZORA_MD_CLASSES` derives itself.
 
 ## Related
 

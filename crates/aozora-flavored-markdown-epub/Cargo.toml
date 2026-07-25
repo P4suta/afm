@@ -16,7 +16,11 @@ categories    = ["text-processing"]
 workspace = true
 
 [dependencies]
-aozora-flavored-markdown = { workspace = true }
+# `theme`: the canonical `aozora-md-*` stylesheets as `pub const` strings.
+# The crate that emits the classes owns their CSS, so the EPUB bundles it
+# through a normal crate dependency instead of vendoring a copy that has to
+# track the class contract by hand (ADR-0020).
+aozora-flavored-markdown = { workspace = true, features = ["theme"] }
 aozora                   = { workspace = true }
 miette          = { workspace = true }
 thiserror       = { workspace = true }
@@ -28,10 +32,6 @@ uuid            = { workspace = true }
 chrono          = { workspace = true }
 
 [dev-dependencies]
-# AOZORA_MD_CLASSES: the renderer's class contract, so the theme-coverage
-# test tracks upstream automatically instead of a hand-copied list. Path-only
-# dev-dep (publish = false upstream), same pattern as the lib crate (ADR-0015).
-aozora-flavored-markdown-test-support = { workspace = true }
 insta             = { workspace = true }
 tempfile          = { workspace = true }
 zip               = { workspace = true }

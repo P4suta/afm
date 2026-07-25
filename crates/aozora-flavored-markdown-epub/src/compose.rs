@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::io::{self, Cursor, Write};
 
+use aozora_flavored_markdown::theme;
 use chrono::{DateTime, Utc};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::writer::Writer;
@@ -69,17 +70,18 @@ pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Resul
         })
         .collect();
 
-    // The theme files are writing-mode specific (vertical sets
+    // The themes are writing-mode specific (vertical sets
     // `writing-mode: vertical-rl` on the root); bundle the one matching
     // the book and expose it under a single stable name so the XHTML
-    // link stays writing-mode agnostic.
-    let css: &[u8] = match manuscript.metadata.writing_mode {
-        WritingMode::Horizontal => include_bytes!("../assets/aozora-md-horizontal.css"),
-        WritingMode::Vertical => include_bytes!("../assets/aozora-md-vertical.css"),
+    // link stays writing-mode agnostic. Both come from the renderer's
+    // `theme` feature, which owns the class contract they style.
+    let css: &str = match manuscript.metadata.writing_mode {
+        WritingMode::Horizontal => theme::HORIZONTAL_CSS,
+        WritingMode::Vertical => theme::VERTICAL_CSS,
     };
     let assets = vec![NamedFile {
         path: "OEBPS/css/aozora-md.css".to_owned(),
-        contents: css.to_vec(),
+        contents: css.as_bytes().to_vec(),
     }];
 
     Ok(Bundle {

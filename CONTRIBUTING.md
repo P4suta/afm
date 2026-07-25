@@ -179,11 +179,13 @@ Most aozora-md-side changes are one of:
   `classify_paragraph`. Streaming-mode behaviour goes through
   `StreamingIrBuilder`. Add tests in
   `crates/aozora-flavored-markdown/tests/ir_aozora.rs`.
-- **CSS class contract drift** — when the sibling renderer adds a
-  new `aozora-*` class, update
-  `aozora-flavored-markdown-test-support`'s `AOZORA_MD_CLASSES` (the brand
-  is rewritten to `aozora-md-*` per ADR-0011) and the corresponding rule
-  in `theme/aozora-md-{horizontal,vertical}.css`.
+- **CSS class contract drift** — `AOZORA_MD_CLASSES` is derived from the
+  sibling renderer's own published list (the brand is rewritten to
+  `aozora-md-*` per ADR-0011), so a class it adds, renames or drops needs
+  no edit there. What it does need is a matching rule in both
+  `crates/aozora-flavored-markdown/theme/aozora-md-{horizontal,vertical}.css`;
+  `tests/css_class_contract.rs` fails until the themes and the contract
+  agree in both directions.
 - **Public API drift** — `Options::default` defaults, new
   entry points, diagnostic shape. Lives in
   `crates/aozora-flavored-markdown/src/lib.rs`. Bumping the IR schema is a
