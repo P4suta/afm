@@ -281,6 +281,23 @@ const UNSCANNED_DIRS: &[&str] = &[
     ".vite",
 ];
 
+// The comment on a line: the one that opens it, or the one that trails the
+// code on it.
+//
+// Requiring the marker at the *start* left the trailing form unscanned, and
+// the trailing form is exactly where a rule records its own justification —
+// the reason a lint is set the way it is sits at the end of the line that sets
+// it. One such reason named a crate this list bans and outlived it, so the
+// lint it justified stayed off and the drift it was hiding stayed invisible.
+//
+// Only the comment portion is searched, so a retired name in real code is
+// still the compiler's business rather than this gate's. The split is textual:
+// a `//` inside a string literal reads as a comment opener, which costs a
+// false positive only when a retired name follows it on the same line.
+fn comment_on<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    line.find(marker).map(|at| &line[at..])
+}
+
 /// Return every comment line in `src` that names a retired upstream path.
 ///
 /// `marker` is the file kind's comment opener, per [`SCANNED_FILES`]; for
@@ -296,10 +313,10 @@ fn scan_comments(src: &str, marker: &str) -> Vec<Violation> {
     let mut out = Vec::new();
     for (idx, raw) in src.lines().enumerate() {
         let trimmed = raw.trim_start();
-        if !trimmed.starts_with(marker) {
+        let Some(comment) = comment_on(trimmed, marker) else {
             continue;
-        }
-        let folded = fold_separators(trimmed);
+        };
+        let folded = fold_separators(comment);
         for (folded_needle, needle, why) in &banned {
             if folded.contains(folded_needle.as_str()) {
                 out.push(Violation {
@@ -1177,12 +1194,47 @@ mod tests {
 
     #[test]
     fn a_manifest_key_is_not_a_manifest_comment() {
-        // TOML has no line marker on real content, so only a leading `#`
-        // counts — a dependency actually named after a retired crate would be
-        // the compiler's problem, not this gate's.
+        // A line with no `#` on it has no comment on it, wherever the marker
+        // is allowed to sit — a dependency actually named after a retired
+        // crate would be the compiler's problem, not this gate's.
         let needle = hyphenated_entry();
         let src = format!("{needle} = {{ version = \"0.4.1\" }}\n");
         assert!(scan_comments(&src, marker("toml")).is_empty());
+    }
+
+    #[test]
+    fn flags_a_retired_crate_in_a_comment_trailing_a_manifest_key() {
+        // The shape the gate could not see, and the one it was let down by: a
+        // lint setting and the reason for it on one line. `just clippy` cannot
+        // check a reason, so nothing else was ever going to notice that this
+        // one had outlived the crate it pointed at — and the lint it justified
+        // is the one that reports a stuttering type name.
+        let needle = hyphenated_entry();
+        let src = format!("some_lint = \"allow\" # `{needle}::SyntaxError` reads clearer\n");
+        let hits = scan_comments(&src, marker("toml"));
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, needle);
+    }
+
+    #[test]
+    fn flags_a_retired_path_in_a_comment_trailing_rust_code() {
+        let needle = RETIRED_UPSTREAM_PATHS[0].0;
+        let src = format!("let table = build(); // was {needle}\n");
+        let hits = scan_comments(&src, marker("rs"));
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].needle, needle);
+    }
+
+    #[test]
+    fn a_retired_name_left_of_the_marker_is_still_code() {
+        // The widened reader must not become a whole-line grep: the code on a
+        // line stays out of scope even when the line does carry a comment.
+        let needle = RETIRED_UPSTREAM_PATHS[0].0;
+        let src = format!("use {needle}::thing; // an import the compiler owns\n");
+        assert!(
+            scan_comments(&src, marker("rs")).is_empty(),
+            "only the comment portion is this gate's business"
+        );
     }
 
     #[test]

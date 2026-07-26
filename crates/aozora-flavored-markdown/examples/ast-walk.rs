@@ -16,7 +16,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use aozora_flavored_markdown::ir::{IrBlock, IrInline};
+use aozora_flavored_markdown::ir::{Block, Inline};
 use aozora_flavored_markdown::{Options, render_to_ir};
 
 /// Tally of one construct kind: how many were projected, and how many of
@@ -62,20 +62,20 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn count_blocks(blocks: &[IrBlock], counts: &mut BTreeMap<String, Tally>) {
+fn count_blocks(blocks: &[Block], counts: &mut BTreeMap<String, Tally>) {
     for block in blocks {
         match block {
-            IrBlock::Aozora { kind, span, .. } => tally(kind, span.is_some(), counts),
-            IrBlock::Paragraph { children, .. } | IrBlock::Heading { children, .. } => {
+            Block::Aozora { kind, span, .. } => tally(kind, span.is_some(), counts),
+            Block::Paragraph { children, .. } | Block::Heading { children, .. } => {
                 count_inlines(children, counts);
             }
-            IrBlock::Blockquote { children, .. } => count_blocks(children, counts),
-            IrBlock::List { items, .. } => {
+            Block::Blockquote { children, .. } => count_blocks(children, counts),
+            Block::List { items, .. } => {
                 for item in items {
                     count_blocks(&item.children, counts);
                 }
             }
-            IrBlock::Table { header, rows, .. } => {
+            Block::Table { header, rows, .. } => {
                 for row in iter::once(header).chain(rows) {
                     for cell in &row.cells {
                         count_inlines(cell, counts);
@@ -87,14 +87,14 @@ fn count_blocks(blocks: &[IrBlock], counts: &mut BTreeMap<String, Tally>) {
     }
 }
 
-fn count_inlines(inlines: &[IrInline], counts: &mut BTreeMap<String, Tally>) {
+fn count_inlines(inlines: &[Inline], counts: &mut BTreeMap<String, Tally>) {
     for inline in inlines {
         match inline {
-            IrInline::Aozora { kind, span, .. } => tally(kind, span.is_some(), counts),
-            IrInline::Strong { children, .. }
-            | IrInline::Emphasis { children, .. }
-            | IrInline::Link { children, .. }
-            | IrInline::Image { alt: children, .. } => count_inlines(children, counts),
+            Inline::Aozora { kind, span, .. } => tally(kind, span.is_some(), counts),
+            Inline::Strong { children, .. }
+            | Inline::Emphasis { children, .. }
+            | Inline::Link { children, .. }
+            | Inline::Image { alt: children, .. } => count_inlines(children, counts),
             _ => {}
         }
     }

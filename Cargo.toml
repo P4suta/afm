@@ -91,6 +91,13 @@ clone_on_ref_ptr    = "warn"
 unnecessary_safety_comment = "warn"
 unnecessary_safety_doc     = "warn"
 missing_assert_message     = "warn"
+# Promoted out of the carve-out list below, where it had sat since before the
+# crate it was justified by stopped existing. It is the lint that owns
+# `ir::IrBlock`: a stuttering name is invisible to the compiler, to the
+# formatter and to every test, so with this off nothing in the workspace could
+# see six of them at once. It reads re-exports too, which is how these types
+# reach a consumer — the report lands on the `pub use` line in `ir/mod.rs`.
+module_name_repetitions    = "warn"
 
 # Hand-picked clippy::restriction lints (the full group has contradictory
 # lints, so it stays off). `print_stdout` / `print_stderr` can't live here —
@@ -119,11 +126,10 @@ lossy_float_literal              = "warn"
 suspicious_xor_used_as_pow       = "warn"  # `2 ^ 10` is 8, not 1024
 
 # Justified carve-outs.
-module_name_repetitions = "allow" # `aozora_syntax::SyntaxError` reads clearer
 multiple_crate_versions = "allow" # transitive dep collisions are not our problem
 missing_const_for_fn    = "allow" # zero-arg builders read clearer as fns
 redundant_pub_crate     = "allow" # conflicts with rustc's `unreachable_pub` (our source of truth)
-use_self                = "allow" # IR enums spell recursive fields `Vec<IrBlock>` / `Vec<IrInline>`, not `Vec<Self>`, so `tsify` emits valid TS type names instead of `Self[]` (ADR-0017)
+use_self                = "allow" # IR enums spell recursive fields `Vec<Block>` / `Vec<Inline>`, not `Vec<Self>`, so `tsify` emits valid TS type names instead of `Self[]` (ADR-0017)
 
 [workspace.dependencies]
 aozora-flavored-markdown = { version = "0.5.0", path = "crates/aozora-flavored-markdown" }

@@ -2,41 +2,41 @@
 //!
 //! `ir_coverage.rs` covers the Markdown-side variants. This file pins the
 //! collapsed Aozora surface: every notation lands as a single
-//! `IrInline::Aozora` / `IrBlock::Aozora` carrying its tag, the source span
+//! `Inline::Aozora` / `Block::Aozora` carrying its tag, the source span
 //! it came from, and the HTML fragment it renders to — and the sentinel
 //! stream stays in lockstep with the HTML splicer while doing it.
 
-use aozora_flavored_markdown::ir::{IrBlock, IrInline, Span};
+use aozora_flavored_markdown::ir::{Block, Inline, Span};
 use aozora_flavored_markdown::{Options, render, render_to_ir};
 
-fn ir(src: &str) -> Vec<IrBlock> {
+fn ir(src: &str) -> Vec<Block> {
     render_to_ir(src, &Options::default()).ir.blocks
 }
 
-fn first_paragraph_inlines(blocks: &[IrBlock]) -> &[IrInline] {
+fn first_paragraph_inlines(blocks: &[Block]) -> &[Inline] {
     match blocks.first().expect("at least one block") {
-        IrBlock::Paragraph { children, .. } => children.as_slice(),
+        Block::Paragraph { children, .. } => children.as_slice(),
         other => panic!("expected paragraph, got {other:?}"),
     }
 }
 
 /// `(kind, span, html)` for every Aozora inline in `inlines`, in order.
-fn aozora_inlines(inlines: &[IrInline]) -> Vec<(&str, Option<Span>, &str)> {
+fn aozora_inlines(inlines: &[Inline]) -> Vec<(&str, Option<Span>, &str)> {
     inlines
         .iter()
         .filter_map(|inline| match inline {
-            IrInline::Aozora { kind, span, html } => Some((kind.as_str(), *span, html.as_str())),
+            Inline::Aozora { kind, span, html } => Some((kind.as_str(), *span, html.as_str())),
             _ => None,
         })
         .collect()
 }
 
 /// `(kind, span, html, source_line)` for every Aozora block, in order.
-fn aozora_blocks(blocks: &[IrBlock]) -> Vec<(&str, Option<Span>, &str, Option<u32>)> {
+fn aozora_blocks(blocks: &[Block]) -> Vec<(&str, Option<Span>, &str, Option<u32>)> {
     blocks
         .iter()
         .filter_map(|block| match block {
-            IrBlock::Aozora {
+            Block::Aozora {
                 kind,
                 span,
                 html,
@@ -48,7 +48,7 @@ fn aozora_blocks(blocks: &[IrBlock]) -> Vec<(&str, Option<Span>, &str, Option<u3
 }
 
 /// The first Aozora inline tagged `kind`, as `(span, html)`.
-fn find_inline_kind<'a>(inlines: &'a [IrInline], kind: &str) -> (Option<Span>, &'a str) {
+fn find_inline_kind<'a>(inlines: &'a [Inline], kind: &str) -> (Option<Span>, &'a str) {
     let Some((_, span, html)) = aozora_inlines(inlines)
         .into_iter()
         .find(|(k, ..)| *k == kind)
@@ -172,12 +172,12 @@ fn leaf_indent_marker_projects_instead_of_dropping() {
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Text { value, .. } if value.contains("前")))
+            .any(|c| matches!(c, Inline::Text { value, .. } if value.contains("前")))
     );
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Text { value, .. } if value.contains("後")))
+            .any(|c| matches!(c, Inline::Text { value, .. } if value.contains("後")))
     );
 }
 
@@ -217,7 +217,7 @@ fn heading_hint_promotes_paragraph_to_heading() {
     // The one Aozora construct that is *not* collapsed: a heading hint
     // changes the shape of the document, so it stays a Markdown heading.
     let blocks = ir("第一篇［＃「第一篇」は大見出し］");
-    let IrBlock::Heading {
+    let Block::Heading {
         level, children, ..
     } = &blocks[0]
     else {
@@ -226,7 +226,7 @@ fn heading_hint_promotes_paragraph_to_heading() {
     assert_eq!(*level, 1);
     assert!(matches!(
         children.as_slice(),
-        [IrInline::Text { value, .. }] if value == "第一篇"
+        [Inline::Text { value, .. }] if value == "第一篇"
     ));
 }
 
@@ -253,16 +253,16 @@ fn indent_container_emits_a_matched_open_close_pair_around_its_body() {
     // inside them.
     let open_at = blocks
         .iter()
-        .position(|b| matches!(b, IrBlock::Aozora { kind, .. } if kind == "containerOpen"))
+        .position(|b| matches!(b, Block::Aozora { kind, .. } if kind == "containerOpen"))
         .expect("open marker");
     let close_at = blocks
         .iter()
-        .position(|b| matches!(b, IrBlock::Aozora { kind, .. } if kind == "containerClose"))
+        .position(|b| matches!(b, Block::Aozora { kind, .. } if kind == "containerClose"))
         .expect("close marker");
     assert!(
         blocks[open_at + 1..close_at]
             .iter()
-            .any(|b| matches!(b, IrBlock::Paragraph { .. })),
+            .any(|b| matches!(b, Block::Paragraph { .. })),
         "the container body must sit between the markers: {blocks:#?}"
     );
 }
@@ -339,7 +339,7 @@ fn aozora_disabled_path_emits_no_aozora_ir_variants() {
     let opts = Options::commonmark();
     let result = render_to_ir("｜青梅《おうめ》", &opts);
     let inlines = match &result.ir.blocks[0] {
-        IrBlock::Paragraph { children, .. } => children,
+        Block::Paragraph { children, .. } => children,
         other => panic!("expected paragraph, got {other:?}"),
     };
     assert!(
@@ -352,8 +352,8 @@ fn aozora_disabled_path_emits_no_aozora_ir_variants() {
 fn ruby_inside_paragraph_preserves_surrounding_text() {
     let blocks = ir("前｜青梅《おうめ》後");
     let inlines = first_paragraph_inlines(&blocks);
-    assert!(matches!(inlines.first(), Some(IrInline::Text { value, .. }) if value == "前"));
-    assert!(matches!(inlines.last(), Some(IrInline::Text { value, .. }) if value == "後"));
+    assert!(matches!(inlines.first(), Some(Inline::Text { value, .. }) if value == "前"));
+    assert!(matches!(inlines.last(), Some(Inline::Text { value, .. }) if value == "後"));
     assert_eq!(aozora_inlines(inlines).len(), 1);
 }
 
@@ -377,9 +377,9 @@ fn registry_lockstep_with_multiple_inline_aozora_in_paragraph() {
 fn ruby_inside_markdown_strong_projects_under_strong() {
     let blocks = ir("**｜青梅《おうめ》**");
     let inlines = first_paragraph_inlines(&blocks);
-    let IrInline::Strong { children, .. } = inlines
+    let Inline::Strong { children, .. } = inlines
         .iter()
-        .find(|c| matches!(c, IrInline::Strong { .. }))
+        .find(|c| matches!(c, Inline::Strong { .. }))
         .expect("expected Strong wrapper")
     else {
         unreachable!()
@@ -391,9 +391,9 @@ fn ruby_inside_markdown_strong_projects_under_strong() {
 fn ruby_inside_markdown_emphasis_projects_under_emphasis() {
     let blocks = ir("*｜青梅《おうめ》*");
     let inlines = first_paragraph_inlines(&blocks);
-    let IrInline::Emphasis { children, .. } = inlines
+    let Inline::Emphasis { children, .. } = inlines
         .iter()
-        .find(|c| matches!(c, IrInline::Emphasis { .. }))
+        .find(|c| matches!(c, Inline::Emphasis { .. }))
         .expect("expected Emphasis wrapper")
     else {
         unreachable!()
@@ -405,9 +405,9 @@ fn ruby_inside_markdown_emphasis_projects_under_emphasis() {
 fn ruby_inside_markdown_link_projects_under_link() {
     let blocks = ir("[｜青梅《おうめ》](http://example.com)");
     let inlines = first_paragraph_inlines(&blocks);
-    let IrInline::Link { children, href, .. } = inlines
+    let Inline::Link { children, href, .. } = inlines
         .iter()
-        .find(|c| matches!(c, IrInline::Link { .. }))
+        .find(|c| matches!(c, Inline::Link { .. }))
         .expect("expected Link wrapper")
     else {
         unreachable!()
@@ -422,7 +422,7 @@ fn inline_code_projects_with_literal_value() {
     let inlines = first_paragraph_inlines(&blocks);
     let saw_code = inlines
         .iter()
-        .any(|c| matches!(c, IrInline::Code { value, .. } if value == "cargo build"));
+        .any(|c| matches!(c, Inline::Code { value, .. } if value == "cargo build"));
     assert!(saw_code, "expected inline code, got: {inlines:#?}");
 }
 
@@ -436,7 +436,7 @@ fn ruby_inside_inline_code_projects_literal_source() {
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Code { value, .. } if value == "｜青梅《おうめ》")),
+            .any(|c| matches!(c, Inline::Code { value, .. } if value == "｜青梅《おうめ》")),
         "inline code must carry the literal Aozora source, got: {inlines:#?}"
     );
     assert!(
@@ -455,7 +455,7 @@ fn notation_in_inline_code_does_not_desync_following_ir_node() {
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Code { value, .. } if value == "｜A《a》")),
+            .any(|c| matches!(c, Inline::Code { value, .. } if value == "｜A《a》")),
         "code span keeps its literal, got: {inlines:#?}"
     );
     let (span, html) = find_inline_kind(inlines, "ruby");
@@ -470,10 +470,10 @@ fn notation_in_inline_code_does_not_desync_following_ir_node() {
 #[test]
 fn ruby_inside_blockquote_projects_under_blockquote() {
     let blocks = ir("> ｜青梅《おうめ》");
-    let IrBlock::Blockquote { children, .. } = &blocks[0] else {
+    let Block::Blockquote { children, .. } = &blocks[0] else {
         panic!("expected Blockquote, got: {blocks:#?}");
     };
-    let IrBlock::Paragraph { children, .. } = &children[0] else {
+    let Block::Paragraph { children, .. } = &children[0] else {
         panic!("expected paragraph inside blockquote, got: {children:#?}");
     };
     assert_eq!(aozora_inlines(children).len(), 1, "{children:#?}");
@@ -482,10 +482,10 @@ fn ruby_inside_blockquote_projects_under_blockquote() {
 #[test]
 fn ruby_inside_list_item_projects_under_list_item() {
     let blocks = ir("- ｜青梅《おうめ》");
-    let IrBlock::List { items, .. } = &blocks[0] else {
+    let Block::List { items, .. } = &blocks[0] else {
         panic!("expected List, got: {blocks:#?}");
     };
-    let IrBlock::Paragraph { children, .. } = &items[0].children[0] else {
+    let Block::Paragraph { children, .. } = &items[0].children[0] else {
         panic!("expected paragraph in list item");
     };
     assert_eq!(aozora_inlines(children).len(), 1, "{children:#?}");
@@ -494,7 +494,7 @@ fn ruby_inside_list_item_projects_under_list_item() {
 #[test]
 fn aozora_inline_inside_atx_h2_keeps_the_notation() {
     let blocks = ir("## ｜青梅《おうめ》");
-    let IrBlock::Heading {
+    let Block::Heading {
         level, children, ..
     } = &blocks[0]
     else {
@@ -512,7 +512,7 @@ fn hard_break_inside_paragraph_with_sentinel_preserves_break() {
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::LineBreak { hard: true, .. })),
+            .any(|c| matches!(c, Inline::LineBreak { hard: true, .. })),
         "expected hard line break, got: {inlines:#?}"
     );
 }
@@ -524,37 +524,37 @@ fn image_inline_projects_under_aozora_enabled() {
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Image { url, .. } if url == "pic.png"))
+            .any(|c| matches!(c, Inline::Image { url, .. } if url == "pic.png"))
     );
     assert!(
         inlines
             .iter()
-            .any(|c| matches!(c, IrInline::Text { value, .. } if value.contains("text")))
+            .any(|c| matches!(c, Inline::Text { value, .. } if value.contains("text")))
     );
 }
 
 /// Every Aozora `html` fragment anywhere in `blocks`, at any nesting depth.
-fn all_fragments(blocks: &[IrBlock], out: &mut Vec<String>) {
-    fn inlines(nodes: &[IrInline], out: &mut Vec<String>) {
+fn all_fragments(blocks: &[Block], out: &mut Vec<String>) {
+    fn inlines(nodes: &[Inline], out: &mut Vec<String>) {
         for node in nodes {
             match node {
-                IrInline::Aozora { html, .. } => out.push(html.clone()),
-                IrInline::Strong { children, .. }
-                | IrInline::Emphasis { children, .. }
-                | IrInline::Link { children, .. } => inlines(children, out),
-                IrInline::Image { alt, .. } => inlines(alt, out),
+                Inline::Aozora { html, .. } => out.push(html.clone()),
+                Inline::Strong { children, .. }
+                | Inline::Emphasis { children, .. }
+                | Inline::Link { children, .. } => inlines(children, out),
+                Inline::Image { alt, .. } => inlines(alt, out),
                 _ => {}
             }
         }
     }
     for block in blocks {
         match block {
-            IrBlock::Aozora { html, .. } => out.push(html.clone()),
-            IrBlock::Paragraph { children, .. } | IrBlock::Heading { children, .. } => {
+            Block::Aozora { html, .. } => out.push(html.clone()),
+            Block::Paragraph { children, .. } | Block::Heading { children, .. } => {
                 inlines(children, out);
             }
-            IrBlock::Blockquote { children, .. } => all_fragments(children, out),
-            IrBlock::List { items, .. } => {
+            Block::Blockquote { children, .. } => all_fragments(children, out),
+            Block::List { items, .. } => {
                 for item in items {
                     all_fragments(&item.children, out);
                 }
@@ -608,7 +608,7 @@ fn annotation_inside_a_heading_is_suppressed_like_the_html_does() {
     assert_eq!(html.trim(), "<h1>タイトル</h1>", "html: {html}");
 
     let blocks = ir(SRC);
-    let IrBlock::Heading { children, .. } = &blocks[0] else {
+    let Block::Heading { children, .. } = &blocks[0] else {
         panic!("expected Heading, got: {blocks:#?}");
     };
     assert!(
@@ -622,7 +622,7 @@ fn notation_allowed_in_a_heading_still_projects() {
     // The suppression above is annotation-shaped only: ruby, bouten and
     // friends are explicitly allowed inside a heading, and must survive.
     let blocks = ir("## ｜青梅《おうめ》");
-    let IrBlock::Heading { children, .. } = &blocks[0] else {
+    let Block::Heading { children, .. } = &blocks[0] else {
         panic!("expected Heading, got: {blocks:#?}");
     };
     assert_eq!(aozora_inlines(children).len(), 1, "{children:#?}");
@@ -635,10 +635,10 @@ fn heading_hint_promotes_a_nested_paragraph_too() {
     // blockquote paragraph plus a stray `headingHint` fragment while the
     // HTML had `<blockquote><h1>…`.
     let blocks = ir("> 第一篇［＃「第一篇」は大見出し］");
-    let IrBlock::Blockquote { children, .. } = &blocks[0] else {
+    let Block::Blockquote { children, .. } = &blocks[0] else {
         panic!("expected Blockquote, got: {blocks:#?}");
     };
-    let IrBlock::Heading {
+    let Block::Heading {
         level,
         children: heading_children,
         ..
@@ -649,7 +649,7 @@ fn heading_hint_promotes_a_nested_paragraph_too() {
     assert_eq!(*level, 1);
     assert!(matches!(
         heading_children.as_slice(),
-        [IrInline::Text { value, .. }] if value == "第一篇"
+        [Inline::Text { value, .. }] if value == "第一篇"
     ));
 }
 /// The parser reads a document against a text it canonicalises first —
@@ -668,7 +668,7 @@ fn a_canonicalised_source_still_reports_ranges_into_the_callers_text() {
         let paragraph = blocks
             .iter()
             .find_map(|b| match b {
-                IrBlock::Paragraph { children, .. } if !aozora_inlines(children).is_empty() => {
+                Block::Paragraph { children, .. } if !aozora_inlines(children).is_empty() => {
                     Some(children.as_slice())
                 }
                 _ => None,
@@ -695,7 +695,7 @@ fn render_blocks_to_ir_emits_aozora_block_per_top_level_block() {
     let saw_ruby_in_first = blocks[0].ir.iter().any(|b| {
         matches!(
             b,
-            IrBlock::Paragraph { children, .. }
+            Block::Paragraph { children, .. }
                 if aozora_inlines(children).iter().any(|(kind, ..)| *kind == "ruby")
         )
     });

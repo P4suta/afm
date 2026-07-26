@@ -27,7 +27,7 @@
 
 use aozora_flavored_markdown::{sentinels, serialize};
 use aozora_flavored_markdown_test_support::check_fence_fidelity;
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{aozora_fragment, commonmark_adversarial};
 use comrak::nodes::{NodeValue, Sourcepos};
 use core::iter::once;
@@ -615,7 +615,7 @@ fn a_fence_bearing_document_from_the_shared_pool_holds() {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// The interior the generator put in comes back out byte for byte. Known
     /// to the test rather than rediscovered by a scanner, so no carve-out can

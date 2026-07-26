@@ -1,7 +1,7 @@
 // Ported from aozora's playground/src/editor/linter.ts.
 //
 // In-editor diagnostics for the aozora-md playground. The parserStateField
-// owns the single aozora-flavored-markdown-wasm Document and exposes the parsed
+// owns the single aozora-flavored-markdown-wasm AozoraDocument and exposes the parsed
 // `diagnostics_json` payload as `ps.diagnostics` (DiagnosticEntry[],
 // spans in UTF-8 byte offsets). This module translates those entries
 // into CodeMirror lint Diagnostics so they render as squigglies plus

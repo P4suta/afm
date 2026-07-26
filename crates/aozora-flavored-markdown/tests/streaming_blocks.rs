@@ -1,7 +1,7 @@
 //! Tests for the per-block streaming render API
 //! (`render_blocks_to_ir`).
 
-use aozora_flavored_markdown::ir::IrBlock;
+use aozora_flavored_markdown::ir::Block;
 use aozora_flavored_markdown::{
     Diagnostic, Options, RenderedBlock, render, render_blocks_to_ir, sentinels,
 };
@@ -73,7 +73,7 @@ fn heading_blocks_carry_their_kind_in_ir() {
     let (blocks, _) = render_blocks_checked(src, &Options::default());
     assert_eq!(blocks.len(), 2);
     let kind = match blocks[0].ir.first() {
-        Some(IrBlock::Heading { level, .. }) => Some(*level),
+        Some(Block::Heading { level, .. }) => Some(*level),
         _ => None,
     };
     assert_eq!(kind, Some(1));

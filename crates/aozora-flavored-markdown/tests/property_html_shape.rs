@@ -31,7 +31,7 @@
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics, render_blocks_to_ir};
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
 };
@@ -89,7 +89,7 @@ fn assert_gated(html: &str, src: &str) {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// Mixed Aozora fragments: the workhorse shape. Covers long
     /// decorative rules (Tier H bait), unbalanced brackets, and a

@@ -1,12 +1,12 @@
 //! Public IR type definitions. The `serde` attributes are the single source
 //! of the wire shape: under the `tsify` feature these derive the TypeScript
-//! `IRDocument` directly, so there is no hand-written `.d.ts` to keep in sync
+//! declarations directly, so there is no hand-written `.d.ts` to keep in sync
 //! (ADR-0017).
 //!
 //! The Markdown vocabulary is **owned here** — one typed variant each,
 //! because this crate decides what they mean. The 青空文庫 vocabulary is
-//! **not**: every notation collapses to [`IrBlock::Aozora`] /
-//! [`IrInline::Aozora`] with an opaque `kind` tag, because mirroring the
+//! **not**: every notation collapses to [`Block::Aozora`] /
+//! [`Inline::Aozora`] with an opaque `kind` tag, because mirroring the
 //! sibling parser's type vocabulary would own it twice (ADR-0021).
 
 use serde::Serialize;
@@ -21,8 +21,8 @@ pub use crate::diagnostics::Span;
 // same reason — document-level metadata (a source digest, a schema tag) is
 // exactly the kind of field a later release adds.
 #[non_exhaustive]
-pub struct IrDocument {
-    pub blocks: Vec<IrBlock>,
+pub struct Document {
+    pub blocks: Vec<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -35,11 +35,11 @@ pub struct IrDocument {
 // New Markdown constructs land as new variants; `#[non_exhaustive]`
 // (ADR-0013) lets that happen in a minor release without breaking external
 // `match`es. New 青空文庫 notations do not need a variant at all — they
-// arrive as a new `kind` on `IrBlock::Aozora` (ADR-0022).
+// arrive as a new `kind` on `Block::Aozora` (ADR-0022).
 #[non_exhaustive]
-pub enum IrBlock {
+pub enum Block {
     Paragraph {
-        children: Vec<IrInline>,
+        children: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,14 +47,14 @@ pub enum IrBlock {
     },
     Heading {
         level: u8,
-        children: Vec<IrInline>,
+        children: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
     Blockquote {
-        children: Vec<IrBlock>,
+        children: Vec<Block>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,13 +64,19 @@ pub enum IrBlock {
         ordered: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         start: Option<u32>,
-        items: Vec<IrListItem>,
+        items: Vec<ListItem>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
-    CodeBlock {
+    // `Block::CodeBlock` stutters once the enum is `Block` (the same reason
+    // the types lost their `Ir`), and `Inline::Code` is already the inline
+    // half of the pair. The wire tag stays `codeBlock` — the tag names the
+    // node across a union that has both halves in it, where `code` alone
+    // would be ambiguous.
+    #[serde(rename = "codeBlock")]
+    Code {
         #[serde(skip_serializing_if = "Option::is_none")]
         lang: Option<String>,
         value: String,
@@ -86,9 +92,9 @@ pub enum IrBlock {
         range: Option<Range>,
     },
     Table {
-        header: IrTableRow,
-        rows: Vec<IrTableRow>,
-        align: Vec<IrTableAlign>,
+        header: TableRow,
+        rows: Vec<TableRow>,
+        align: Vec<TableAlign>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_line: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,10 +106,10 @@ pub enum IrBlock {
     /// blocks in document order, so concatenating `html` reproduces the
     /// nesting without this crate re-deriving it.
     Aozora {
-        /// Opaque notation tag. See [`IrInline::Aozora`]'s `kind`.
+        /// Opaque notation tag. See [`Inline::Aozora`]'s `kind`.
         #[serde(rename = "aozoraKind")]
         kind: String,
-        /// As [`IrInline::Aozora`]'s `span`, and additionally `None` for a
+        /// As [`Inline::Aozora`]'s `span`, and additionally `None` for a
         /// close marker synthesised because the document ended with the
         /// container still open.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,21 +123,21 @@ pub enum IrBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-// See `IrDocument`: a row gains fields (a header flag, a span) without the
+// See `Document`: a row gains fields (a header flag, a span) without the
 // variants around it changing.
 #[non_exhaustive]
-pub struct IrTableRow {
-    pub cells: Vec<Vec<IrInline>>,
+pub struct TableRow {
+    pub cells: Vec<Vec<Inline>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-// As `IrTableRow`: GFM task-list state is the obvious next field here.
+// As `TableRow`: GFM task-list state is the obvious next field here.
 #[non_exhaustive]
-pub struct IrListItem {
-    pub children: Vec<IrBlock>,
+pub struct ListItem {
+    pub children: Vec<Block>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
 }
@@ -142,7 +148,7 @@ pub struct IrListItem {
 // The IR enum ADR-0013 missed. `Default` here is the column's *absence* of an
 // alignment marker, which is also the variant a fresh column starts from.
 #[non_exhaustive]
-pub enum IrTableAlign {
+pub enum TableAlign {
     Left,
     Center,
     Right,
@@ -157,10 +163,10 @@ pub enum IrTableAlign {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-// See `IrBlock`: `#[non_exhaustive]` (ADR-0013) keeps new inline Markdown
+// See `Block`: `#[non_exhaustive]` (ADR-0013) keeps new inline Markdown
 // constructs additive for external consumers.
 #[non_exhaustive]
-pub enum IrInline {
+pub enum Inline {
     Text {
         value: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,12 +178,12 @@ pub enum IrInline {
         range: Option<Range>,
     },
     Strong {
-        children: Vec<IrInline>,
+        children: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
     Emphasis {
-        children: Vec<IrInline>,
+        children: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
@@ -185,7 +191,7 @@ pub enum IrInline {
         href: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
-        children: Vec<IrInline>,
+        children: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
@@ -195,7 +201,7 @@ pub enum IrInline {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
-        alt: Vec<IrInline>,
+        alt: Vec<Inline>,
         #[serde(skip_serializing_if = "Option::is_none")]
         range: Option<Range>,
     },
@@ -295,7 +301,7 @@ mod tests {
     /// key and the last one would silently win on the JS side.
     #[test]
     fn aozora_inline_wire_shape_separates_tag_from_discriminant() {
-        let value = json(IrInline::Aozora {
+        let value = json(Inline::Aozora {
             kind: "ruby".to_owned(),
             span: Some(Span { start: 3, end: 21 }),
             html: "<ruby>青梅<rt>おうめ</rt></ruby>".to_owned(),
@@ -312,7 +318,7 @@ mod tests {
     /// contract every optional IR field follows.
     #[test]
     fn aozora_block_wire_shape_omits_absent_span() {
-        let value = json(IrBlock::Aozora {
+        let value = json(Block::Aozora {
             kind: "containerClose".to_owned(),
             span: None,
             html: "</div>".to_owned(),
@@ -327,5 +333,263 @@ mod tests {
             value.get("span").is_none(),
             "absent span must not serialise: {value}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // the tag alphabet — the whole wire format, not two of its members
+    // -----------------------------------------------------------------
+    //
+    // ADR-0017 calls the IR a stable wire format, and until this section
+    // existed nothing anywhere asserted a single Markdown tag: the two tests
+    // above cover `aozora` alone. A `rename_all` edit, a variant rename or a
+    // dropped `#[serde(rename)]` rewrote what every JS `switch` dispatches on
+    // and left the whole suite green — which is exactly the shape of edit
+    // `Block::CodeBlock` -> `Block::Code` is.
+    //
+    // The `match`es below are exhaustive with no wildcard, so a new variant
+    // is a compile error until its wire tag is written down. The frozen
+    // alphabet beside each one is then what the samples are held to, so the
+    // decision cannot be made twice.
+
+    // The tag is the contract; the Rust identifier beside it is not.
+    fn block_tag(block: &Block) -> &'static str {
+        match block {
+            Block::Paragraph { .. } => "paragraph",
+            Block::Heading { .. } => "heading",
+            Block::Blockquote { .. } => "blockquote",
+            Block::List { .. } => "list",
+            Block::Code { .. } => "codeBlock",
+            Block::ThematicBreak { .. } => "thematicBreak",
+            Block::Table { .. } => "table",
+            Block::Aozora { .. } => "aozora",
+        }
+    }
+
+    fn inline_tag(inline: &Inline) -> &'static str {
+        match inline {
+            Inline::Text { .. } => "text",
+            Inline::Code { .. } => "code",
+            Inline::Strong { .. } => "strong",
+            Inline::Emphasis { .. } => "emphasis",
+            Inline::Link { .. } => "link",
+            Inline::Image { .. } => "image",
+            Inline::LineBreak { .. } => "lineBreak",
+            Inline::Aozora { .. } => "aozora",
+        }
+    }
+
+    // Every tag the `Block` union may carry. Add a variant above and this
+    // list is what forces a sample for it into `one_of_every_block`.
+    const BLOCK_TAGS: &[&str] = &[
+        "paragraph",
+        "heading",
+        "blockquote",
+        "list",
+        "codeBlock",
+        "thematicBreak",
+        "table",
+        "aozora",
+    ];
+
+    const INLINE_TAGS: &[&str] = &[
+        "text",
+        "code",
+        "strong",
+        "emphasis",
+        "link",
+        "image",
+        "lineBreak",
+        "aozora",
+    ];
+
+    fn text(value: &str) -> Inline {
+        Inline::Text {
+            value: value.to_owned(),
+            range: None,
+        }
+    }
+
+    fn one_of_every_block() -> Vec<Block> {
+        vec![
+            Block::Paragraph {
+                children: vec![text("p")],
+                source_line: None,
+                range: None,
+            },
+            Block::Heading {
+                level: 1,
+                children: vec![text("h")],
+                source_line: None,
+                range: None,
+            },
+            Block::Blockquote {
+                children: Vec::new(),
+                source_line: None,
+                range: None,
+            },
+            Block::List {
+                ordered: false,
+                start: None,
+                items: vec![ListItem {
+                    children: Vec::new(),
+                    range: None,
+                }],
+                source_line: None,
+                range: None,
+            },
+            Block::Code {
+                lang: None,
+                value: "x".to_owned(),
+                source_line: None,
+                range: None,
+            },
+            Block::ThematicBreak {
+                source_line: None,
+                range: None,
+            },
+            Block::Table {
+                header: TableRow {
+                    cells: Vec::new(),
+                    range: None,
+                },
+                rows: Vec::new(),
+                align: vec![TableAlign::Default],
+                source_line: None,
+                range: None,
+            },
+            Block::Aozora {
+                kind: "pageBreak".to_owned(),
+                span: None,
+                html: String::new(),
+                source_line: None,
+            },
+        ]
+    }
+
+    fn one_of_every_inline() -> Vec<Inline> {
+        vec![
+            text("t"),
+            Inline::Code {
+                value: "c".to_owned(),
+                range: None,
+            },
+            Inline::Strong {
+                children: Vec::new(),
+                range: None,
+            },
+            Inline::Emphasis {
+                children: Vec::new(),
+                range: None,
+            },
+            Inline::Link {
+                href: "https://example.com".to_owned(),
+                title: None,
+                children: Vec::new(),
+                range: None,
+            },
+            Inline::Image {
+                url: "https://example.com/a.png".to_owned(),
+                title: None,
+                alt: Vec::new(),
+                range: None,
+            },
+            Inline::LineBreak {
+                hard: true,
+                range: None,
+            },
+            Inline::Aozora {
+                kind: "ruby".to_owned(),
+                span: None,
+                html: String::new(),
+            },
+        ]
+    }
+
+    fn assert_tags_are(observed: Vec<&str>, frozen: &[&str], union: &str) {
+        let mut observed = observed;
+        observed.sort_unstable();
+        let mut frozen = frozen.to_vec();
+        frozen.sort_unstable();
+        assert_eq!(
+            observed, frozen,
+            "the `{union}` union's wire tags are not the frozen alphabet; a consumer's \
+             `switch` dispatches on exactly these strings"
+        );
+    }
+
+    #[test]
+    fn every_block_variant_serialises_under_its_frozen_wire_tag() {
+        let blocks = one_of_every_block();
+        let mut seen = Vec::new();
+        for block in &blocks {
+            let tag = block_tag(block);
+            assert_eq!(
+                json(block)["kind"],
+                tag,
+                "the `Block` variant tagged {tag} does not serialise under it: {block:?}"
+            );
+            seen.push(tag);
+        }
+        assert_tags_are(seen, BLOCK_TAGS, "Block");
+    }
+
+    #[test]
+    fn every_inline_variant_serialises_under_its_frozen_wire_tag() {
+        let inlines = one_of_every_inline();
+        let mut seen = Vec::new();
+        for inline in &inlines {
+            let tag = inline_tag(inline);
+            assert_eq!(
+                json(inline)["kind"],
+                tag,
+                "the `Inline` variant tagged {tag} does not serialise under it: {inline:?}"
+            );
+            seen.push(tag);
+        }
+        assert_tags_are(seen, INLINE_TAGS, "Inline");
+    }
+
+    // The one tag whose Rust identifier deliberately disagrees with it, and
+    // the reason the disagreement exists: `code` is already taken by the
+    // inline half of the pair, and a JS host that dispatches one union after
+    // the other on `kind` would not be able to tell them apart.
+    #[test]
+    fn the_block_and_inline_code_nodes_keep_distinguishable_tags() {
+        let block = json(&Block::Code {
+            lang: Some("rust".to_owned()),
+            value: "fn main() {}".to_owned(),
+            source_line: None,
+            range: None,
+        });
+        let inline = json(&Inline::Code {
+            value: "fn".to_owned(),
+            range: None,
+        });
+        assert_eq!(block["kind"], "codeBlock");
+        assert_eq!(inline["kind"], "code");
+        assert_ne!(
+            block["kind"], inline["kind"],
+            "the two code nodes must stay distinguishable by `kind` alone"
+        );
+    }
+
+    // Every alignment a table column can carry, tagged. The `#[default]`
+    // variant is spelled `default` on the wire, which reads as a placeholder
+    // and is a real value — a consumer that treats it as "absent" gets a
+    // left-aligned column right by accident and nothing else.
+    #[test]
+    fn every_table_alignment_serialises_under_its_frozen_wire_tag() {
+        for (align, tag) in [
+            (TableAlign::Left, "left"),
+            (TableAlign::Center, "center"),
+            (TableAlign::Right, "right"),
+            (TableAlign::Default, "default"),
+        ] {
+            assert_eq!(
+                json(align),
+                tag,
+                "the `TableAlign` variant tagged {tag} does not serialise under it"
+            );
+        }
     }
 }

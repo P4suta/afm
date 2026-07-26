@@ -2,7 +2,7 @@
 //
 // Ported from aozora's playground/src/editor/decorations.ts. The structure is
 // kept intact: a viewport-windowed ViewPlugin reads the parsed node list out of
-// the shared ParserState (populated from Document.nodesJson) and turns each
+// the shared ParserState (populated from AozoraDocument.nodesJson) and turns each
 // NodeEntry into a Decoration.mark with a cm-aozora-* class. aozora-md reuses the
 // cm-aozora-* class names verbatim because they are an editor-decoration
 // detail, not a brand contract.
@@ -27,7 +27,7 @@ import {
 } from './parserState';
 
 /**
- * Map every `kind` returned by `Document.nodesJson()` to a CSS class.
+ * Map every `kind` returned by `AozoraDocument.nodesJson()` to a CSS class.
  * Kinds not in this table are skipped (they carry no visual styling),
  * which keeps this the single source of truth for what gets highlighted.
  *

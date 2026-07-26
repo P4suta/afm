@@ -1,20 +1,20 @@
 // The editor's parse-state backbone, ported from the sibling aozora
 // playground's editor/parserState.ts.
 //
-// A single CodeMirror StateField owns one `Document` (the raw 青空文庫
+// A single CodeMirror StateField owns one `AozoraDocument` (the raw 青空文庫
 // parser handle from aozora-flavored-markdown-wasm) per source revision, runs every wire
 // query once, pre-parses the JSON, and builds the UTF-16 <-> UTF-8
 // offset tables. Every other editor assist (decorations / linter /
 // hover / inlay / fold / linked-ranges) reads from
-// `view.state.field(parserStateField)` instead of touching the Document.
+// `view.state.field(parserStateField)` instead of touching the handle.
 //
-// This Document is the Aozora parser directly, NOT the aozora-md pipeline, so
+// This handle is the Aozora parser directly, NOT the aozora-md pipeline, so
 // its spans are in source coordinates — which is what the assists need.
 
 import { StateField } from '@codemirror/state';
 import type { EditorState, Transaction } from '@codemirror/state';
 
-import { Document } from '../wasm-loader';
+import { AozoraDocument } from '../wasm-loader';
 
 /** A single container fold range, both endpoints in UTF-16 code units. */
 export interface ContainerFold {
@@ -58,7 +58,7 @@ export interface ProfilePhaseEntry {
 }
 
 export interface ParserState {
-  doc: Document | null;
+  doc: AozoraDocument | null;
   source: string;
   nodesJson: string;
   diagJson: string;
@@ -202,7 +202,7 @@ function computeParserState(prev: ParserState | null, source: string): ParserSta
     return ps;
   }
   const t0 = performance.now();
-  const doc = new Document(source);
+  const doc = new AozoraDocument(source);
   const nodesJson = doc.nodesJson();
   const parseDurationMs = performance.now() - t0;
   const diagJson = doc.diagnosticsJson();
@@ -241,8 +241,8 @@ function computeParserState(prev: ParserState | null, source: string): ParserSta
 }
 
 /**
- * The single Document owner. Every editor assist reads parsed data from
- * `view.state.field(parserStateField)`; the previous Document is
+ * The single AozoraDocument owner. Every editor assist reads parsed data from
+ * `view.state.field(parserStateField)`; the previous handle is
  * `.free()`-ed inside `computeParserState` to keep the WASM heap stable.
  */
 export const parserStateField = StateField.define<ParserState>({

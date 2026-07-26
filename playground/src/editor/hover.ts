@@ -1,7 +1,7 @@
 // Gaiji hover tooltip for the aozora-md playground editor.
 // Ported from aozora's editor/hover.ts: shows the resolution of a
 // `※［＃...］` gaiji reference in a hoverTooltip, delegating the actual
-// lookup to aozora-flavored-markdown-wasm (`Document.resolveGaijiAt`).
+// lookup to aozora-flavored-markdown-wasm (`AozoraDocument.resolveGaijiAt`).
 import { hoverTooltip, type Tooltip } from '@codemirror/view';
 import { byteToUtf16, parserStateField, utf16ToByte, type ParserState } from './parserState';
 
@@ -35,7 +35,7 @@ function escapeHtml(s: string): string {
  * Hover tooltip for `※［＃...］` gaiji references.
  *
  * Delegates the actual resolution to aozora-flavored-markdown-wasm
- * (`Document.resolveGaijiAt`), which scans a 512-byte window
+ * (`AozoraDocument.resolveGaijiAt`), which scans a 512-byte window
  * around the byte offset and returns either `"null"` (not in a
  * gaiji span) or a JSON object with span/description/mencode/
  * codepoint/resolved.

@@ -306,7 +306,7 @@ mod proptests {
     //! with arbitrary Aozora-shaped and CommonMark-adversarial input.
 
     use super::*;
-    use aozora_flavored_markdown_test_support::config::default_config;
+    use aozora_flavored_markdown_test_support::config;
     use aozora_flavored_markdown_test_support::generators::{
         aozora_fragment, commonmark_adversarial,
     };
@@ -347,7 +347,7 @@ mod proptests {
     }
 
     proptest! {
-        #![proptest_config(default_config())]
+        #![proptest_config(config::default())]
 
         /// Sources without `` ` `` or `~` round-trip untouched.
         #[test]

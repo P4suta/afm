@@ -3,7 +3,7 @@
 // Beyond the base editor (line numbers, history, bracket matching,
 // folding), this assembles the 青空文庫 editor assists ported from the
 // sibling aozora playground. They all hang off `parserStateField`, which
-// owns one aozora-flavored-markdown-wasm `Document` per source revision and exposes the parse
+// owns one aozora-flavored-markdown-wasm `AozoraDocument` per source revision and exposes the parse
 // results (nodes / pairs / diagnostics / gaiji) in source coordinates.
 //
 // Toggleable features (structural highlight, gaiji inlay hints) live in

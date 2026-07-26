@@ -30,7 +30,7 @@
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown_test_support::check_heading_integrity;
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::kanji_fragment;
 use proptest::prelude::*;
 
@@ -69,7 +69,7 @@ fn heading_biased_src() -> impl Strategy<Value = String> {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// For every heading-biased input, the rendered `<h1>`/`<h2>`/`<h3>`
     /// must carry only the target text — no `aozora-md-indent` /

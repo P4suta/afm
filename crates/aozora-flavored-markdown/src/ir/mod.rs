@@ -3,7 +3,7 @@
 //! # Examples
 //!
 //! ```
-//! use aozora_flavored_markdown::ir::{IrBlock, IrInline};
+//! use aozora_flavored_markdown::ir::{Block, Inline};
 //! use aozora_flavored_markdown::{Options, render_to_ir};
 //!
 //! let rendered = render_to_ir("｜青梅《おうめ》", &Options::default());
@@ -12,12 +12,12 @@
 //!     .blocks
 //!     .iter()
 //!     .filter_map(|block| match block {
-//!         IrBlock::Paragraph { children, .. } => Some(children),
+//!         Block::Paragraph { children, .. } => Some(children),
 //!         _ => None,
 //!     })
 //!     .flatten()
 //!     .any(|inline| {
-//!         matches!(inline, IrInline::Aozora { kind, html, .. }
+//!         matches!(inline, Inline::Aozora { kind, html, .. }
 //!             if kind == "ruby" && html.contains("おうめ"))
 //!     });
 //! assert!(ruby_rendered);
@@ -25,7 +25,7 @@
 //!
 //! Two context rules follow the HTML splicer rather than the notation: a
 //! heading hint (`［＃「X」は大見出し］`) promotes its host paragraph to
-//! [`IrBlock::Heading`] at any nesting depth, and an annotation inside a
+//! [`Block::Heading`] at any nesting depth, and an annotation inside a
 //! heading body is dropped because the splicer drops it (Tier C).
 //!
 //! Both walkers read each notation's fragment off the same construct table,
@@ -37,9 +37,7 @@
 
 mod types;
 
-pub use types::{
-    IrBlock, IrDocument, IrInline, IrListItem, IrTableAlign, IrTableRow, Position, Range, Span,
-};
+pub use types::{Block, Document, Inline, ListItem, Position, Range, Span, TableAlign, TableRow};
 
 use core::mem;
 
@@ -62,10 +60,10 @@ use crate::constructs::{
 /// A sentinel that landed in a literal markdown context (inline code,
 /// link/image destination) projects back to its original Aozora source
 /// instead of leaking the PUA char and desyncing the cursor.
-pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> IrDocument {
+pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> Document {
     let mut walker = IrWalker::new(constructs.cursor(), Vec::new());
     walker.walk_root(root);
-    IrDocument {
+    Document {
         blocks: walker.finish(),
     }
 }
@@ -103,7 +101,7 @@ impl StreamingIrBuilder {
     }
 
     /// Walk a single comrak block, advancing the shared cursor.
-    pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
+    pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<Block> {
         let cursor = self.constructs.cursor_at(self.consumed);
         let mut walker = IrWalker::new(cursor, mem::take(&mut self.open));
         walker.walk_top(node);
@@ -119,7 +117,7 @@ impl StreamingIrBuilder {
     /// `</div>`, and a consumer concatenating them leaves the container
     /// swallowing everything that follows.
     #[must_use]
-    pub(crate) fn finish(self) -> Vec<IrBlock> {
+    pub(crate) fn finish(self) -> Vec<Block> {
         drain_open_containers(self.open)
     }
 }
@@ -130,13 +128,13 @@ impl StreamingIrBuilder {
 
 /// Mirrors `crate::ast_splice`'s splicer state — same cursor, same
 /// balanced-container model, same orphan-close drain — differing only in the
-/// emit target (`Vec<IrBlock>` vs. a rewritten comrak AST).
+/// emit target (`Vec<Block>` vs. a rewritten comrak AST).
 ///
 /// The comrak AST's lifetime is independent of `'t` (it lives in a different
 /// arena) and stays elided, so a per-method `<'a>` need not shadow it.
 struct IrWalker<'t> {
     cursor: ConstructCursor<'t>,
-    top: Vec<IrBlock>,
+    top: Vec<Block>,
     /// Closing markup for each still-open container, innermost last.
     open: Vec<String>,
     /// Annotation-shaped notations are dropped from a heading body
@@ -167,7 +165,7 @@ impl<'t> IrWalker<'t> {
     }
 
     /// Whole-document exit: drains what the source left open.
-    fn finish(mut self) -> Vec<IrBlock> {
+    fn finish(mut self) -> Vec<Block> {
         let drained = drain_open_containers(mem::take(&mut self.open));
         self.top.extend(drained);
         self.top
@@ -175,7 +173,7 @@ impl<'t> IrWalker<'t> {
 
     /// Streaming exit: hands back the state [`StreamingIrBuilder`] threads
     /// into the next per-block walk.
-    fn into_parts(self) -> (Vec<IrBlock>, ConstructCursor<'t>, Vec<String>) {
+    fn into_parts(self) -> (Vec<Block>, ConstructCursor<'t>, Vec<String>) {
         (self.top, self.cursor, self.open)
     }
 
@@ -211,7 +209,7 @@ impl<'t> IrWalker<'t> {
         &mut self,
         action: ParagraphAction,
         source_line: Option<u32>,
-    ) -> Option<IrBlock> {
+    ) -> Option<Block> {
         match action {
             ParagraphAction::BlockSentinel(kind) => self.handle_block_sentinel(kind, source_line),
             ParagraphAction::HeadingHint {
@@ -225,7 +223,7 @@ impl<'t> IrWalker<'t> {
         &mut self,
         kind: BlockSentinelKind,
         source_line: Option<u32>,
-    ) -> Option<IrBlock> {
+    ) -> Option<Block> {
         let hit = self.cursor.next()?;
         let html = match (kind, block_sentinel_of(hit.kind)?) {
             (BlockSentinelKind::Leaf, BlockSentinelKind::Leaf) => hit.html()?,
@@ -244,7 +242,7 @@ impl<'t> IrWalker<'t> {
             // Table/AST drift: emit nothing.
             _ => return None,
         };
-        Some(IrBlock::Aozora {
+        Some(Block::Aozora {
             kind: hit.kind.as_json_tag().to_owned(),
             span: hit.span,
             html,
@@ -257,11 +255,11 @@ impl<'t> IrWalker<'t> {
         hint: &HeadingHint,
         sentinels_to_consume: usize,
         source_line: Option<u32>,
-    ) -> IrBlock {
+    ) -> Block {
         self.cursor.advance(sentinels_to_consume);
-        IrBlock::Heading {
+        Block::Heading {
             level: hint.level.clamp(1, 6),
-            children: vec![IrInline::Text {
+            children: vec![Inline::Text {
                 value: hint.target.clone(),
                 range: None,
             }],
@@ -270,7 +268,7 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    fn walk_block<'a>(&mut self, node: &'a AstNode<'a>, top_level: bool) -> Option<IrBlock> {
+    fn walk_block<'a>(&mut self, node: &'a AstNode<'a>, top_level: bool) -> Option<Block> {
         let data = node.data.borrow();
         let source_line = top_level.then(|| saturating_u32(data.sourcepos.start.line).max(1));
         let range = sourcepos_to_range(&data.sourcepos);
@@ -286,7 +284,7 @@ impl<'t> IrWalker<'t> {
                 if let Some(action) = self.classify_paragraph(node) {
                     return self.dispatch_paragraph(action, source_line);
                 }
-                Some(IrBlock::Paragraph {
+                Some(Block::Paragraph {
                     children: self.collect_inlines(node),
                     source_line,
                     range,
@@ -298,7 +296,7 @@ impl<'t> IrWalker<'t> {
                 self.in_heading += 1;
                 let children = self.collect_inlines(node);
                 self.in_heading -= 1;
-                Some(IrBlock::Heading {
+                Some(Block::Heading {
                     level,
                     children,
                     source_line,
@@ -307,7 +305,7 @@ impl<'t> IrWalker<'t> {
             }
             NodeValue::BlockQuote => {
                 drop(data);
-                Some(IrBlock::Blockquote {
+                Some(Block::Blockquote {
                     children: self.collect_blocks(node),
                     source_line,
                     range,
@@ -319,7 +317,7 @@ impl<'t> IrWalker<'t> {
                 let ordered = matches!(list_type, ListType::Ordered);
                 let start = (*start > 1).then(|| saturating_u32(*start));
                 drop(data);
-                Some(IrBlock::List {
+                Some(Block::List {
                     ordered,
                     start,
                     items: self.collect_list_items(node),
@@ -331,7 +329,7 @@ impl<'t> IrWalker<'t> {
                 let lang = (!code.info.is_empty()).then(|| code.info.clone());
                 let literal = code.literal.clone();
                 drop(data);
-                Some(IrBlock::CodeBlock {
+                Some(Block::Code {
                     lang,
                     value: self.code_block_value(literal),
                     source_line,
@@ -340,10 +338,10 @@ impl<'t> IrWalker<'t> {
             }
             NodeValue::ThematicBreak => {
                 drop(data);
-                Some(IrBlock::ThematicBreak { source_line, range })
+                Some(Block::ThematicBreak { source_line, range })
             }
             NodeValue::Table(table) => {
-                let aligns: Vec<IrTableAlign> =
+                let aligns: Vec<TableAlign> =
                     table.alignments.iter().copied().map(table_align).collect();
                 drop(data);
                 Some(self.walk_table(
@@ -363,12 +361,12 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    fn walk_table<'a>(&mut self, node: &'a AstNode<'a>, meta: TableMeta) -> IrBlock {
-        let mut rows: Vec<IrTableRow> = Vec::new();
+    fn walk_table<'a>(&mut self, node: &'a AstNode<'a>, meta: TableMeta) -> Block {
+        let mut rows: Vec<TableRow> = Vec::new();
         for child in node.children() {
             rows.push(self.collect_table_row(child));
         }
-        let header = rows.first().cloned().unwrap_or(IrTableRow {
+        let header = rows.first().cloned().unwrap_or(TableRow {
             cells: Vec::new(),
             range: None,
         });
@@ -377,7 +375,7 @@ impl<'t> IrWalker<'t> {
         } else {
             rows[1..].to_vec()
         };
-        IrBlock::Table {
+        Block::Table {
             header,
             rows: body,
             align: meta.align,
@@ -386,7 +384,7 @@ impl<'t> IrWalker<'t> {
         }
     }
 
-    fn collect_blocks<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
+    fn collect_blocks<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<Block> {
         // Depth-bound the block recursion (`collect_blocks` → `walk_block`
         // → `collect_blocks` for nested blockquotes / list items). Past
         // the bound the over-deep subtree is dropped from the IR rather
@@ -405,7 +403,7 @@ impl<'t> IrWalker<'t> {
         out
     }
 
-    fn collect_list_items<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrListItem> {
+    fn collect_list_items<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<ListItem> {
         let mut out = Vec::new();
         for child in node.children() {
             let data = child.data.borrow();
@@ -415,7 +413,7 @@ impl<'t> IrWalker<'t> {
             if !is_item {
                 continue;
             }
-            out.push(IrListItem {
+            out.push(ListItem {
                 children: self.collect_blocks(child),
                 range,
             });
@@ -423,7 +421,7 @@ impl<'t> IrWalker<'t> {
         out
     }
 
-    fn collect_table_row<'a>(&mut self, row: &'a AstNode<'a>) -> IrTableRow {
+    fn collect_table_row<'a>(&mut self, row: &'a AstNode<'a>) -> TableRow {
         let data = row.data.borrow();
         let range = sourcepos_to_range(&data.sourcepos);
         drop(data);
@@ -431,10 +429,10 @@ impl<'t> IrWalker<'t> {
         for cell in row.children() {
             cells.push(self.collect_inlines(cell));
         }
-        IrTableRow { cells, range }
+        TableRow { cells, range }
     }
 
-    fn collect_inlines<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrInline> {
+    fn collect_inlines<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<Inline> {
         // Depth-bound the inline recursion (`collect_inlines` →
         // `emit_inline` → `collect_inlines` for nested emphasis / links /
         // images). Past the bound the over-deep inline subtree is dropped
@@ -460,7 +458,7 @@ impl<'t> IrWalker<'t> {
         literal
     }
 
-    fn emit_inline<'a>(&mut self, node: &'a AstNode<'a>, out: &mut Vec<IrInline>) {
+    fn emit_inline<'a>(&mut self, node: &'a AstNode<'a>, out: &mut Vec<Inline>) {
         let data = node.data.borrow();
         let range = sourcepos_to_range(&data.sourcepos);
         match &data.value {
@@ -477,18 +475,18 @@ impl<'t> IrWalker<'t> {
                 // interpreted node, and must consume its registry entry so
                 // later sentinels stay in lockstep.
                 let value = self.rewrite_literal_context(&literal);
-                out.push(IrInline::Code { value, range });
+                out.push(Inline::Code { value, range });
             }
             NodeValue::Strong => {
                 drop(data);
-                out.push(IrInline::Strong {
+                out.push(Inline::Strong {
                     children: self.collect_inlines(node),
                     range,
                 });
             }
             NodeValue::Emph => {
                 drop(data);
-                out.push(IrInline::Emphasis {
+                out.push(Inline::Emphasis {
                     children: self.collect_inlines(node),
                     range,
                 });
@@ -502,7 +500,7 @@ impl<'t> IrWalker<'t> {
                 let children = self.collect_inlines(node);
                 let href = self.rewrite_literal_context(&url);
                 let title = self.rewrite_literal_context(&title);
-                out.push(IrInline::Link {
+                out.push(Inline::Link {
                     href,
                     title: (!title.is_empty()).then_some(title),
                     children,
@@ -516,7 +514,7 @@ impl<'t> IrWalker<'t> {
                 let alt = self.collect_inlines(node);
                 let url = self.rewrite_literal_context(&url);
                 let title = self.rewrite_literal_context(&title);
-                out.push(IrInline::Image {
+                out.push(Inline::Image {
                     url,
                     title: (!title.is_empty()).then_some(title),
                     alt,
@@ -525,11 +523,11 @@ impl<'t> IrWalker<'t> {
             }
             NodeValue::SoftBreak => {
                 drop(data);
-                out.push(IrInline::LineBreak { hard: false, range });
+                out.push(Inline::LineBreak { hard: false, range });
             }
             NodeValue::LineBreak => {
                 drop(data);
-                out.push(IrInline::LineBreak { hard: true, range });
+                out.push(Inline::LineBreak { hard: true, range });
             }
             // Footnote refs, raw HTML, etc. drop quietly.
             _ => {}
@@ -562,12 +560,12 @@ impl<'t> IrWalker<'t> {
         &mut self,
         text: &str,
         range: Option<Range>,
-        out: &mut Vec<IrInline>,
+        out: &mut Vec<Inline>,
     ) {
         // Fast path: no sentinels in this text run.
         if !text.chars().any(is_sentinel_char) {
             if !text.is_empty() {
-                out.push(IrInline::Text {
+                out.push(Inline::Text {
                     value: text.to_owned(),
                     range,
                 });
@@ -581,7 +579,7 @@ impl<'t> IrWalker<'t> {
             }
             let head = &text[cursor..idx];
             if !head.is_empty() {
-                out.push(IrInline::Text {
+                out.push(Inline::Text {
                     value: head.to_owned(),
                     range,
                 });
@@ -605,7 +603,7 @@ impl<'t> IrWalker<'t> {
             let Some(html) = hit.html() else {
                 continue;
             };
-            out.push(IrInline::Aozora {
+            out.push(Inline::Aozora {
                 kind: hit.kind.as_json_tag().to_owned(),
                 span: hit.span,
                 html,
@@ -613,7 +611,7 @@ impl<'t> IrWalker<'t> {
         }
         let tail = &text[cursor..];
         if !tail.is_empty() {
-            out.push(IrInline::Text {
+            out.push(Inline::Text {
                 value: tail.to_owned(),
                 range,
             });
@@ -623,11 +621,11 @@ impl<'t> IrWalker<'t> {
 
 /// Shared by both drains so the whole-document and per-block paths cannot
 /// describe the same situation differently.
-fn drain_open_containers(open: Vec<String>) -> Vec<IrBlock> {
+fn drain_open_containers(open: Vec<String>) -> Vec<Block> {
     // Innermost first, so the tags nest the way the source opened them.
     open.into_iter()
         .rev()
-        .map(|html| IrBlock::Aozora {
+        .map(|html| Block::Aozora {
             kind: NodeKind::ContainerClose.as_json_tag().to_owned(),
             // Synthesised, so there is no source text behind it.
             span: None,
@@ -637,12 +635,12 @@ fn drain_open_containers(open: Vec<String>) -> Vec<IrBlock> {
         .collect()
 }
 
-fn table_align(a: TableAlignment) -> IrTableAlign {
+fn table_align(a: TableAlignment) -> TableAlign {
     match a {
-        TableAlignment::Left => IrTableAlign::Left,
-        TableAlignment::Center => IrTableAlign::Center,
-        TableAlignment::Right => IrTableAlign::Right,
-        TableAlignment::None => IrTableAlign::Default,
+        TableAlignment::Left => TableAlign::Left,
+        TableAlignment::Center => TableAlign::Center,
+        TableAlignment::Right => TableAlign::Right,
+        TableAlignment::None => TableAlign::Default,
     }
 }
 
@@ -658,7 +656,7 @@ fn sourcepos_to_range(s: &Sourcepos) -> Option<Range> {
 }
 
 struct TableMeta {
-    align: Vec<IrTableAlign>,
+    align: Vec<TableAlign>,
     source_line: Option<u32>,
     range: Option<Range>,
 }
@@ -798,13 +796,13 @@ mod tests {
         let second = builder.walk_block(children.next().expect("second block"));
 
         for (blocks, expected) in [(&first, "｜A《a》"), (&second, "｜B《b》")] {
-            let [IrBlock::Paragraph { children, .. }] = blocks.as_slice() else {
+            let [Block::Paragraph { children, .. }] = blocks.as_slice() else {
                 panic!("expected a single paragraph, got {blocks:#?}");
             };
             let span = children
                 .iter()
                 .find_map(|inline| match inline {
-                    IrInline::Aozora { kind, span, .. } if kind == "ruby" => *span,
+                    Inline::Aozora { kind, span, .. } if kind == "ruby" => *span,
                     _ => None,
                 })
                 .expect("a ruby inline carrying its source span");
@@ -816,19 +814,19 @@ mod tests {
     fn table_align_maps_every_alignment() {
         assert!(matches!(
             table_align(TableAlignment::Left),
-            IrTableAlign::Left
+            TableAlign::Left
         ));
         assert!(matches!(
             table_align(TableAlignment::Center),
-            IrTableAlign::Center
+            TableAlign::Center
         ));
         assert!(matches!(
             table_align(TableAlignment::Right),
-            IrTableAlign::Right
+            TableAlign::Right
         ));
         assert!(matches!(
             table_align(TableAlignment::None),
-            IrTableAlign::Default
+            TableAlign::Default
         ));
     }
 }
