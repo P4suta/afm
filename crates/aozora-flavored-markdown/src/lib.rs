@@ -551,11 +551,11 @@ fn collect_rendered_blocks<'a>(
 /// ruby's explicit base marker is dropped because the base is unambiguous
 /// without it), and the output is a fixed point.
 ///
-/// Only prose is canonicalised: code (fenced, indented, a span), raw HTML and
-/// a rule row come back as written, at any container depth. Plain CommonMark
-/// therefore passes through verbatim, up to what CommonMark does not itself
-/// distinguish and the parser normalises document-wide — CRLF becomes LF, and
-/// a run of blank lines collapses to one.
+/// Only prose is canonicalised: code (fenced, indented, a span), raw HTML, a
+/// rule row and a codepoint this crate reserves come back as written, at any
+/// container depth. Plain CommonMark therefore passes through verbatim, up to
+/// what CommonMark does not itself distinguish and the parser normalises
+/// document-wide — CRLF becomes LF, a leading BOM goes, blank lines collapse.
 ///
 /// # Examples
 ///

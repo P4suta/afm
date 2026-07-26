@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, serialize};
+use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, sentinels, serialize};
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
 };
@@ -83,7 +83,9 @@ fn serialize_round_trip_regressions_replay_cleanly() {
         |src| {
             // Mirrors the target: I3 (`serialize(serialize(x)) ==
             // serialize(x)`) plus I5, which is the half a fixed point cannot
-            // see — a consistently wrong rewrite satisfies I3.
+            // see — a consistently wrong rewrite satisfies I3 — plus I8, the
+            // half neither can see, since a reserved codepoint overwritten
+            // with U+FFFD is consistent and sits outside any fence.
             let first = serialize(src);
             let second = serialize(&first);
             assert!(
@@ -92,6 +94,14 @@ fn serialize_round_trip_regressions_replay_cleanly() {
             );
             if let Err(e) = check_fence_fidelity(src, &first) {
                 panic!("I5 (fence fidelity) violated for src={src:?}: {e:?}");
+            }
+            for reserved in sentinels::ALL {
+                assert_eq!(
+                    src.matches(reserved).count(),
+                    first.matches(reserved).count(),
+                    "I8 (reserved codepoint fidelity) violated for U+{:04X}\n  src = {src:?}\n  out = {first:?}",
+                    reserved as u32
+                );
             }
         },
         ReplayInput::Utf8,

@@ -25,12 +25,13 @@
 //!   column-anchored on purpose, because deciding a container prefix needs
 //!   the block parser it must not become.
 
-use aozora_flavored_markdown::{Options, serialize};
+use aozora_flavored_markdown::{Options, sentinels, serialize};
 use aozora_flavored_markdown_test_support::check_fence_fidelity;
 use aozora_flavored_markdown_test_support::config::default_config;
 use aozora_flavored_markdown_test_support::generators::{aozora_fragment, commonmark_adversarial};
 use comrak::nodes::{NodeValue, Sourcepos};
 use core::iter::once;
+use core::ops::RangeInclusive;
 use proptest::prelude::*;
 
 /// I3, I5 as the fuzz target reads it, and I5 over every form of code.
@@ -211,6 +212,95 @@ fn indented_code_document() -> impl Strategy<Value = (String, String)> {
     })
 }
 
+/// Block leaves that are CommonMark and *only* CommonMark, one per line-owning
+/// construct, none of them carrying a blank line — so a concatenation of them
+/// is a document `serialize` owes back byte for byte, with no run of blank
+/// lines to collapse and no notation to canonicalise.
+const PLAIN_BLOCKS: &[&str] = &[
+    "aaa\n",
+    "- item\n",
+    "1. item\n",
+    "> quote\n",
+    "# heading\n",
+    "| a | b |\n| - | - |\n| c | d |\n",
+    "[a]: /url\n",
+    "<div>\nraw\n</div>\n",
+    "```\ncode\n```\n",
+    "    indented\n",
+    "***\n",
+    "`span`\n",
+];
+
+fn plain_blocks(count: RangeInclusive<usize>) -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(PLAIN_BLOCKS), count)
+        .prop_map(|blocks| blocks.concat())
+}
+
+/// A run of one `-`, `=` or `_`, at any width either grammar cares about and
+/// several neither does. Deliberately unbounded by the sibling parser's
+/// ten-character threshold: naming that constant here would pin this crate to
+/// one that lives in the other parser, and the width is exactly what decides
+/// whether the two grammars agree about the row.
+fn rule_row() -> impl Strategy<Value = String> {
+    (prop::sample::select(vec!['-', '=', '_']), 1usize..=40)
+        .prop_map(|(rule, width)| String::from(rule).repeat(width))
+}
+
+/// One rule row, somewhere in a pure-CommonMark document, at a drawn
+/// container depth. The row's neighbours are what decide which block owns it
+/// — a paragraph above makes it a setext underline, a list marker makes it a
+/// lazy continuation, a table above makes it a row — so drawing them is the
+/// point.
+fn rule_row_document() -> impl Strategy<Value = String> {
+    (
+        plain_blocks(0..=2),
+        rule_row(),
+        plain_blocks(0..=2),
+        container(),
+    )
+        .prop_map(|(before, row, after, (first, rest))| {
+            contained(&format!("{before}{row}\n{after}"), first, rest)
+        })
+}
+
+/// `prefix_lines` over a document's own lines: the trailing break is put back
+/// afterwards rather than prefixed, since a container prefix on the empty
+/// line after it would be trailing whitespace the author never wrote.
+fn contained(body: &str, first: &str, rest: &str) -> String {
+    format!(
+        "{}\n",
+        prefix_lines(body.trim_end_matches('\n'), first, rest)
+    )
+}
+
+/// One codepoint this crate reserves, in a pure-CommonMark document at a
+/// drawn container depth. Four of the five are rewritten to `U+FFFD` by the
+/// sibling parser on sight, so an unprotected one is the author's byte
+/// destroyed rather than merely markup moved.
+fn reserved_codepoint_document() -> impl Strategy<Value = String> {
+    (
+        plain_blocks(0..=2),
+        prop::sample::select(sentinels::ALL.to_vec()),
+        plain_blocks(0..=2),
+        container(),
+    )
+        .prop_map(|(before, reserved, after, (first, rest))| {
+            contained(&format!("{before}a{reserved}b\n{after}"), first, rest)
+        })
+}
+
+/// The same codepoint amid prose of *both* grammars. Neither shared pool
+/// contains one of its own — which is why the count invariant below was
+/// vacuous for four of the five until this strategy planted them.
+fn reserved_codepoint_in_prose() -> impl Strategy<Value = String> {
+    (
+        prose(),
+        prop::sample::select(sentinels::ALL.to_vec()),
+        prose(),
+    )
+        .prop_map(|(before, reserved, after)| format!("{before}\n{reserved}\n{after}"))
+}
+
 // ----------------------------------------------------------------------
 // Hand-curated regression anchors.
 // ----------------------------------------------------------------------
@@ -325,13 +415,25 @@ fn a_crlf_fence_interior_survives_though_the_document_is_normalised_to_lf() {
 }
 
 #[test]
-fn a_placeholder_codepoint_in_the_source_does_not_expose_the_fence() {
+fn a_reserved_codepoint_in_the_source_does_not_expose_the_fence() {
     // The fourth carve-out: U+E000 is the codepoint the protection itself
     // uses. A source already carrying one used to abort masking outright,
     // leaving the fence to be canonicalised as prose.
-    let src = "\u{E000}\n```\n｜青梅《おうめ》\n```\n";
-    assert_eq!(serialize(src), src);
-    assert_serialize_invariants(src);
+    //
+    // Widened from U+E000 alone to the whole reserved set, which is what
+    // DEV-232 found the family to be: the other four are rewritten to U+FFFD
+    // by the sibling parser on sight, so a source carrying one was not merely
+    // losing its fence's protection, it was losing the codepoint. Read off
+    // `sentinels::ALL` so one added later is covered without editing this.
+    for reserved in sentinels::ALL {
+        let src = format!("{reserved}\n```\n｜青梅《おうめ》\n```\n");
+        assert_eq!(
+            serialize(&src),
+            src,
+            "reserved codepoint or fence rewritten"
+        );
+        assert_serialize_invariants(&src);
+    }
 }
 
 #[test]
@@ -422,6 +524,35 @@ fn a_document_whose_block_structure_moves_between_passes_settles() {
 }
 
 #[test]
+fn a_rule_row_is_held_wherever_commonmark_put_it_not_only_under_a_paragraph() {
+    // A3 (#168) read the family as "the rule row comrak reports as a node",
+    // which is a thematic break or a setext underline. DEV-232 measured that
+    // it is not: the sibling parser isolates any row of `-`/`=`/`_`, and a
+    // `=`-run is not a thematic break at all, so it arrives as a paragraph's
+    // own text, a lazy continuation, or a table row. Every line below round-
+    // tripped wrong before the fix, and all but the last changed the rendered
+    // HTML outright — the list split, the blockquote split, the last row fell
+    // out of the table, a paragraph became a paragraph plus an indented code
+    // block.
+    //
+    // The exhaustive matrix (three rule characters × five widths × eighteen
+    // block contexts) lives in `tests/serialize_commonmark_identity.rs`;
+    // these are the shapes worth naming in the file that owns the invariant.
+    for src in [
+        "- aaa\n==========\n",
+        "> aaa\n==========\n",
+        "| a |\n| - |\n| b |\n==========\n",
+        "aaa\n    ----------\n",
+        "aaa\n    __________\n",
+        "[a]: /url\n----------\n",
+        "# h\n==========\n",
+    ] {
+        assert_eq!(serialize(src), src, "rule row rewritten: {src:?}");
+        assert_serialize_invariants(src);
+    }
+}
+
+#[test]
 fn plain_commonmark_passes_through_verbatim() {
     // `serialize`'s rustdoc has claimed this all along, of neither the
     // pre-A2 nor the post-A2 behaviour — which is what makes it worth a test
@@ -445,6 +576,13 @@ fn plain_commonmark_passes_through_verbatim() {
         "Heading\n============\n\nbody\n",
         "1. one\n2. two\n\n   para\n",
         "- item\n\n      indented code in a list\n",
+        // DEV-232: a rule row CommonMark did *not* claim as a break, and a
+        // codepoint this crate reserves. Both are plain CommonMark, and both
+        // came back rewritten until the delegate was taught to lift them.
+        "- aaa\n==========\n",
+        "aaa\n    ----------\n",
+        "a\u{E001}b\n",
+        "> a\u{E004}b\n",
     ] {
         assert_eq!(serialize(src), src, "plain CommonMark rewritten: {src:?}");
     }
@@ -516,5 +654,48 @@ proptest! {
     #[test]
     fn mixed_documents_satisfy_both_serialize_invariants(src in prose()) {
         assert_serialize_invariants(&src);
+    }
+
+    /// I7 — a document that is CommonMark and nothing else comes back byte
+    /// for byte, however the rule row inside it is read.
+    ///
+    /// The half of the README's superset claim no property had: I3 relates
+    /// the output to itself and I5 only to the code regions, so a delegate
+    /// that inserted a blank line in front of every `----------` satisfied
+    /// both while splitting the list, blockquote or table that owned it.
+    #[test]
+    fn a_rule_row_bearing_commonmark_document_is_returned_verbatim(src in rule_row_document()) {
+        prop_assert_eq!(&serialize(&src), &src, "rule row document rewritten");
+        assert_serialize_invariants(&src);
+    }
+
+    /// The same, for the codepoints this crate reserves — which the sibling
+    /// parser overwrites with `U+FFFD` rather than merely moving.
+    #[test]
+    fn a_reserved_codepoint_bearing_document_is_returned_verbatim(
+        src in reserved_codepoint_document()
+    ) {
+        prop_assert_eq!(&serialize(&src), &src, "reserved codepoint document rewritten");
+        assert_serialize_invariants(&src);
+    }
+
+    /// I8 — every reserved codepoint the author typed is still there, and no
+    /// new one appeared. Stated over *any* draw rather than pure CommonMark
+    /// only, because the count is preserved by lifting the codepoint out
+    /// whole, which does not care what grammar surrounds it. This is the
+    /// shape the fuzz target carries.
+    #[test]
+    fn the_reserved_codepoints_of_the_source_are_neither_lost_nor_invented(
+        src in reserved_codepoint_in_prose()
+    ) {
+        let out = serialize(&src);
+        for reserved in sentinels::ALL {
+            prop_assert_eq!(
+                src.matches(reserved).count(),
+                out.matches(reserved).count(),
+                "reserved U+{:04X} count moved for src={:?}\n  out = {:?}",
+                reserved as u32, src, out,
+            );
+        }
     }
 }

@@ -195,11 +195,18 @@ const STRUCTURE_FIXTURES: &[(&str, &str)] = &[
 /// as an element instead.
 const PROMOTED_BY_THIS_CRATE: &[&str] = &["heading hint"];
 
-/// Fixtures carrying a decorative rule (`----------`). CommonMark reads one
-/// as a thematic break, so here it is markup and there it is ten hyphens of
-/// text — a difference in *words* that is block structure doing its job, and
-/// the one place the word-for-word comparison has to look away.
-const RULE_IS_MARKUP_HERE: &[&str] = &[
+/// Fixtures whose bytes CommonMark has claimed, so the delegation to the
+/// parser stops at them: code — fenced, indented, a span — raw HTML, a rule
+/// row, and a codepoint this crate reserves. What the parser reads as ten
+/// hyphens of text is a thematic break here; what it would push onto a stanza
+/// of its own, or rewrite to `U+FFFD`, is left where the author put it. The
+/// difference lands in the document's *words*, which is block structure doing
+/// its job and the one place the word-for-word comparison has to look away.
+///
+/// Only the rule row is reachable from a corpus of pure 青空文庫 documents —
+/// the rest of the family is a CommonMark construct, so it is pinned directly
+/// by [`the_delegation_stops_where_commonmark_owns_the_bytes`] instead.
+const COMMONMARK_OWNS_THE_BYTES: &[&str] = &[
     "CRLF plus a decorative rule",
     "CRLF plus a decorative rule, with blocks",
     "CRLF plus a decorative rule, around a container",
@@ -417,7 +424,7 @@ fn both_renderers_agree_on_the_words_of_the_document() {
     // words twice.
     let mut diffs = Vec::new();
     for (label, src) in pure_aozora_fixtures() {
-        if PROMOTED_BY_THIS_CRATE.contains(label) || RULE_IS_MARKUP_HERE.contains(label) {
+        if PROMOTED_BY_THIS_CRATE.contains(label) || COMMONMARK_OWNS_THE_BYTES.contains(label) {
             continue;
         }
         let aozora = packed(&text_content(&aozora_only_render(src)));
@@ -595,7 +602,7 @@ fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
     // fixtures are skipped for the same reason the word comparison skips them
     // — and the boundary is what the next test pins.
     for (label, src) in pure_aozora_fixtures() {
-        if RULE_IS_MARKUP_HERE.contains(label) {
+        if COMMONMARK_OWNS_THE_BYTES.contains(label) {
             continue;
         }
         let aozora_out = parse(src).to_source();
@@ -611,13 +618,26 @@ fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
 fn the_delegation_stops_where_commonmark_owns_the_bytes() {
     // Where this crate must *not* agree with the parser. The parser is
     // CommonMark-blind by design (ADR-0010) and rewrites a fence body like
-    // prose, and isolates a rule row that CommonMark reads as the underline of
-    // a setext heading; this crate lifts both out of its reach first.
-    // Asserting the divergence, rather than only the agreement above, is what
-    // keeps a future "simplify the delegate" from silently reintroducing the
-    // bug — the parity corpus cannot say it, because such a fixture there
-    // would fail the test above by design.
-    for src in ["```\n｜青梅《おうめ》\n```\n", "本文\n----------\n"] {
+    // prose, isolates a rule row whatever block CommonMark gave it to, and
+    // overwrites a codepoint it reserves for its own lexer with `U+FFFD`;
+    // this crate lifts all three out of its reach first. Asserting the
+    // divergence, rather than only the agreement above, is what keeps a future
+    // "simplify the delegate" from silently reintroducing the bug — the parity
+    // corpus cannot say it, because such a fixture there would fail the test
+    // above by design.
+    //
+    // The last four are DEV-232's finding: A3 read the rule-row member of the
+    // family as "the setext underline", and the row is just as often a
+    // paragraph's own text, a lazy continuation or a table row — none of which
+    // comrak reports as a node to protect.
+    for src in [
+        "```\n｜青梅《おうめ》\n```\n",
+        "本文\n----------\n",
+        "- 本文\n==========\n",
+        "> 本文\n==========\n",
+        "本文\n    ----------\n",
+        "本文\u{E001}続き\n",
+    ] {
         let aozora_out = parse(src).to_source();
         let md_out = aozora_flavored_markdown::serialize(src);
         assert_eq!(md_out, src, "the source must survive this crate: {src:?}");
