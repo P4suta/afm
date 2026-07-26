@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 /// pass by parsing nothing — the failure mode of every hand-written reader.
 const KNOWN_FEATURES: &[&str] = &[
     "aozora-flavored-markdown/miette",
+    "aozora-flavored-markdown/serde",
     "aozora-flavored-markdown/theme",
     "aozora-flavored-markdown/tsify",
     "aozora-flavored-markdown-wasm/default",
@@ -407,6 +408,121 @@ miette = [\"dep:miette\"]
         dependency_entry(manifest, "[dependencies]", "serde"),
         None,
         "an absent dependency must read as absent, not as the next entry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the shape of the `serde` feature, and the general rule it belongs to
+// ---------------------------------------------------------------------------
+//
+// `serde` was a plain `[dependencies]` entry, so `Serialize` was not a choice
+// a consumer made — a crate that renders HTML and never sees JSON built serde
+// and its derive anyway. Nothing here could see that: `every_declared_feature
+// _gates_something` reads the features that exist, and the cost of a
+// dependency that is *not* behind one is invisible to it by construction.
+//
+// The rules below are two halves. The first is the general one: a non-default
+// feature that no member enables is a feature no gate compiles, which is the
+// trap the miette rule above records having fallen into once already. The
+// second is `serde`'s own shape, which ADR-0012 / ADR-0017 make specific —
+// `tsify` cannot be taken without it, because the TypeScript it generates is
+// serde's ABI and the `#[serde(…)]` attributes are what decide the shape.
+
+/// The library's features, each with the members that enable it.
+fn who_enables(feature: &str) -> Vec<String> {
+    member_manifests()
+        .into_iter()
+        .filter(|(krate, _)| krate != "aozora-flavored-markdown")
+        .filter(|(_, manifest)| {
+            dependency_entry(
+                &manifest_text(manifest),
+                "[dependencies]",
+                "aozora-flavored-markdown",
+            )
+            .is_some_and(|entry| entry.contains(&format!("\"{feature}\"")))
+        })
+        .map(|(krate, _)| krate)
+        .collect()
+}
+
+#[test]
+fn every_non_default_library_feature_is_turned_on_by_some_member() {
+    // Feature resolution is per package across the whole build, so a feature
+    // nobody enables is code no `just` recipe compiles — not the `cfg`-gated
+    // impls, not their unit tests. It fails no gate; it removes them from
+    // every gate at once, silently.
+    let orphans: Vec<String> = declared_features()
+        .iter()
+        .filter(|feature| feature.krate == "aozora-flavored-markdown")
+        .filter(|feature| feature.name != "default" && who_enables(&feature.name).is_empty())
+        .map(|feature| feature.name.clone())
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "no workspace member enables {orphans:?}, so nothing in `just ci` compiles what they \
+         gate. Either a member takes the feature, or it is dead surface and should go"
+    );
+}
+
+#[test]
+fn serde_is_a_choice_the_consumer_makes_and_tsify_makes_it_for_them() {
+    let crates = workspace_root().join("crates");
+    let library = manifest_text(&crates.join("aozora-flavored-markdown/Cargo.toml"));
+
+    // Optional, or the feature gating it is a fiction and every consumer
+    // builds serde whether their `Cargo.toml` asked for it or not.
+    let entry = dependency_entry(&library, "[dependencies]", "serde")
+        .expect("the library must declare `serde`; retarget this rule rather than deleting it");
+    assert!(
+        entry.contains("optional = true"),
+        "`serde` must stay optional: a mandatory derive dependency is a cost every consumer \
+         pays and none of them chose. Found: {entry}"
+    );
+
+    let features = features_in("aozora-flavored-markdown", &library);
+    let serde = features
+        .iter()
+        .find(|feature| feature.name == "serde")
+        .expect("the library must declare a `serde` feature");
+    assert_eq!(
+        serde.enables,
+        ["dep:serde"],
+        "the `serde` feature must be exactly the optional dependency's gate"
+    );
+    assert!(
+        !features.iter().any(|feature| feature.name == "default"),
+        "the library declares a `default` feature again; `serde` and `tsify` are opt-in, and a \
+         default that turned either on would put the cost back where it was"
+    );
+
+    let tsify = features
+        .iter()
+        .find(|feature| feature.name == "tsify")
+        .expect("the library must declare a `tsify` feature");
+    assert!(
+        tsify.enables.iter().any(|enabled| enabled == "serde"),
+        "`tsify` must imply `serde`: tsify reads the same `#[serde(…)]` attributes to decide \
+         the TypeScript shape and generates serde's own ABI, so the two cannot be taken apart. \
+         Found: {:?}",
+        tsify.enables
+    );
+}
+
+#[test]
+fn the_crates_that_write_json_are_the_ones_that_enable_serde() {
+    // Named rather than merely counted: these are the two crates whose gates
+    // compile the derives at all. The CLI writes the
+    // `aozora-md.diagnostics.v1` envelope for `--format json`; the wasm
+    // bridge posts the IR through serde-wasm-bindgen. Dropping the feature
+    // from either would take `#[cfg(feature = "serde")]` code — including
+    // `ir::types`' own unit tests — out of `just test` without failing it.
+    assert_eq!(
+        who_enables("serde"),
+        [
+            "aozora-flavored-markdown-cli",
+            "aozora-flavored-markdown-wasm"
+        ],
+        "the members that put this crate's types on a wire changed"
     );
 }
 

@@ -14,12 +14,11 @@ use core::iter;
 use core::ops::Range;
 use std::borrow::Cow;
 
-use serde::Serialize;
-
 /// Serialises to `"error"` / `"warning"` / `"note"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // A level added upstream arrives here as a new variant; `#[non_exhaustive]`
 // keeps that additive for external `match`es, the same bargain the IR enums
 // take (ADR-0013).
@@ -34,9 +33,10 @@ pub enum Severity {
 }
 
 /// Serialises to `"source"` / `"internal"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // As `Severity`: an origin added upstream must not break external `match`es.
 #[non_exhaustive]
 pub enum DiagnosticSource {
@@ -47,9 +47,10 @@ pub enum DiagnosticSource {
 }
 
 /// Byte-offset range into the source text, end-exclusive.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // Deliberately NOT `#[non_exhaustive]`, unlike every other public struct
 // here: a span is geometrically closed at start + end, so sealing it would
 // only cost every consumer literal construction and functional record update
@@ -90,9 +91,10 @@ impl From<Span> for Range<usize> {
 }
 
 /// A non-fatal observation about a render; `Display` is the message alone.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 #[non_exhaustive]
 pub struct Diagnostic {
     // Private, and read through the accessors below. These names are still the

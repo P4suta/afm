@@ -21,11 +21,11 @@ workspace = true
 # so there is nothing else to depend on. See the workspace manifest.
 aozora    = { workspace = true }
 comrak    = { workspace = true }
-# Used by the IR module to derive Serialize on `ir::Document`. Pulled
-# in as a regular dep so downstream consumers (aozora-flavored-markdown-wasm, aozora-flavored-markdown-epub)
-# can round-trip the IR via serde-wasm-bindgen / serde_json without
-# extra adapters.
-serde     = { workspace = true }
+# Optional: `Serialize` + `Deserialize` on the IR and the diagnostic
+# envelope, behind the `serde` feature below. Off by default so a consumer
+# that renders HTML and never touches JSON does not build serde at all — the
+# sibling `aozora` crate draws the same line with its `json` feature.
+serde     = { workspace = true, optional = true }
 # `Error`, the one fallible entry point's error type (`canonicalize`). The
 # rendering entry points stay infallible, so nothing else in the crate has a
 # `Result` for this to describe.
@@ -62,11 +62,20 @@ insta             = { workspace = true }
 # No `default`: the former `html` feature gated nothing (zero
 # `#[cfg(feature = "html")]` in the workspace) and could not — `ir::Block::Aozora`
 # carries rendered HTML, so a build without the renderer was never buildable.
+
+# `Serialize` + `Deserialize` on the IR, `Diagnostic` and the geometry
+# types. ADR-0012 and ADR-0017 call the `aozora-md.diagnostics.v1` envelope
+# and the IR a stable wire format, so both directions are derived together:
+# a format only one side can read is a dead letter, and the `#[serde(default)]`
+# beside every `skip_serializing_if` is what makes the pair a round trip.
+serde = ["dep:serde"]
 # TypeScript-binding derives (see `tsify` / `wasm-bindgen` above).
 # Enabled by aozora-flavored-markdown-wasm so wasm-pack emits the IR +
 # diagnostic `.d.ts` directly (ADR-0017). Off by default — host builds
-# never pull wasm-bindgen.
-tsify = ["dep:tsify", "dep:wasm-bindgen"]
+# never pull wasm-bindgen. Implies `serde`: `tsify` reads the same
+# `#[serde(…)]` attributes to decide the TS shape, and the ABI it generates
+# is serde's.
+tsify = ["dep:tsify", "dep:wasm-bindgen", "serde"]
 # The canonical `aozora-md-*` stylesheets as `pub const` strings
 # (`theme::{HORIZONTAL_CSS, VERTICAL_CSS}`), embedded from this crate's
 # `theme/` directory. Pure data, no dependencies — off by default so a
