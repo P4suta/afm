@@ -25,7 +25,7 @@ use std::fs;
 use std::path::Path;
 
 use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir, serialize};
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
 };
@@ -390,7 +390,7 @@ fn any_options() -> impl Strategy<Value = Options> {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// The XSS corpus is fixed, so it only covers payloads someone thought
     /// of. This crosses the option space with the adversarial generators

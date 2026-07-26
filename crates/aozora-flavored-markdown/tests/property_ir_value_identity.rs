@@ -5,7 +5,7 @@
 //! was pinned on one hand-written document, again as HTML
 //! (`streaming_blocks::concatenated_block_html_matches_the_document_render`).
 //! Both stopped at the HTML because HTML was the only output that could be
-//! compared: `IrDocument`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
+//! compared: `Document`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
 //! no `PartialEq`, so an IR that differed run to run — or between the document
 //! and the streaming path — had nothing to fail.
 //!
@@ -17,7 +17,7 @@
 //! `From<Span> for Range<usize>` a consumer is meant to use.
 //!
 //! The coordinate walk goes through the serialised form on purpose: a new
-//! `IrBlock` / `IrInline` variant joins these properties without anyone
+//! `Block` / `Inline` variant joins these properties without anyone
 //! remembering to add an arm, which a typed walker with a `_ => {}` cannot
 //! promise.
 
@@ -25,9 +25,9 @@ use core::hash::Hash;
 use core::ops::Range as ByteRange;
 use std::hash::{DefaultHasher, Hasher};
 
-use aozora_flavored_markdown::ir::{IrBlock, Position, Range, Span};
+use aozora_flavored_markdown::ir::{Block, Position, Range, Span};
 use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir};
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
 };
@@ -112,7 +112,7 @@ fn assert_the_streaming_path_agrees(src: &str) {
     let options = Options::default();
     let document = render_to_ir(src, &options);
     let (blocks, diagnostics) = render_blocks_to_ir(src, &options);
-    let streamed: Vec<IrBlock> = blocks.iter().flat_map(|block| block.ir.clone()).collect();
+    let streamed: Vec<Block> = blocks.iter().flat_map(|block| block.ir.clone()).collect();
     assert_eq!(
         streamed, document.ir.blocks,
         "the streamed IR is not the document's for src={src:?}"
@@ -152,7 +152,7 @@ fn assert_coordinates_address_the_source(src: &str) {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// Determinism, as the value rather than as the string: two independent
     /// renders of one source agree on IR, HTML and diagnostics alike. A

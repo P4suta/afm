@@ -27,7 +27,7 @@
 
 use aozora_flavored_markdown::html::render_to_string;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::aozora_fragment;
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_html_tag_balance, check_no_bare_bracket,
@@ -178,7 +178,7 @@ fn aozora_in_gfm_list_items_is_well_formed() {
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// Aozora notation embedded in a GFM strikethrough / autolink
     /// paragraph must satisfy every always-on tier predicate plus

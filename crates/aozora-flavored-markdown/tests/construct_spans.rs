@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use aozora_flavored_markdown::ir::{IrBlock, IrInline, Span};
+use aozora_flavored_markdown::ir::{Block, Inline, Span};
 use aozora_flavored_markdown::{Options, render_to_ir};
 
 /// One projected construct: its tag, its range, and its HTML fragment.
@@ -39,26 +39,26 @@ fn constructs_of(src: &str) -> Vec<Projected> {
     out
 }
 
-fn collect_blocks(blocks: &[IrBlock], out: &mut Vec<Projected>) {
+fn collect_blocks(blocks: &[Block], out: &mut Vec<Projected>) {
     for block in blocks {
         match block {
-            IrBlock::Aozora {
+            Block::Aozora {
                 kind, span, html, ..
             } => out.push(Projected {
                 kind: kind.clone(),
                 span: *span,
                 html: html.clone(),
             }),
-            IrBlock::Paragraph { children, .. } | IrBlock::Heading { children, .. } => {
+            Block::Paragraph { children, .. } | Block::Heading { children, .. } => {
                 collect_inlines(children, out);
             }
-            IrBlock::Blockquote { children, .. } => collect_blocks(children, out),
-            IrBlock::List { items, .. } => {
+            Block::Blockquote { children, .. } => collect_blocks(children, out),
+            Block::List { items, .. } => {
                 for item in items {
                     collect_blocks(&item.children, out);
                 }
             }
-            IrBlock::Table { header, rows, .. } => {
+            Block::Table { header, rows, .. } => {
                 for row in iter::once(header).chain(rows) {
                     for cell in &row.cells {
                         collect_inlines(cell, out);
@@ -70,18 +70,18 @@ fn collect_blocks(blocks: &[IrBlock], out: &mut Vec<Projected>) {
     }
 }
 
-fn collect_inlines(inlines: &[IrInline], out: &mut Vec<Projected>) {
+fn collect_inlines(inlines: &[Inline], out: &mut Vec<Projected>) {
     for inline in inlines {
         match inline {
-            IrInline::Aozora { kind, span, html } => out.push(Projected {
+            Inline::Aozora { kind, span, html } => out.push(Projected {
                 kind: kind.clone(),
                 span: *span,
                 html: html.clone(),
             }),
-            IrInline::Strong { children, .. }
-            | IrInline::Emphasis { children, .. }
-            | IrInline::Link { children, .. }
-            | IrInline::Image { alt: children, .. } => collect_inlines(children, out),
+            Inline::Strong { children, .. }
+            | Inline::Emphasis { children, .. }
+            | Inline::Link { children, .. }
+            | Inline::Image { alt: children, .. } => collect_inlines(children, out),
             _ => {}
         }
     }

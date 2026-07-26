@@ -21,7 +21,7 @@ workspace = true
 # so there is nothing else to depend on. See the workspace manifest.
 aozora    = { workspace = true }
 comrak    = { workspace = true }
-# Used by the IR module to derive Serialize on `IrDocument`. Pulled
+# Used by the IR module to derive Serialize on `ir::Document`. Pulled
 # in as a regular dep so downstream consumers (aozora-flavored-markdown-wasm, aozora-flavored-markdown-epub)
 # can round-trip the IR via serde-wasm-bindgen / serde_json without
 # extra adapters.

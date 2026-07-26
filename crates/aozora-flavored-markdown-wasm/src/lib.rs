@@ -9,8 +9,8 @@
 
 #![forbid(unsafe_code)]
 
-use aozora::{Document as AozoraDoc, json};
-use aozora_flavored_markdown::ir::{IrBlock, IrDocument};
+use aozora::json;
+use aozora_flavored_markdown::ir::{Block, Document};
 use aozora_flavored_markdown::{Diagnostic, Options, render_blocks_to_ir, render_to_ir};
 use serde::Serialize;
 use tsify::Tsify;
@@ -31,7 +31,7 @@ pub fn init_panic_hook() {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct RenderResult {
-    ir: IrDocument,
+    ir: Document,
     /// A debug / fallback surface: hosts that ship a JS renderer should
     /// render from `ir` instead.
     html: String,
@@ -132,7 +132,7 @@ pub fn hash_source(source: &str) -> u64 {
 pub struct BlockResult {
     /// Usually one entry; empty for comrak constructs with no IR
     /// projection, several for a paired-container drain.
-    ir: Vec<IrBlock>,
+    ir: Vec<Block>,
     html: String,
     /// 1-based source line (serialised as `sourceLine`).
     source_line: u32,
@@ -216,14 +216,19 @@ fn now_ms() -> f64 {
 ///
 /// The raw 青空文庫 parser, **not** the aozora-flavored-markdown pipeline, so
 /// its spans are in source coordinates.
+// Named for the parser it wraps rather than `Document`, because the ABI is
+// where the disambiguation belongs: `tsify` derives a TS name from the Rust
+// one, so `ir::Document` already claims `Document` in the emitted `.d.ts` —
+// and so does the DOM. Two `Document` declarations in one `.d.ts` merge
+// silently instead of failing, which is the worse of the two outcomes.
 #[derive(Debug)]
 #[wasm_bindgen]
-pub struct Document {
-    inner: AozoraDoc,
+pub struct AozoraDocument {
+    inner: aozora::Document,
 }
 
 #[wasm_bindgen]
-impl Document {
+impl AozoraDocument {
     /// A source past the ~4 GiB span budget — which no JS string reaches —
     /// yields an empty document rather than throwing, so the editor's
     /// per-keystroke path has no failure mode to handle.

@@ -79,7 +79,7 @@ missing. Beyond that:
   (ADR-0023). Touching what a byte range covers needs a case in
   `tests/construct_spans.rs`.
 - **IR projection** — `src/ir/`. Every notation projects to one
-  `IrBlock::Aozora` / `IrInline::Aozora` (ADR-0022). Tests in
+  `ir::Block::Aozora` / `ir::Inline::Aozora` (ADR-0022). Tests in
   `tests/ir_aozora.rs`. Bumping the IR schema is semver-major: the wasm
   bridge and the obsidian plugin validate it on the JS side.
 - **CSS classes** — `AOZORA_MD_CLASSES` is derived from the sibling

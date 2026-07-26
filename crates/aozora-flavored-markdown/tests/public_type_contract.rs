@@ -34,12 +34,12 @@ use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
 
-use aozora_flavored_markdown::ir::{IrBlock, IrDocument, IrInline, IrTableAlign, Position, Range};
+use aozora_flavored_markdown::ir::{Block, Document, Inline, Position, Range, TableAlign};
 use aozora_flavored_markdown::{
     Diagnostic, DiagnosticSource, Options, Rendered, RenderedBlock, RenderedIr, Severity, Span,
     render, render_blocks_to_ir, render_to_ir,
 };
-use aozora_flavored_markdown_test_support::config::default_config;
+use aozora_flavored_markdown_test_support::config;
 use proptest::prelude::*;
 
 /// One document reaching every container in the IR: heading, paragraph,
@@ -85,7 +85,7 @@ struct Seen {
     aligns: usize,
 }
 
-fn visit_blocks(blocks: &[IrBlock], seen: &mut Seen) {
+fn visit_blocks(blocks: &[Block], seen: &mut Seen) {
     for block in blocks {
         behaves_as_a_hashable_value(block);
         seen.blocks += 1;
@@ -93,20 +93,20 @@ fn visit_blocks(blocks: &[IrBlock], seen: &mut Seen) {
     }
 }
 
-fn visit_children(block: &IrBlock, seen: &mut Seen) {
+fn visit_children(block: &Block, seen: &mut Seen) {
     match block {
-        IrBlock::Paragraph { children, .. } | IrBlock::Heading { children, .. } => {
+        Block::Paragraph { children, .. } | Block::Heading { children, .. } => {
             visit_inlines(children, seen);
         }
-        IrBlock::Blockquote { children, .. } => visit_blocks(children, seen),
-        IrBlock::List { items, .. } => {
+        Block::Blockquote { children, .. } => visit_blocks(children, seen),
+        Block::List { items, .. } => {
             for item in items {
                 behaves_as_a_hashable_value(item);
                 seen.items += 1;
                 visit_blocks(&item.children, seen);
             }
         }
-        IrBlock::Table {
+        Block::Table {
             header,
             rows,
             align,
@@ -128,15 +128,15 @@ fn visit_children(block: &IrBlock, seen: &mut Seen) {
     }
 }
 
-fn visit_inlines(inlines: &[IrInline], seen: &mut Seen) {
+fn visit_inlines(inlines: &[Inline], seen: &mut Seen) {
     for inline in inlines {
         behaves_as_a_hashable_value(inline);
         seen.inlines += 1;
         match inline {
-            IrInline::Strong { children, .. }
-            | IrInline::Emphasis { children, .. }
-            | IrInline::Link { children, .. } => visit_inlines(children, seen),
-            IrInline::Image { alt, .. } => visit_inlines(alt, seen),
+            Inline::Strong { children, .. }
+            | Inline::Emphasis { children, .. }
+            | Inline::Link { children, .. } => visit_inlines(children, seen),
+            Inline::Image { alt, .. } => visit_inlines(alt, seen),
             _ => {}
         }
     }
@@ -332,7 +332,7 @@ fn the_default_of_every_defaulted_type_is_its_empty_value() {
         "the default range is empty at the origin"
     );
     assert!(
-        IrDocument::default().blocks.is_empty(),
+        Document::default().blocks.is_empty(),
         "the default document has no blocks"
     );
 
@@ -361,23 +361,23 @@ fn the_default_alignment_is_the_one_a_marker_less_column_projects() {
     // every other test — this is what says which variant it belongs on.
     let src = "| a | b | c |\n|---|:--:|--:|\n| 1 | 2 | 3 |\n";
     let rendered = render_to_ir(src, &Options::default());
-    let IrBlock::Table { align, .. } = &rendered.ir.blocks[0] else {
+    let Block::Table { align, .. } = &rendered.ir.blocks[0] else {
         panic!("expected a table, got {:?}", rendered.ir.blocks[0]);
     };
     assert_eq!(
         align[0],
-        IrTableAlign::default(),
+        TableAlign::default(),
         "a column with no alignment marker must project the default variant"
     );
     assert_ne!(
         align[1],
-        IrTableAlign::default(),
+        TableAlign::default(),
         "a centred column must not project the default variant"
     );
 }
 
 proptest! {
-    #![proptest_config(default_config())]
+    #![proptest_config(config::default())]
 
     /// `len` / `is_empty` / `From<Span>` agree with each other and with the
     /// `Range<usize>` a caller would otherwise hand-write — over the whole
@@ -427,10 +427,10 @@ const OPEN_BY_DESIGN: &[&str] = &["Span", "Position", "Range"];
 const SEALED_BY_RULE: &[&str] = &[
     "Severity",
     "DiagnosticSource",
-    "IrTableAlign",
-    "IrDocument",
-    "IrTableRow",
-    "IrListItem",
+    "TableAlign",
+    "Document",
+    "TableRow",
+    "ListItem",
 ];
 
 #[derive(Debug)]
@@ -747,7 +747,7 @@ impl Options {
 }
 
 impl StreamingIrBuilder {
-    pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
+    pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<Block> {
         Vec::new()
     }
 }

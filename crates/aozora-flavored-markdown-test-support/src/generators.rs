@@ -154,7 +154,7 @@ pub fn commonmark_adversarial() -> impl Strategy<Value = String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::default_config;
+    use crate::config;
 
     /// The mixed-grammar atoms are why this crate owns the generator rather
     /// than borrowing a parser-side one, so a future trim must not drop
@@ -173,7 +173,7 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(default_config())]
+        #![proptest_config(config::default())]
 
         /// A typo in the literal codepoint range would silently feed
         /// notation triggers into the heading properties.

@@ -14,8 +14,10 @@ const DEFAULT_CASES: u32 = 128;
 
 /// Persisted failure seeds land in each test's `proptest-regressions/` file,
 /// which is committed, so a past failure replays first on every later run.
+// Called qualified — `config::default()` — so the module supplies the noun the
+// name used to repeat.
 #[must_use]
-pub fn default_config() -> ProptestConfig {
+pub fn default() -> ProptestConfig {
     ProptestConfig {
         cases: cases_from(env::var(CASES_ENV).ok().as_deref()),
         max_shrink_iters: 10_000,

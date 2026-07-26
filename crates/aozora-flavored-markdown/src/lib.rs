@@ -313,7 +313,7 @@ pub struct Rendered {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedIr {
-    pub ir: ir::IrDocument,
+    pub ir: ir::Document,
     pub html: String,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -373,18 +373,18 @@ pub fn render(input: &str, options: &Options) -> Rendered {
 /// Notation that changes the document's *shape* rather than its content is
 /// reflected in the IR structure, not as an `Aozora` node: a heading hint
 /// (`［＃「X」は大見出し］`) promotes its host paragraph to
-/// `IrBlock::Heading`, and an annotation inside a heading body drops out.
+/// `Block::Heading`, and an annotation inside a heading body drops out.
 /// Both mirror the HTML renderer, so one call's IR and HTML describe the
 /// same document.
 ///
 /// # Examples
 ///
 /// ```
-/// use aozora_flavored_markdown::ir::IrBlock;
+/// use aozora_flavored_markdown::ir::Block;
 /// use aozora_flavored_markdown::{Options, render_to_ir};
 ///
 /// let rendered = render_to_ir("# 第一章\n\n本文", &Options::default());
-/// assert!(matches!(rendered.ir.blocks.first(), Some(IrBlock::Heading { .. })));
+/// assert!(matches!(rendered.ir.blocks.first(), Some(Block::Heading { .. })));
 /// ```
 ///
 /// Oversized input degrades as in [`render`].
@@ -396,7 +396,7 @@ pub fn render(input: &str, options: &Options) -> Rendered {
 pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     if !source_within_span_budget(input) {
         return RenderedIr {
-            ir: ir::IrDocument::default(),
+            ir: ir::Document::default(),
             html: String::new(),
             diagnostics: vec![Diagnostic::source_too_large(input.len())],
         };
@@ -490,7 +490,7 @@ fn format_root<'a>(
 pub struct RenderedBlock {
     /// Usually one block; empty for comrak constructs the IR does not model
     /// (definition lists, footnote refs, raw HTML, …).
-    pub ir: Vec<ir::IrBlock>,
+    pub ir: Vec<ir::Block>,
     pub html: String,
     /// 1-based line where this block began in the source.
     pub source_line: u32,
@@ -554,7 +554,7 @@ pub fn render_blocks_to_ir(
     // child so the construct stream stays in lockstep — a per-call builder
     // would restart the cursor at 0 for every block and misalign
     // Aozora projection against the table.
-    let mut blocks_ir: Vec<Vec<ir::IrBlock>> = root
+    let mut blocks_ir: Vec<Vec<ir::Block>> = root
         .children()
         .map(|child| builder.walk_block(child))
         .collect();
@@ -573,7 +573,7 @@ pub fn render_blocks_to_ir(
 fn collect_rendered_blocks<'a>(
     root: &'a AstNode<'a>,
     options: &Options,
-    mut blocks_ir: Vec<Vec<ir::IrBlock>>,
+    mut blocks_ir: Vec<Vec<ir::Block>>,
     mask_originals: &[char],
 ) -> Vec<RenderedBlock> {
     // The AST has already been spliced at the document level by the
