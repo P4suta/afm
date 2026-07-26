@@ -25,6 +25,26 @@ _ci  := if _in == "1" { "" } else { "docker compose run --rm --no-TTY ci" }
 # image nightly is present, so the direct form works there too.
 _fuzz := if _in == "1" { "" } else { "docker compose run --rm fuzz" }
 
+# Every cargo invocation below passes `--locked`. Cargo.lock is the resolution
+# of record; a recipe that silently re-resolves lets a green local run, CI and
+# the published crate each compile a different dependency graph, and the one
+# that differs is discovered by a user. `--locked` rather than `--frozen`:
+# `--frozen` also implies `--offline`, which breaks the first build in a cold
+# container that still has to fetch the registry.
+#
+# The tools with no such flag, and why each is already covered:
+#   cargo fmt, cargo insta review/accept — never resolve the graph.
+#   cargo audit — Cargo.lock IS its input; it cannot read a different one.
+#   cargo semver-checks — no `--locked` in its CLI.
+#   cargo fuzz — the fuzz crate is its own workspace and its Cargo.lock is
+#     git-ignored on purpose (regenerated per build), so there is nothing to
+#     assert against.
+#
+# Two files spell cargo calls this one does not: `bacon.toml` (the jobs behind
+# `just watch`) and the `Dockerfile` (tool installs). They carry the same flag,
+# and `crates/xtask/tests/lock_binding.rs` reads all three plus the workflows
+# so the policy is a test rather than a habit.
+
 # --- metadata -----------------------------------------------------------------
 
 # Default: show this help, recipes grouped by area
@@ -41,23 +61,23 @@ default:
 # waiting for `just test` to error out at the same site.
 [group('build')]
 check:
-    {{_dev}} cargo check --workspace --all-targets
+    {{_dev}} cargo check --locked --workspace --all-targets
 
 # Build all workspace crates
 [group('build')]
 build:
-    {{_dev}} cargo build --workspace --all-targets
+    {{_dev}} cargo build --locked --workspace --all-targets
 
 # Build rustdoc for every crate — the only gate that runs the
 # `broken_intra_doc_links = "deny"` rustdoc lint (check / clippy skip it).
 [group('build')]
 doc:
-    {{_dev}} cargo doc --workspace --no-deps --document-private-items
+    {{_dev}} cargo doc --locked --workspace --no-deps --document-private-items
 
 # Build release binaries
 [group('build')]
 build-release:
-    {{_dev}} cargo build --release --workspace
+    {{_dev}} cargo build --locked --release --workspace
 
 # Drop into an interactive dev shell
 [group('build')]
@@ -67,19 +87,19 @@ shell:
 # Run the aozora-flavored-markdown CLI with arbitrary args (same as ./bin/aozora-flavored-markdown ARGS)
 [group('build')]
 run *ARGS:
-    {{_dev}} cargo run --package aozora-flavored-markdown-cli --quiet -- {{ARGS}}
+    {{_dev}} cargo run --locked --package aozora-flavored-markdown-cli --quiet -- {{ARGS}}
 
 # --- tests --------------------------------------------------------------------
 
 # Run the full test suite (unit + integration + snapshot)
 [group('test')]
 test *ARGS:
-    {{_dev}} cargo nextest run --workspace --all-targets {{ARGS}}
+    {{_dev}} cargo nextest run --locked --workspace --all-targets {{ARGS}}
 
 # Run doctests (nextest skips these by design)
 [group('test')]
 test-doc:
-    {{_dev}} cargo test --workspace --doc
+    {{_dev}} cargo test --locked --workspace --doc
 
 # `just test` (nextest) leaves `.snap.new` files but does not apply them.
 # Review pending insta snapshot changes interactively (accept/reject each).
@@ -102,19 +122,19 @@ snapshot-accept:
 # binary is deterministic and costs milliseconds.
 [group('test')]
 prop:
-    {{_dev}} cargo nextest run --workspace --all-features --test 'property_*' --test options_surface_contract --run-ignored default
+    {{_dev}} cargo nextest run --locked --workspace --all-features --test 'property_*' --test options_surface_contract --run-ignored default
 
 # Deep property sweep — 4096 cases per block, used before cutting a
 # release to exercise invariants beyond the default CI budget.
 [group('test')]
 prop-deep:
-    {{_dev}} bash -c 'AOZORA_PROPTEST_CASES=4096 cargo nextest run --workspace --all-features --test "property_*" --test options_surface_contract --run-ignored default'
+    {{_dev}} bash -c 'AOZORA_PROPTEST_CASES=4096 cargo nextest run --locked --workspace --all-features --test "property_*" --test options_surface_contract --run-ignored default'
 
 # Replay one proptest failure from its seed (printed on nextest's FAIL line).
 # Optional TARGET narrows to one `property_*` test binary; default is all.
 [group('test')]
 prop-seed SEED TARGET="property_*":
-    {{_dev}} bash -c 'AOZORA_PROPTEST_SEED={{SEED}} cargo nextest run --workspace --all-features --test "{{TARGET}}" --run-ignored default'
+    {{_dev}} bash -c 'AOZORA_PROPTEST_SEED={{SEED}} cargo nextest run --locked --workspace --all-features --test "{{TARGET}}" --run-ignored default'
 
 # Run every `invariant_unit_` predicate test — narrow regression target
 # that skips the full proptest sweep. Scoped to `--workspace` rather than one
@@ -122,14 +142,14 @@ prop-seed SEED TARGET="property_*":
 # and a package-pinned filter silently selected zero tests once already.
 [group('test')]
 invariants:
-    {{_dev}} cargo nextest run --workspace --lib -E 'test(invariant_unit_)'
+    {{_dev}} cargo nextest run --locked --workspace --lib -E 'test(invariant_unit_)'
 
 # CommonMark 0.31.2 (652 cases, pass = 652/652) + GFM extension compliance.
 # A `#[cfg(test)] mod` of the library, not an integration test: the spec's
 # expected output needs raw-HTML passthrough, which has no public switch.
 [group('test')]
 spec:
-    {{_dev}} cargo nextest run --package aozora-flavored-markdown --lib -E 'test(conformance::)'
+    {{_dev}} cargo nextest run --locked --package aozora-flavored-markdown --lib -E 'test(conformance::)'
 
 # Aozora-layer fixtures (annotation cases, golden 56656, corpus sweep)
 # now live in the sibling `aozora` repo; run `just spec-aozora`
@@ -279,30 +299,30 @@ fuzz-status:
 # Benchmarks (criterion)
 [group('bench')]
 bench *ARGS:
-    {{_dev}} cargo bench --workspace {{ARGS}}
+    {{_dev}} cargo bench --locked --workspace {{ARGS}}
 
 # Save the current criterion numbers as a named baseline (default
 # `pre-opt`). Run before a structural change; `bench-compare` diffs
 # against it. criterion stores baselines under target/criterion/.
 [group('bench')]
 bench-baseline NAME="pre-opt":
-    {{_dev}} cargo bench --workspace -- --save-baseline {{NAME}}
+    {{_dev}} cargo bench --locked --workspace -- --save-baseline {{NAME}}
 
 # Re-run the benches and report the % change vs a saved baseline.
 [group('bench')]
 bench-compare NAME="pre-opt":
-    {{_dev}} cargo bench --workspace -- --baseline {{NAME}}
+    {{_dev}} cargo bench --locked --workspace -- --baseline {{NAME}}
 
 # Heap-allocation profile (dhat) of one large render: total allocations
 # + peak resident bytes, and a dhat-heap.json for the dh_view viewer.
 [group('bench')]
 dhat:
-    {{_dev}} cargo run --release --example dhat_render -p aozora-flavored-markdown
+    {{_dev}} cargo run --locked --release --example dhat_render -p aozora-flavored-markdown
 
 # Small-document render latency percentiles (p50/p90/p99/max).
 [group('bench')]
 latency:
-    {{_dev}} cargo run --release --example latency_hist -p aozora-flavored-markdown
+    {{_dev}} cargo run --locked --release --example latency_hist -p aozora-flavored-markdown
 
 # Host-only CPU flamegraph of a render hot loop. samply needs
 # perf_event_open(2), which Docker's seccomp blocks, so it records on the host
@@ -311,7 +331,7 @@ latency:
 # /tmp/aozora-md-render.json.gz (open at https://profiler.firefox.com).
 [group('bench')]
 samply-render REPEAT="200":
-    cargo build --profile bench --example samply_render -p aozora-flavored-markdown
+    cargo build --locked --profile bench --example samply_render -p aozora-flavored-markdown
     samply record --save-only --no-open -o /tmp/aozora-md-render.json.gz -r 4000 -- target/release/examples/samply_render {{REPEAT}}
 
 # --- coverage -----------------------------------------------------------------
@@ -336,6 +356,7 @@ _COV_IGNORE := "(target/|/main\\.rs$|xtask/|aozora-flavored-markdown-test-suppor
 [group('coverage')]
 coverage:
     {{_dev}} cargo llvm-cov nextest \
+        --locked \
         --workspace \
         --ignore-filename-regex '{{_COV_IGNORE}}' \
         --fail-under-regions {{_COV_FLOOR}}
@@ -345,6 +366,7 @@ coverage:
 [group('coverage')]
 coverage-html:
     {{_dev}} cargo llvm-cov nextest \
+        --locked \
         --workspace \
         --ignore-filename-regex '{{_COV_IGNORE}}' \
         --html --output-dir coverage/html
@@ -355,6 +377,7 @@ coverage-html:
 [group('coverage')]
 coverage-branch:
     {{_fuzz}} cargo +nightly llvm-cov nextest \
+        --locked \
         --branch \
         --workspace \
         --ignore-filename-regex '{{_COV_IGNORE}}'
@@ -373,7 +396,7 @@ lint: fmt-check clippy typos strict-code comment-discipline
 # (RETIRED_UPSTREAM_PATHS).
 [group('lint')]
 comment-discipline:
-    {{_dev}} cargo run --package xtask --quiet -- comment-discipline
+    {{_dev}} cargo run --locked --package xtask --quiet -- comment-discipline
 
 # Forbid patterns that hide bugs or introduce unstable/unsafe surface in our
 # own crates. Every check is defensive — each represents a pattern we have
@@ -582,7 +605,7 @@ fmt:
 # so keep the CLI surface to `-D warnings` only.
 [group('lint')]
 clippy:
-    {{_dev}} cargo clippy --workspace --all-targets --all-features -- -D warnings
+    {{_dev}} cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 # Typo check
 [group('lint')]
@@ -660,7 +683,7 @@ verify-version-pins:
 # Dependency linting (licenses, advisories, bans)
 [group('lint')]
 deny:
-    {{_dev}} cargo deny check
+    {{_dev}} cargo deny --locked check
 
 # Unused-dependency scan (stable, syn-based). Flags deps declared in any
 # Cargo.toml — including `[workspace.dependencies]` — that no crate actually
@@ -678,7 +701,7 @@ deny:
 shear:
     {{_dev}} bash -c 'command -v cargo-shear >/dev/null 2>&1 \
         || cargo binstall --no-confirm --locked --root /usr/local cargo-shear; \
-        cargo shear'
+        cargo shear --locked'
 
 # comrak resolves from the registry like every other dependency (ADR-0024),
 # so the lockfile graph is the whole graph — no shim needed to reach it.
@@ -690,7 +713,7 @@ audit:
 # Unused dependency scan (requires nightly)
 [group('lint')]
 udeps:
-    {{_fuzz}} cargo +nightly udeps --workspace --all-targets
+    {{_fuzz}} cargo +nightly udeps --locked --workspace --all-targets
 
 # Semver break detection (runs against published baseline once crates are on crates.io)
 [group('lint')]
@@ -705,7 +728,7 @@ semver:
 # https://github.com/P4suta/aozora.git refs/heads/main`.
 [group('upstream')]
 aozora-bump SHA:
-    {{_dev}} cargo run --package xtask --quiet -- aozora-bump {{SHA}}
+    {{_dev}} cargo run --locked --package xtask --quiet -- aozora-bump {{SHA}}
 
 # Regenerate `spec/*.json` from the vendored cmark-format sources under
 # `spec/sources/*.txt`. Offline-pure: both the sources and the generated
@@ -715,10 +738,10 @@ aozora-bump SHA:
 spec-refresh:
     {{_dev}} bash -c '\
         set -euo pipefail && \
-        cargo run --package xtask --quiet -- spec-refresh \
+        cargo run --locked --package xtask --quiet -- spec-refresh \
             --input spec/sources/commonmark-0.31.2.txt \
             --output spec/commonmark-0.31.2.json && \
-        cargo run --package xtask --quiet -- spec-refresh \
+        cargo run --locked --package xtask --quiet -- spec-refresh \
             --input spec/sources/gfm-0.29-gfm.txt \
             --output spec/gfm-0.29-gfm.json'
 
@@ -727,7 +750,7 @@ spec-refresh:
 # New Architecture Decision Record (MADR template)
 [group('docs')]
 adr TITLE:
-    {{_dev}} cargo run --package xtask --quiet -- new-adr {{TITLE}}
+    {{_dev}} cargo run --locked --package xtask --quiet -- new-adr {{TITLE}}
 
 # Draft the unreleased section from Conventional-Commits history, to stdout.
 #
@@ -749,15 +772,15 @@ changelog:
 # (and on a version bump — the man page embeds the version). Commit the diff.
 [group('release')]
 dist-assets:
-    {{_dev}} cargo build --package aozora-flavored-markdown-cli --quiet
-    {{_dev}} cargo run --package xtask --quiet -- gen-dist-assets
+    {{_dev}} cargo build --locked --package aozora-flavored-markdown-cli --quiet
+    {{_dev}} cargo run --locked --package xtask --quiet -- gen-dist-assets
 
 # Drift gate: fail if the committed dist assets differ from fresh generation.
 # Wired into `just ci` (mirrors `types-check`); run `just dist-assets` to fix.
 [group('release')]
 dist-assets-check:
-    {{_dev}} cargo build --package aozora-flavored-markdown-cli --quiet
-    {{_dev}} cargo run --package xtask --quiet -- gen-dist-assets --check
+    {{_dev}} cargo build --locked --package aozora-flavored-markdown-cli --quiet
+    {{_dev}} cargo run --locked --package xtask --quiet -- gen-dist-assets --check
 
 # --- playground (browser try-it-online) --------------------------------------
 
@@ -775,11 +798,13 @@ _pg_install := "docker compose run --rm playground"
 # (referenced by `playground/package.json` as `file:../crates/aozora-flavored-markdown-wasm/pkg`).
 # `RUSTC_WRAPPER=` bypasses sccache, which wasm-pack's `rustup target add`
 # subprocess corrupts (SCCACHE_GHA_ENABLED); the wasm cache benefit is marginal.
+# Everything after `--` goes to the `cargo build` wasm-pack shells out to, so
+# that is where this build's `--locked` has to sit.
 [group('playground')]
 wasm-build:
     {{_dev}} bash -c 'RUSTC_WRAPPER= wasm-pack build crates/aozora-flavored-markdown-wasm \
         --target bundler --release \
-        --out-dir pkg --out-name aozora_flavored_markdown_wasm'
+        --out-dir pkg --out-name aozora_flavored_markdown_wasm -- --locked'
 
 # Dev-profile wasm build for playground iteration. Skips wasm-opt and uses
 # the `dev` cargo profile; output is 3-5× bigger and slower at runtime but
@@ -790,7 +815,7 @@ wasm-build:
 wasm-build-dev:
     {{_dev}} bash -c 'RUSTC_WRAPPER= wasm-pack build crates/aozora-flavored-markdown-wasm \
         --target bundler --dev \
-        --out-dir pkg --out-name aozora_flavored_markdown_wasm'
+        --out-dir pkg --out-name aozora_flavored_markdown_wasm -- --locked'
 
 # Install playground deps via bun. Depends on `wasm-build` because the
 # `file:` link requires the target directory to exist before `bun install`
@@ -798,9 +823,18 @@ wasm-build-dev:
 # so `node_modules` lands in the named volume (`playground-node-modules`)
 # instead of the host bind mount — important on Docker Desktop / WSL
 # where cross-fs writes are slow.
+#
+# `--frozen-lockfile` is the JS half of the `--locked` policy above: bun.lock
+# is the resolution of record and no recipe may rewrite it. KNOWN DRIFT
+# SOURCE: the `aozora-flavored-markdown-wasm` entry is a `file:` link into
+# `crates/aozora-flavored-markdown-wasm/pkg`, whose package.json carries the
+# workspace version — so a version bump invalidates bun.lock and this recipe
+# fails until it is regenerated. That regeneration belongs to the release
+# bump, not here; until the cargo-release hook lands, run a bare
+# `bun install` once by hand and commit the lockfile with the bump.
 [group('playground')]
 playground-install: wasm-build
-    {{_pg_install}} bash -c 'bun install'
+    {{_pg_install}} bash -c 'bun install --frozen-lockfile'
 
 # Vite dev server with HMR at http://localhost:5173/
 [group('playground')]
@@ -812,7 +846,7 @@ playground-dev: playground-install
 # reload after `just wasm-build-dev`).
 [group('playground')]
 playground-dev-fast: wasm-build-dev
-    {{_pg_install}} bash -c 'bun install' && \
+    {{_pg_install}} bash -c 'bun install --frozen-lockfile' && \
     {{_pg}} bash -c 'bun run dev -- --host 0.0.0.0'
 
 # Production build → playground/dist/ (consumed by .github/workflows/docs.yml)
@@ -1080,7 +1114,7 @@ hooks-uninstall:
 # Remove build artifacts (keeps volumes; use `docker compose down -v` for volumes)
 [group('dev')]
 clean:
-    {{_dev}} cargo clean --workspace
+    {{_dev}} cargo clean --locked --workspace
 
 # Tear down all compose state (destroys cached registry/target/sccache volumes)
 [confirm("Destroy cached cargo registry/target/sccache volumes? Next build is cold. [y/N]")]
