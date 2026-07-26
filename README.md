@@ -102,7 +102,7 @@ directly (ADR-0002).
 ```sh
 just setup             # build the dev image, install hooks, run tests
 just test              # cargo nextest via Docker
-just lint              # fmt + clippy + typos + strict-code + comment-discipline
+just lint              # fmt + clippy + typos + strict-code + comments + workflows
 just ci                # the full gate set, locally
 ```
 

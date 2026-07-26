@@ -29,13 +29,17 @@ automatically.
 6. **Comments earn their place.** `just comment-discipline` fails on doc
    comments naming retired upstream paths, and on a doc-comment ratio above
    the pinned ceiling. Write down *why*, not what the code already says.
+7. **Workflows are linted, not reviewed by eye.** The rules they answer to —
+   `uses:` on a 40-hex commit rather than a mutable tag above all — live in
+   [`zizmor.yml`](zizmor.yml), and `just zizmor` / `just actionlint` are
+   gates. The `# vX.Y.Z` beside a ref is a comment for humans and Dependabot.
 
 ## Setup and the development loop
 
 ```sh
 just setup                     # build the dev image, install hooks, run tests
 just watch                     # bacon watcher inside the container
-just lint                      # fmt + clippy + typos + strict-code + comment-discipline
+just lint                      # fmt + clippy + typos + strict-code + comments + workflows
 just test                      # full workspace nextest
 just ci                        # exactly the gate CI runs
 ```
@@ -132,12 +136,12 @@ and triggered by a `v<semver>` tag:
 
 `release.yml` is **generated, never hand-edited**: `dist plan` diffs it
 against the generator and fails on any drift, including the `actions/*`
-refs inside it. Those refs are commit-pinned via
-`[dist.github-action-commits]` in `dist-workspace.toml`; move one forward by
-resolving the tag, updating the entry and its comment, running `dist
-generate`, and committing both files. `.github/dependabot.yml` excludes the
-generated file from version updates — a *security* PR can still rewrite it,
-in which case close the PR and bump the pin instead. The weekly
+refs inside it. They still have to satisfy `zizmor.yml`, and are
+commit-pinned via `[dist.github-action-commits]` in `dist-workspace.toml`;
+move one forward by resolving the tag, updating the entry and its comment,
+running `dist generate`, and committing both files. `.github/dependabot.yml`
+excludes the generated file from version updates — a *security* PR can still
+rewrite it, in which case close the PR and bump the pin instead. The weekly
 `release-pins` workflow fails when a pin freezes behind its upstream.
 
 **ADR-0002 scope exception**: release builds run on native runners so each

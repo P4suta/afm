@@ -384,9 +384,10 @@ coverage-branch:
 
 # --- lint / static analysis ---------------------------------------------------
 
-# Run all lints (fmt + clippy + typos + strict-code + comment-discipline)
+# Run all lints (fmt + clippy + typos + strict-code + comment-discipline
+# + zizmor + actionlint)
 [group('lint')]
-lint: fmt-check clippy typos strict-code comment-discipline
+lint: fmt-check clippy typos strict-code comment-discipline zizmor actionlint
 
 # Comment drift gate. Fails when a Rust comment (`//` / `///` / `//!`) or a
 # TOML manifest comment (`#`) names a path that used to exist inside the
@@ -611,6 +612,53 @@ clippy:
 [group('lint')]
 typos:
     {{_dev}} typos
+
+# GitHub Actions static analysis (zizmor). The workflows are the one part of
+# this repo no compiler reads, so the properties they have to hold — every
+# `uses:` on an immutable commit, a checkout that doesn't leave a usable token
+# behind, a job that cannot write what it has no business writing — are held
+# by this instead. The policy is `zizmor.yml`; this recipe only runs it.
+#
+# `--offline`: the online audits want a GitHub token, and a gate has to mean
+# the same thing on a fork PR, on main and on a laptop. Every audit the pinning
+# policy rests on is decidable from the tree.
+#
+# The `command -v` line is a bridge, not the install: CI pulls the published
+# `aozora-md-dev:latest`, which lags a Dockerfile tool addition by one merge,
+# so the tool provisions itself into the pulled image until it republishes
+# (`just shear` carries the same bridge in the form a cargo crate needs). Install
+# and use share one container because `docker compose run --rm` keeps nothing.
+# The version is read back out of the Dockerfile ARG that pins it, so the
+# bridge cannot install a build the image would not have had.
+[group('lint')]
+zizmor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -oE 'ZIZMOR_VERSION=[0-9.]+' Dockerfile | head -1 | cut -d= -f2)
+    url="https://github.com/zizmorcore/zizmor/releases/download/v${v}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+    {{_dev}} bash -c "set -euo pipefail
+        command -v zizmor >/dev/null 2>&1 || curl -fsSL '${url}' | tar -xz -C /usr/local/bin zizmor
+        zizmor --offline --no-progress ."
+
+# Workflow schema + expression lint (actionlint). Complements zizmor rather
+# than overlapping it: zizmor asks whether a workflow is safe, actionlint
+# whether it is a workflow at all — an unknown key, a `needs:` naming a job
+# that isn't there, a `${{ }}` whose type cannot be what it is used as.
+#
+# shellcheck / pyflakes integration is switched OFF explicitly. actionlint
+# picks both up from PATH when present, so leaving it to autodetect makes the
+# gate mean one thing in the dev image (which ships neither) and another in a
+# shell that happens to have them. Same Dockerfile-pinned bootstrap as
+# `just zizmor` above, for the same one merge.
+[group('lint')]
+actionlint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -oE 'ACTIONLINT_VERSION=[0-9.]+' Dockerfile | head -1 | cut -d= -f2)
+    url="https://github.com/rhysd/actionlint/releases/download/v${v}/actionlint_${v}_linux_amd64.tar.gz"
+    {{_dev}} bash -c "set -euo pipefail
+        command -v actionlint >/dev/null 2>&1 || curl -fsSL '${url}' | tar -xz -C /usr/local/bin actionlint
+        actionlint -no-color -shellcheck= -pyflakes="
 
 # Assert tool-version pins agree across files: bun (Dockerfile /
 # playground/package.json / docs.yml) and wasm-pack (Dockerfile / docs.yml).
@@ -878,9 +926,9 @@ ci:
     #     so a BACKGROUND lane overlaps them onto the compile lane for free.
     #   * `check` is dropped: clippy + build both compile --all-targets, so the
     #     bare `cargo check` pass was redundant. The gates `lint` bundles
-    #     (fmt-check/typos/strict-code/comment-discipline) run once on their own
-    #     instead of a second time inside `lint`; only `clippy` is left to run
-    #     from `lint`.
+    #     (fmt-check/typos/strict-code/comment-discipline/zizmor/actionlint) run
+    #     once on their own instead of a second time inside `lint`; only
+    #     `clippy` is left to run from `lint`.
     #   * playground-build (wasm-pack + the in-repo playground's tsc/vite) runs
     #     LAST in the foreground lane: wasm-pack invokes rustc and shares the
     #     target dir. It mirrors CI's `wasm-build` job, so a wasm / IR /
@@ -916,7 +964,8 @@ ci:
     # --- foreground lane: instant text gates first (fail-fast in seconds),
     # --- then the compile pipeline (sequential — shared target dir). ---------
     fg_steps=(typos fmt-check strict-code verify-version-pins \
-              comment-discipline clippy build dist-assets-check \
+              zizmor actionlint comment-discipline clippy \
+              build dist-assets-check \
               test test-doc prop spec doc coverage udeps \
               playground-build)
     halted=""

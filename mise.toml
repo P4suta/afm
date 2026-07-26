@@ -1,9 +1,15 @@
 # mise (https://mise.jdx.dev/) — dev-tool versions for the host inner loop and
 # the commit-msg hook (`mise install`). Docker is the canonical build/test env
 # (ADR-0002); Rust + cargo plugins live in .config/mise/config.toml.
+#
+# The gates that run these tools live in the `Justfile` and execute inside the
+# dev image, where the Dockerfile pins the version. What is here is the host
+# copy, for editor integration and for reaching a tool without a container —
+# so "latest" is right here and a pin is right there.
 [tools]
 just = "latest"
 lefthook = "latest"
 "github:crate-ci/typos" = "latest"
 "github:crate-ci/committed" = "latest"
 actionlint = "latest"
+zizmor = "latest"
