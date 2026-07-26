@@ -23,7 +23,7 @@
 pub mod config;
 pub mod generators;
 
-use aozora_flavored_markdown::{is_contract_class, sentinels};
+use aozora_flavored_markdown::{classes, sentinels};
 use core::error::Error;
 use core::fmt;
 use std::borrow::Cow;
@@ -162,8 +162,8 @@ pub enum Violation {
         first_offset: usize,
         snippet: String,
     },
-    /// Tier G — an `aozora-md-*` class token is not in the library's
-    /// [`AOZORA_MD_CLASSES`](aozora_flavored_markdown::AOZORA_MD_CLASSES).
+    /// Tier G — an `aozora-md-*` class token the library's
+    /// [`classes::is_known`] does not recognise.
     UnknownCssClass { class: String, snippet: String },
     /// Tier I — a double-encoded HTML entity (e.g. `&amp;lt;`) slipped in.
     DoubleEncodedEntity { snippet: String },
@@ -228,7 +228,7 @@ impl fmt::Display for Violation {
             ),
             Self::UnknownCssClass { class, snippet } => write!(
                 f,
-                "Tier G: unknown CSS class `{class}` (not in AOZORA_MD_CLASSES): {snippet}",
+                "Tier G: unknown CSS class `{class}` (classes::is_known says no): {snippet}",
             ),
             Self::DoubleEncodedEntity { snippet } => write!(
                 f,
@@ -501,9 +501,9 @@ pub fn check_no_xss_marker(html: &str) -> Result<(), Violation> {
 
 /// Tier G — every `aozora-md-*` class token is recognised.
 ///
-/// Recognised means listed in
-/// [`AOZORA_MD_CLASSES`](aozora_flavored_markdown::AOZORA_MD_CLASSES), or a
-/// listed base plus a numeric suffix (`aozora-md-indent-N` and friends).
+/// Recognised is [`classes::is_known`] and nothing looser: a family rule of
+/// this checker's own is how a library predicate that rejected
+/// `aozora-md-indent-2` stayed invisible to every gate calling this.
 ///
 /// `<pre><code>` regions are stripped first: a user-supplied info string
 /// surfaces as `class="language-X"` for arbitrary `X`, and that attribute is
@@ -519,7 +519,7 @@ pub fn check_css_class_contract(html: &str) -> Result<(), Violation> {
         if !token.starts_with("aozora-md-") {
             continue;
         }
-        if is_recognised_class(token) {
+        if classes::is_known(token) {
             continue;
         }
         return Err(Violation::UnknownCssClass {
@@ -947,26 +947,6 @@ fn collect_class_tokens(html: &str) -> HashSet<String> {
     out
 }
 
-fn is_recognised_class(class: &str) -> bool {
-    if is_contract_class(class) {
-        return true;
-    }
-    // Family-suffix variants: any `<base>-<suffix>` where `<base>` is
-    // in the pinned list. Covers numeric modifiers
-    // (`aozora-md-indent-2`, `aozora-md-container-indent-3`, `aozora-md-align-end-1`)
-    // and slug modifiers (`aozora-md-section-break-choho`,
-    // `aozora-md-bouten-goma`, `aozora-md-section-break-dan`, …) emitted by
-    // the sibling renderer.
-    if let Some(stem_end) = class.rfind('-') {
-        let stem = &class[..stem_end];
-        let suffix = &class[stem_end + 1..];
-        if !suffix.is_empty() && is_contract_class(stem) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Only ASCII is folded, so non-ASCII stays byte-comparable.
 fn find_ascii_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
     let haystack_bytes = haystack.as_bytes();
@@ -1367,7 +1347,7 @@ mod tests {
     #[test]
     fn invariant_unit_check_no_bare_bracket_tolerates_an_inline_code_span() {
         // An inline code span restores the literal context just as a fence
-        // does — `render_to_string("`可哀想［＃「可哀想」に傍点］`")` emits
+        // does — `to_html("`可哀想［＃「可哀想」に傍点］`")` emits
         // exactly this, and it is the pinned correct output.
         let html = "<p><code>可哀想［＃「可哀想」に傍点］</code> in a code span</p>";
         check_no_bare_bracket(html).unwrap();
@@ -1535,6 +1515,21 @@ mod tests {
     fn invariant_unit_check_css_class_contract_ignores_non_aozora_md_classes() {
         let html = r#"<pre class="language-rust">let x = 1;</pre>"#;
         check_css_class_contract(html).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_css_class_contract_fires_on_an_unlisted_slug_on_a_listed_stem() {
+        // The slack this checker used to hold: `<listed stem>-<anything>`
+        // passed, so Tier G could not tell a real slug family member
+        // (`aozora-md-bouten-goma`, which the parser lists in full) from a
+        // token no renderer emits. The parser's list carries every slug
+        // verbatim and only the numeric variants by stem, so the numeric rule
+        // in `classes::is_known` is the whole of what a suffix may mean.
+        let html = r#"<em class="aozora-md-bouten aozora-md-bouten-zzq">x</em>"#;
+        let Err(Violation::UnknownCssClass { class, .. }) = check_css_class_contract(html) else {
+            panic!("expected UnknownCssClass for a slug the parser does not publish");
+        };
+        assert_eq!(class, "aozora-md-bouten-zzq");
     }
 
     #[test]

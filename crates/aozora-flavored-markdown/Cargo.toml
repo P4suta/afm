@@ -54,10 +54,9 @@ dhat              = { workspace = true }
 insta             = { workspace = true }
 
 [features]
-default = ["html"]
-# HTML renderer. Enabled by default but kept behind a feature so
-# downstream tools can parse without pulling in the renderer.
-html = []
+# No `default`: the former `html` feature gated nothing (zero
+# `#[cfg(feature = "html")]` in the workspace) and could not — `ir::Block::Aozora`
+# carries rendered HTML, so a build without the renderer was never buildable.
 # TypeScript-binding derives (see `tsify` / `wasm-bindgen` above).
 # Enabled by aozora-flavored-markdown-wasm so wasm-pack emits the IR +
 # diagnostic `.d.ts` directly (ADR-0017). Off by default — host builds

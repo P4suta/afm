@@ -20,7 +20,7 @@ workspace = true
 # without parsing the source itself. Its one production-side dependency is the
 # library whose output it checks, so the two contracts the predicates read —
 # the PUA sentinel set (`sentinels::ALL`) and the `aozora-md-*` class list
-# (`AOZORA_MD_CLASSES`) — come from the crate that owns them instead of being
+# (`classes::all()`) — come from the crate that owns them instead of being
 # re-hardcoded here. The edge is dev-only in the other direction (the library
 # reaches this crate through `[dev-dependencies]`), so no cycle reaches a
 # published build graph.

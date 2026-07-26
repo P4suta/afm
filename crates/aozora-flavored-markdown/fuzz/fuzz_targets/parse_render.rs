@@ -1,8 +1,8 @@
-//! Fuzz target — `aozora_flavored_markdown::html::render_to_string` on arbitrary UTF-8.
+//! Fuzz target — `aozora_flavored_markdown::to_html` on arbitrary UTF-8.
 //!
 //! Arbitrary bytes are decoded as UTF-8 (invalid sequences skip this
 //! iteration). The resulting source is pushed through
-//! `render_to_string` and every always-on invariant predicate is
+//! `to_html` and every always-on invariant predicate is
 //! asserted via [`assert_html_invariants`]. A crash artifact's
 //! Debug-formatted panic message is therefore self-contained: tier
 //! label + source + html excerpt + violation details — no manual
@@ -17,7 +17,7 @@
 
 #![no_main]
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::assert_html_invariants;
 use libfuzzer_sys::fuzz_target;
 
@@ -25,6 +25,6 @@ fuzz_target!(|data: &[u8]| {
     let Ok(src) = core::str::from_utf8(data) else {
         return;
     };
-    let html = render_to_string(src);
+    let html = to_html(src);
     assert_html_invariants(src, &html);
 });

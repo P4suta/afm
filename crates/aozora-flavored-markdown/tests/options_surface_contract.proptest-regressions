@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3da67ee00a17208eba8350b91d4248bf66debdd05c92cf69fc9750a8070dbfbd # shrinks to src = "［＃ここから字下げ］", opts = Options { aozora: true, hardbreaks: false, smart_punctuation: false, cjk_friendly_emphasis: false, source_line_anchors: false, tables: false, strikethrough: false, autolinks: false, task_lists: false }

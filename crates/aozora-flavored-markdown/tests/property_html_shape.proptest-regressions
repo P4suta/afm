@@ -16,3 +16,4 @@ cc 28a3bdb5e96003f845bccb6e489861b885f373f7f022e9f15bb82eb18d65bc8c # shrinks to
 cc 8196391c6a59136a9188ff80dca6098f24e978032c2c1ec020892e30458150c0 # shrinks to src = "［＃］"
 cc b9494bb5883f4cb337820308f3a18a0417b745041e022a4e2e49cf315ae4d69b # shrinks to src = "［＃改［＃「」は大見出し］"
 cc 42daf7d3b667536aa339703bee04a3efcac0f0ee8bc1d030280437276b90b0db # shrinks to src = "```\n｜青梅《おうめ》\n［＃改ページ］\n```\n"
+cc cea6d6e665d19c89be20985d652b80bc0871b952bdc38bb4c2ff211d194c7ecd # shrinks to src = "> ［＃ここから字下げ］\n> ｜引用《いんよう》\n> ［＃ここで字下げ終わり］\n"

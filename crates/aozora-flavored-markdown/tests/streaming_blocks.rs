@@ -1,9 +1,9 @@
 //! Tests for the per-block streaming render API
-//! (`render_blocks_to_ir`).
+//! (`render_blocks`).
 
 use aozora_flavored_markdown::ir::Block;
 use aozora_flavored_markdown::{
-    Diagnostic, Options, RenderedBlock, render, render_blocks_to_ir, sentinels,
+    Diagnostic, Options, RenderedBlock, RenderedBlocks, render, render_blocks, sentinels,
 };
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 
@@ -11,7 +11,11 @@ use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 /// code-block mask one block at a time, so the leak has to be measured on the
 /// chunk the caller is handed rather than on a re-joined document.
 fn render_blocks_checked(src: &str, options: &Options) -> (Vec<RenderedBlock>, Vec<Diagnostic>) {
-    let (blocks, diagnostics) = render_blocks_to_ir(src, options);
+    let RenderedBlocks {
+        blocks,
+        diagnostics,
+        ..
+    } = render_blocks(src, options);
     for block in &blocks {
         if let Err(e) = check_no_sentinel_leak(src, &block.html) {
             panic!("sentinel leaked: {e:?}\n  block html = {:?}", block.html);

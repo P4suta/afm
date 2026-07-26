@@ -26,7 +26,7 @@ use core::ops::Range as ByteRange;
 use std::hash::{DefaultHasher, Hasher};
 
 use aozora_flavored_markdown::ir::{Block, Position, Range, Span};
-use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir};
+use aozora_flavored_markdown::{Options, RenderedBlocks, render, render_blocks, render_to_ir};
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
@@ -111,7 +111,11 @@ fn serialised(src: &str) -> Value {
 fn assert_the_streaming_path_agrees(src: &str) {
     let options = Options::default();
     let document = render_to_ir(src, &options);
-    let (blocks, diagnostics) = render_blocks_to_ir(src, &options);
+    let RenderedBlocks {
+        blocks,
+        diagnostics,
+        ..
+    } = render_blocks(src, &options);
     let streamed: Vec<Block> = blocks.iter().flat_map(|block| block.ir.clone()).collect();
     assert_eq!(
         streamed, document.ir.blocks,
@@ -181,10 +185,10 @@ proptest! {
             src
         );
 
-        let blocks = render_blocks_to_ir(&src, &options);
+        let blocks = render_blocks(&src, &options);
         prop_assert_eq!(
             &blocks,
-            &render_blocks_to_ir(&src, &options),
+            &render_blocks(&src, &options),
             "two streaming renders of {:?} disagreed",
             src
         );
@@ -272,7 +276,7 @@ fn the_streaming_path_projects_the_document_path_s_ir_for_container_shapes() {
 
 /// The defect the property above had to carve out, pinned as the assertion
 /// that *should* hold. A `［＃…終わり］` with no open is dropped by the parser,
-/// and the block that follows it comes back from `render_blocks_to_ir` with
+/// and the block that follows it comes back from `render_blocks` with
 /// its `html` intact and its `ir` empty — one paragraph of structure lost, on
 /// the path the editor bridge streams. `render_to_ir` keeps it, so the two
 /// public renders of one document disagree.

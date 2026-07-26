@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 
 fn main() -> ExitCode {
     let Some(path) = env::args().nth(1) else {
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 
     // Convenience wrapper — parses with Options::default() and
     // renders the resulting tree in one shot.
-    let html = render_to_string(&input);
+    let html = to_html(&input);
 
     if let Err(e) = io::stdout().write_all(html.as_bytes()) {
         eprintln!("write failed: {e}");

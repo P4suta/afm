@@ -9,7 +9,7 @@
 //! `-`/`=`/`_` is isolated from the preceding paragraph so CommonMark does not
 //! promote it to a setext heading (`<h2>`).
 
-use aozora_flavored_markdown::html;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::{check_heading_integrity, check_no_bare_bracket};
 
 #[test]
@@ -17,7 +17,7 @@ fn big_heading_is_rendered_as_h1() {
     // 大見出し → Markdown H1. Forward-reference target "第一篇" is
     // preceded by its own plain copy so the lexer's target-exists
     // gate passes.
-    let out = html::render_to_string("第一篇［＃「第一篇」は大見出し］");
+    let out = to_html("第一篇［＃「第一篇」は大見出し］");
     assert!(
         out.contains("<h1>第一篇</h1>"),
         "expected <h1>第一篇</h1> in output; got: {out}"
@@ -26,7 +26,7 @@ fn big_heading_is_rendered_as_h1() {
 
 #[test]
 fn medium_heading_is_rendered_as_h2() {
-    let out = html::render_to_string("一［＃「一」は中見出し］");
+    let out = to_html("一［＃「一」は中見出し］");
     assert!(
         out.contains("<h2>一</h2>"),
         "expected <h2>一</h2> in output; got: {out}"
@@ -35,7 +35,7 @@ fn medium_heading_is_rendered_as_h2() {
 
 #[test]
 fn small_heading_is_rendered_as_h3() {
-    let out = html::render_to_string("小題［＃「小題」は小見出し］");
+    let out = to_html("小題［＃「小題」は小見出し］");
     assert!(
         out.contains("<h3>小題</h3>"),
         "expected <h3>小題</h3> in output; got: {out}"
@@ -47,7 +47,7 @@ fn heading_with_preceding_indent_marker_still_becomes_heading() {
     // The 罪と罰 fixture shape: `［＃２字下げ］第一篇［＃「第一篇」は大見出し］`.
     // The post-process must strip the leading indent marker from the
     // paragraph so it doesn't leak into the promoted heading.
-    let out = html::render_to_string("［＃２字下げ］第一篇［＃「第一篇」は大見出し］");
+    let out = to_html("［＃２字下げ］第一篇［＃「第一篇」は大見出し］");
     assert!(
         out.contains("<h1>第一篇</h1>"),
         "expected <h1>第一篇</h1>; got: {out}"
@@ -71,7 +71,7 @@ fn heading_hint_without_preceding_target_promotes_nothing() {
     // to promote. Tier-A canary still holds — `［＃` never appears
     // outside a hidden wrapper.
     let input = "本文［＃「第一篇」は大見出し］";
-    let out = html::render_to_string(input);
+    let out = to_html(input);
     assert!(
         !out.contains("<h1>"),
         "no heading should be promoted without a preceding target; got: {out}"
@@ -92,7 +92,7 @@ fn heading_hint_inside_a_markdown_heading_leaves_the_heading_alone() {
     // text it names, so re-parsing that run resolves it to an unknown
     // annotation. Emitting that would put an `aozora-md-directive` wrapper
     // inside the heading body, which Tier C bars.
-    let out = html::render_to_string("# head第一篇［＃「第一篇」は大見出し］");
+    let out = to_html("# head第一篇［＃「第一篇」は大見出し］");
     assert_eq!(out, "<h1>head第一篇</h1>\n");
     assert!(
         check_heading_integrity(&out).is_ok(),
@@ -106,7 +106,7 @@ fn heading_hint_inside_a_markdown_heading_leaves_the_heading_alone() {
 fn heading_hint_inside_a_table_cell_renders_nothing() {
     // Same reasoning one context over: nothing to promote, so the
     // directive renders as what it is — an instruction, not content.
-    let out = html::render_to_string("| a |\n| - |\n| 第一篇［＃「第一篇」は大見出し］ |");
+    let out = to_html("| a |\n| - |\n| 第一篇［＃「第一篇」は大見出し］ |");
     assert!(
         out.contains("<td>第一篇</td>"),
         "the cell keeps its text and loses the directive: {out}"
@@ -121,7 +121,7 @@ fn long_hyphen_rule_does_not_turn_paragraph_into_setext_heading() {
     // Without phase0's rule-isolation pass, CommonMark would promote
     // the prose to a setext H2.
     let input = "凡例です。\n-----------------------------------\n本文";
-    let out = html::render_to_string(input);
+    let out = to_html(input);
     assert!(
         out.contains("<p>凡例です。</p>"),
         "preceding prose must remain a paragraph; got: {out}"
@@ -140,7 +140,7 @@ fn long_hyphen_rule_does_not_turn_paragraph_into_setext_heading() {
 #[test]
 fn long_equals_rule_does_not_turn_paragraph_into_setext_heading() {
     let input = "凡例です。\n=====================================\n本文";
-    let out = html::render_to_string(input);
+    let out = to_html(input);
     assert!(
         out.contains("<p>凡例です。</p>"),
         "preceding prose must remain a paragraph; got: {out}"
@@ -158,7 +158,7 @@ fn short_setext_heading_still_works() {
     // `DECORATIVE_RULE_MIN_LEN` (10) and therefore untouched — the
     // CommonMark idiom of `Heading\n---\n` still promotes to H2.
     let input = "Heading\n---\nbody";
-    let out = html::render_to_string(input);
+    let out = to_html(input);
     assert!(
         out.contains("<h2>Heading</h2>"),
         "short `---` must still act as a setext underline; got: {out}"
@@ -182,7 +182,7 @@ fn empty_title_heading_hint_never_emits_an_empty_heading() {
         "本文［＃「」は中見出し］",
         "　［＃「　」は小見出し］",
     ] {
-        let out = html::render_to_string(input);
+        let out = to_html(input);
         for level in 1..=6 {
             assert!(
                 !out.contains(&format!("<h{level}></h{level}>")),

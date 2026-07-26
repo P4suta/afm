@@ -16,7 +16,9 @@
 //! is the core guarantee; the assertions additionally pin that the
 //! innermost content still renders.
 
-use aozora_flavored_markdown::{Options, canonicalize, render, render_blocks_to_ir, render_to_ir};
+use aozora_flavored_markdown::{
+    Options, RenderedBlocks, canonicalize, render, render_blocks, render_to_ir,
+};
 
 /// ~100k nested blockquotes on a single line, wrapping a leaf paragraph.
 /// Pre-fix this overflowed `ast_splice::walk`'s recursion; the input is
@@ -43,9 +45,9 @@ fn render_to_ir_survives_deep_blockquote_nesting() {
 }
 
 #[test]
-fn render_blocks_to_ir_survives_deep_blockquote_nesting() {
-    let (blocks, _diagnostics) =
-        render_blocks_to_ir(&deeply_nested_blockquotes(), &Options::default());
+fn render_blocks_survives_deep_blockquote_nesting() {
+    let RenderedBlocks { blocks, .. } =
+        render_blocks(&deeply_nested_blockquotes(), &Options::default());
     assert!(!blocks.is_empty(), "the document should yield blocks");
 }
 

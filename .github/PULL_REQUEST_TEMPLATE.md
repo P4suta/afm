@@ -25,7 +25,7 @@
       `aozora_flavored_markdown::ir` plus a test.
 - [ ] If this changes the renderer-emitted class set: styled it in both
       `crates/aozora-flavored-markdown/theme/` files (`aozora-md-horizontal.css`
-      / `aozora-md-vertical.css`). `AOZORA_MD_CLASSES` derives itself.
+      / `aozora-md-vertical.css`). `classes::all()` derives itself.
 
 ## Related
 

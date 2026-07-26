@@ -13,14 +13,14 @@
 //! splicer rewrites such a sentinel back to the source run it stands for
 //! and keeps the cursor in lockstep.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 
 /// Render, then hold the output to Tier B: no PUA sentinel may survive into
 /// the HTML. Checking at the render site is what gives the predicate the
 /// source it reads.
 fn render_checked(src: &str) -> String {
-    let html = render_to_string(src);
+    let html = to_html(src);
     if let Err(e) = check_no_sentinel_leak(src, &html) {
         panic!("sentinel leaked: {e:?}\n  html = {html:?}");
     }
@@ -218,8 +218,8 @@ fn ruby_inside_an_indented_code_block_renders_literally() {
 fn a_code_block_reads_the_same_fenced_or_indented() {
     // Two spellings of the same block, one masked and one spliced. They
     // reach the reader by different routes and must arrive the same.
-    let fenced = render_to_string("```\n｜青梅《おうめ》\n```\n");
-    let indented = render_to_string("本文\n\n    ｜青梅《おうめ》\n");
+    let fenced = to_html("```\n｜青梅《おうめ》\n```\n");
+    let indented = to_html("本文\n\n    ｜青梅《おうめ》\n");
     assert!(
         indented.ends_with(fenced.trim_end_matches('\n')) || indented.contains(&fenced),
         "fenced {fenced:?} vs indented {indented:?}"

@@ -532,7 +532,15 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // `clippy::missing_errors_doc` requires of a public `Result`, and the `?` its
 // doctest now needs. None of it restates the signature: the signature says
 // `Result<String, Error>` and stops there.
-const MAX_DOC_LINES: u64 = 1_584;
+//
+// Lowered by 4 when the `html` module was flattened into the root. Its 17
+// lines went; 13 came back, and none of them restate a signature: 10 for
+// `to_html`, which has to say what it drops and where to go instead; 3 for
+// `RenderedBlocks`, two of them the line saying why diagnostics are
+// document-scoped — moved off `render_blocks`, which is 2 shorter for it —
+// and 2 in `classes`, where `is_known` now owns the numeric-family rule and
+// has to state it. Bookkeeping after a cut, not a decision.
+const MAX_DOC_LINES: u64 = 1_580;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured

@@ -34,7 +34,9 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::{Options, canonicalize, render, render_blocks_to_ir, sentinels};
+use aozora_flavored_markdown::{
+    Options, RenderedBlocks, canonicalize, render, render_blocks, sentinels,
+};
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
 };
@@ -59,7 +61,7 @@ fn render_blocks_regressions_replay_cleanly() {
             // Mirrors the `render_blocks` target: Tier B per chunk, the
             // rest on the concatenation, which is the only form that owes
             // tag balance when a container spans blocks.
-            let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+            let RenderedBlocks { blocks, .. } = render_blocks(src, &Options::default());
             let mut joined = String::new();
             for block in &blocks {
                 if let Err(e) = check_no_sentinel_leak(src, &block.html) {

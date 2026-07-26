@@ -29,8 +29,10 @@
 //! input raised, and the check runs on every draw, malformed ones
 //! included.
 
-use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown::{Options, render as render_to_diagnostics, render_blocks_to_ir};
+use aozora_flavored_markdown::to_html;
+use aozora_flavored_markdown::{
+    Options, RenderedBlocks, render as render_to_diagnostics, render_blocks,
+};
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
@@ -58,13 +60,30 @@ fn assert_always_on(html: &str, src: &str) {
     assert_html_invariants(src, html);
 }
 
+/// [`to_html`]'s whole contract: [`render`](render_to_diagnostics) with the
+/// diagnostics dropped. Stated in prose since the shim was a module of its
+/// own and checked by nothing — its two tests looked for a `<p>` and a
+/// `<ruby>`, which any renderer passes. Now that it is the root entry point
+/// most of this suite reads, a `to_html` that quietly rendered under
+/// different options would move every assertion here off the render a caller
+/// of `render` actually gets, and every one of them would still be green.
+fn render_via_to_html(src: &str) -> String {
+    let html = to_html(src);
+    assert_eq!(
+        html,
+        render_to_diagnostics(src, &Options::default()).html,
+        "to_html is not `render(…, &Options::default()).html` for src={src:?}"
+    );
+    html
+}
+
 /// The per-block path's share of the same invariants, mirroring the
 /// `render_blocks` fuzz target. Tier B is asserted per chunk, because a leak
 /// into one chunk is what the reader sees; the rest is asserted on the
 /// concatenation, since a paired container legitimately opens in one block
 /// and closes in another and only the joined output owes tag balance.
 fn assert_always_on_per_block(src: &str) {
-    let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+    let RenderedBlocks { blocks, .. } = render_blocks(src, &Options::default());
     let mut joined = String::new();
     for block in &blocks {
         check_no_sentinel_leak(src, &block.html).unwrap_or_else(|e| {
@@ -96,7 +115,7 @@ proptest! {
     /// broad mix of trigger glyphs and plain text.
     #[test]
     fn html_shape_invariants_hold_for_aozora_fragments(src in aozora_fragment(16)) {
-        let html = render_to_string(&src);
+        let html = render_via_to_html(&src);
         assert_always_on(&html, &src);
         assert_gated(&html, &src);
     }
@@ -109,7 +128,7 @@ proptest! {
     /// among them, hold regardless of how malformed the input is.
     #[test]
     fn html_shape_invariants_hold_for_pathological_aozora(src in pathological_aozora(6)) {
-        let html = render_to_string(&src);
+        let html = render_via_to_html(&src);
         assert_always_on(&html, &src);
     }
 
@@ -121,7 +140,7 @@ proptest! {
     fn html_shape_invariants_hold_for_mixed_cm_aozora(
         src in prop_oneof![aozora_fragment(12), commonmark_adversarial()]
     ) {
-        let html = render_to_string(&src);
+        let html = render_via_to_html(&src);
         assert_always_on(&html, &src);
         assert_gated(&html, &src);
     }

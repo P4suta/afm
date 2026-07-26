@@ -45,6 +45,15 @@ const AOZORA_ATOMS: &[&str] = &[
     "［＃",
     "］",
     "※",
+    // The two amount-bearing leaf directives. They are the pool's only route
+    // to the open-ended numeric class family (`aozora-md-indent-2`,
+    // `aozora-md-align-end-3`) — a class the derived contract carries by stem
+    // alone, so it is the one shape a membership predicate can get wrong
+    // while every listed name still answers correctly. Without them the
+    // property suite renders thousands of documents an hour and never once
+    // shows that family to Tier G.
+    "［＃２字下げ］",
+    "［＃地から３字上げ］",
     "改ページ",
     "改丁",
     "漢字",
@@ -88,6 +97,10 @@ const PATHOLOGICAL_ATOMS: &[&str] = &[
     "｜｜",
     "※［＃",
     "［＃ここから字下げ］",
+    // The amount-bearing container open, against the amount-less one above:
+    // the default form renders `…-1` whatever the source says, so only this
+    // one can tell a predicate that reads the number from one that assumes it.
+    "［＃ここから４字下げ］",
     "［＃ここで字下げ終わり］",
     "［＃ここから罫囲み］",
     "［＃ここで罫囲み終わり］",
@@ -136,6 +149,9 @@ const COMMONMARK_ATOMS: &[&str] = &[
     "| ruby | note |\n| -- | -- |\n| ｜青梅《おうめ》 | ［＃改ページ］ |\n",
     "- ｜漢字《かんじ》\n- ~~取り消し~~と［＃「X」に傍点］\n  - ｜入子《いれこ》\n",
     "> ［＃ここから字下げ］\n> ｜引用《いんよう》\n> ［＃ここで字下げ終わり］\n",
+    // Drawn whole, so the numeric family is reachable by *selection* here
+    // rather than only by a lucky join of the atom pool.
+    "- ［＃２字下げ］項目\n- ｜漢字《かんじ》と［＃地から３字上げ］\n",
     "# ｜見出し《みだし》\n\n本文\n",
     "`｜青梅《おうめ》` in a code span, ｜青梅《おうめ》 outside\n",
     // A code span restores the literal context, so the bracket notation
@@ -153,8 +169,97 @@ pub fn commonmark_adversarial() -> impl Strategy<Value = String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use aozora_flavored_markdown::{classes, to_html};
+
     use super::*;
-    use crate::config;
+    use crate::{check_css_class_contract, collect_class_tokens, config};
+
+    // Every atom of every pool, rendered one at a time. A pool entry is a
+    // document in its own right, so this is the whole reachable class
+    // vocabulary without paying for a proptest run to sample it.
+    fn every_atom() -> Vec<&'static str> {
+        AOZORA_ATOMS
+            .iter()
+            .chain(PATHOLOGICAL_ATOMS)
+            .chain(COMMONMARK_ATOMS)
+            .copied()
+            .collect()
+    }
+
+    // The `aozora-md-*` class tokens one atom renders to.
+    fn rendered_classes(atom: &str) -> BTreeSet<String> {
+        collect_class_tokens(&to_html(atom))
+            .into_iter()
+            .filter(|token| token.starts_with(classes::PREFIX))
+            .collect()
+    }
+
+    // A class whose last segment is a number — the open-ended family the
+    // parser publishes by stem only.
+    fn numeric_suffix(class: &str) -> Option<&str> {
+        class
+            .rsplit_once('-')
+            .map(|(_, suffix)| suffix)
+            .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    #[test]
+    fn every_class_the_pools_can_render_is_one_the_library_knows() {
+        // Tier G, asked of the library predicate directly and one atom at a
+        // time, so a name the pools can reach is checked deterministically
+        // instead of whenever the sampler happens to draw it.
+        for atom in every_atom() {
+            for class in rendered_classes(atom) {
+                assert!(
+                    classes::is_known(&class),
+                    "atom {atom:?} renders {class}, which classes::is_known rejects"
+                );
+            }
+            check_css_class_contract(&to_html(atom))
+                .unwrap_or_else(|e| panic!("Tier G violated for atom {atom:?}: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_pools_reach_the_open_ended_numeric_class_family() {
+        // The anti-vacuity half, and the reason the amount-bearing atoms are
+        // in the pools at all: the sweep above is only worth its runtime if
+        // the family whose members the contract does *not* list verbatim is
+        // among the names it sees.
+        let emitted: BTreeSet<String> = every_atom()
+            .iter()
+            .flat_map(|a| rendered_classes(a))
+            .collect();
+        let family: BTreeSet<&String> = emitted
+            .iter()
+            .filter(|class| numeric_suffix(class).is_some())
+            .filter(|class| !classes::all().contains(&class.as_str()))
+            .collect();
+        assert!(
+            !family.is_empty(),
+            "no atom reaches the numeric class family any more; retarget the pools rather \
+             than deleting this guard. Emitted: {emitted:?}"
+        );
+        // The amounts must not all be the parser's default: `［＃ここから字下げ］`
+        // renders `…-1` with no number in the source, so a pool holding only
+        // that form shows the family without ever showing an amount read off
+        // the source.
+        let amounts: BTreeSet<&str> = family
+            .iter()
+            .filter_map(|class| numeric_suffix(class))
+            .collect();
+        assert!(
+            amounts.iter().any(|amount| *amount != "1"),
+            "every family member the pools reach carries the default amount 1: {family:?}"
+        );
+        assert!(
+            family.contains(&"aozora-md-indent-2".to_owned()),
+            "the token the retired predicate answered `false` for is unreachable from the \
+             pools: {family:?}"
+        );
+    }
 
     /// The mixed-grammar atoms are why this crate owns the generator rather
     /// than borrowing a parser-side one, so a future trim must not drop

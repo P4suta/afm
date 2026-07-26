@@ -7,7 +7,7 @@
 //! coverage gate without leaning on inline-test scaffolding.
 
 use aozora_flavored_markdown::ir::{Block, Inline, TableAlign};
-use aozora_flavored_markdown::{Options, render_blocks_to_ir, render_to_ir};
+use aozora_flavored_markdown::{Options, RenderedBlocks, render_blocks, render_to_ir};
 
 fn ir_for(src: &str) -> Vec<Block> {
     render_to_ir(src, &Options::commonmark()).ir.blocks
@@ -274,16 +274,20 @@ fn aozora_enabled_render_to_ir_with_anchors_path() {
 }
 
 #[test]
-fn render_blocks_to_ir_empty_aozora_disabled_path() {
+fn render_blocks_empty_aozora_disabled_path() {
     let opts = Options::commonmark();
-    let (blocks, diagnostics) = render_blocks_to_ir("", &opts);
+    let RenderedBlocks {
+        blocks,
+        diagnostics,
+        ..
+    } = render_blocks("", &opts);
     assert!(blocks.is_empty());
     assert!(diagnostics.is_empty());
 }
 
 #[test]
-fn render_blocks_to_ir_paragraph_carries_source_line() {
-    let (blocks, _) = render_blocks_to_ir("first\n\nsecond\n", &Options::default());
+fn render_blocks_paragraph_carries_source_line() {
+    let RenderedBlocks { blocks, .. } = render_blocks("first\n\nsecond\n", &Options::default());
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].source_line, 1);
     assert_eq!(blocks[1].source_line, 3);

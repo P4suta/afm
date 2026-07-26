@@ -11,7 +11,11 @@
 
 use aozora::json;
 use aozora_flavored_markdown::ir::{Block, Document};
-use aozora_flavored_markdown::{Diagnostic, Options, render_blocks_to_ir, render_to_ir};
+// Aliased because the `renderBlocks` export below is itself a `render_blocks`
+// in Rust, and the ABI's name is the one that cannot move.
+use aozora_flavored_markdown::{
+    Diagnostic, Options, RenderedBlocks, render_blocks as render_blocks_core, render_to_ir,
+};
 use serde::Serialize;
 use tsify::Tsify;
 use twox_hash::XxHash3_64;
@@ -158,7 +162,11 @@ pub fn render_blocks(
 ) -> Result<BlocksResult, JsValue> {
     guard_source_len(source)?;
     let resolved = build_options(options.unwrap_or_default());
-    let (blocks, diagnostics) = render_blocks_to_ir(source, &resolved);
+    let RenderedBlocks {
+        blocks,
+        diagnostics,
+        ..
+    } = render_blocks_core(source, &resolved);
     Ok(BlocksResult {
         blocks: blocks
             .into_iter()

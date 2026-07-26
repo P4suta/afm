@@ -17,7 +17,7 @@
 //! the shipped parser emits reaches it; it is pinned directly in
 //! `crate::constructs`'s unit tests instead of through a document here.
 
-use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir};
+use aozora_flavored_markdown::{Options, RenderedBlocks, render, render_blocks, render_to_ir};
 use aozora_flavored_markdown_test_support::check_html_tag_balance;
 
 /// The diagnostic code a construct that could not be placed would raise.
@@ -131,7 +131,11 @@ fn both_ir_front_doors_describe_what_the_html_one_does() {
         assert!(!whole.diagnostics.iter().any(|d| d.code == UNRESOLVED));
         assert_eq!(whole.html, html_of(src), "{label}");
 
-        let (blocks, diagnostics) = render_blocks_to_ir(src, &Options::default());
+        let RenderedBlocks {
+            blocks,
+            diagnostics,
+            ..
+        } = render_blocks(src, &Options::default());
         assert!(!diagnostics.iter().any(|d| d.code == UNRESOLVED));
         let streamed: String = blocks.iter().map(|block| block.html.as_str()).collect();
         assert_eq!(streamed, html_of(src), "{label}");
