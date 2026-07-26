@@ -25,7 +25,7 @@
 //!   column-anchored on purpose, because deciding a container prefix needs
 //!   the block parser it must not become.
 
-use aozora_flavored_markdown::{Options, sentinels, serialize};
+use aozora_flavored_markdown::{sentinels, serialize};
 use aozora_flavored_markdown_test_support::check_fence_fidelity;
 use aozora_flavored_markdown_test_support::config::default_config;
 use aozora_flavored_markdown_test_support::generators::{aozora_fragment, commonmark_adversarial};
@@ -66,8 +66,17 @@ fn assert_code_survives_verbatim(src: &str, out: &str) {
 }
 
 fn code_node_sources(src: &str) -> Vec<&str> {
+    // The dialect's comrak side, spelled out: the library no longer hands its
+    // comrak options to anyone, and this file locates code nodes by asking
+    // comrak directly.
+    let mut options = comrak::Options::default();
+    options.extension.strikethrough = true;
+    options.extension.table = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.render.hardbreaks = true;
     let arena = comrak::Arena::new();
-    let root = comrak::parse_document(&arena, src, Options::default().comrak());
+    let root = comrak::parse_document(&arena, src, &options);
     let line_starts: Vec<usize> = once(0)
         .chain(src.match_indices('\n').map(|(at, _)| at + 1))
         .collect();

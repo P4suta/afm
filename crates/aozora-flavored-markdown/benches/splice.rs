@@ -11,8 +11,8 @@
 //! * `aozora-flavored-markdown` arm — [`Options::default`]: the lexer pre-pass runs, the
 //!   PUA sentinels are spliced into the comrak AST, and the brand
 //!   rewrite (`aozora-` → `aozora-md-`) fires. This is the full aozora-flavored-markdown path.
-//! * `comrak_only` arm — [`Options::gfm_only`]: `aozora_enabled = false`,
-//!   so the input flows straight through vanilla comrak with no splice.
+//! * `comrak_only` arm — [`Options::gfm`]: the notation pass is off, so the
+//!   input flows straight through vanilla comrak with no splice.
 //!
 //! The delta between the two arms is the aozora-md-specific overhead in
 //! isolation: a regression in the splice walk or the comrak-format
@@ -68,7 +68,7 @@ fn bench_splice(c: &mut Criterion) {
     let dense = build_dense(SIZE);
 
     let opts = Options::default();
-    let comrak_only = Options::gfm_only();
+    let comrak_only = Options::gfm();
 
     for (label, sample) in [("prose", &prose), ("mixed", &mixed), ("dense", &dense)] {
         let mut g = c.benchmark_group(label);

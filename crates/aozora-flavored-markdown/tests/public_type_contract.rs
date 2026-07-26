@@ -19,6 +19,12 @@
 //! The derives are exercised on values the API actually hands back, not merely
 //! asserted as bounds: a `Hash` that disagreed with `Eq` would satisfy every
 //! bound and still corrupt the memo table the derive exists for.
+//!
+//! The same source-text reading answers a second question the compiler will
+//! not: whether a public signature names a type belonging to `comrak` or to
+//! the sibling `aozora` parser. Both are pre-1.0 and neither is re-exported,
+//! so such a signature makes their minor bumps this crate's breaking changes
+//! — which is exactly what `diagnostics.rs` claims the boundary prevents.
 
 use core::fmt::Debug;
 use core::hash::Hash;
@@ -161,6 +167,40 @@ fn every_render_output_type_clones_and_compares() {
     for diagnostic in &diagnostics {
         behaves_as_a_hashable_value(diagnostic);
     }
+}
+
+#[test]
+fn options_is_a_hashable_value_whichever_path_built_it() {
+    // Hiding comrak is what makes `Options` derivable at all, and the derives
+    // are load-bearing: a host memoises a render on the pair it was given.
+    // Two chains that describe the same dialect must therefore be one key,
+    // and knob order must not matter.
+    behaves_as_a_hashable_value(&Options::default());
+    assert_eq!(
+        Options::new(),
+        Options::default(),
+        "`new` and `default` must be the same dialect"
+    );
+    let by_chain = Options::commonmark()
+        .with_tables(true)
+        .with_strikethrough(true)
+        .with_autolinks(true)
+        .with_task_lists(true);
+    behaves_as_a_hashable_value(&by_chain);
+    assert_eq!(by_chain, Options::gfm(), "two paths, one configuration");
+    assert_eq!(
+        hash_of(&by_chain),
+        hash_of(&Options::gfm()),
+        "equal options must hash equal, or a memo keyed on them splits"
+    );
+    let one_way = Options::new().with_hardbreaks(false).with_tables(false);
+    let other_way = Options::new().with_tables(false).with_hardbreaks(false);
+    assert_eq!(one_way, other_way, "knob order must not matter");
+    assert_ne!(
+        one_way,
+        Options::new(),
+        "a knob that changed nothing would make every configuration equal"
+    );
 }
 
 #[test]
@@ -407,22 +447,30 @@ struct Decl {
 /// Found by walking the tree rather than by naming files, so a type moved
 /// into a new module stays in scope.
 fn public_type_decls() -> Vec<Decl> {
+    sources()
+        .iter()
+        .flat_map(|(path, src)| decls_in(src, path))
+        .collect()
+}
+
+/// Every `.rs` file under this crate's own `src/`, in path order.
+fn sources() -> Vec<(PathBuf, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut sources = Vec::new();
-    collect_rust_sources(&root, &mut sources);
+    let mut paths = Vec::new();
+    collect_rust_sources(&root, &mut paths);
     assert!(
-        !sources.is_empty(),
+        !paths.is_empty(),
         "no source found under {}",
         root.display()
     );
-    sources.sort();
-
-    let mut decls = Vec::new();
-    for path in sources {
-        let src = fs::read_to_string(&path).expect("source must be readable");
-        decls.extend(decls_in(&src, &path));
-    }
-    decls
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let src = fs::read_to_string(&path).expect("source must be readable");
+            (path, src)
+        })
+        .collect()
 }
 
 fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -540,4 +588,181 @@ fn the_geometric_types_are_left_unsealed_on_purpose() {
              construction and functional record update for a field set that cannot grow"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// the boundary — no public signature names a foreign type
+// ---------------------------------------------------------------------------
+
+/// The two crates whose types must not reach a signature a consumer can see.
+/// Both are pre-1.0 and neither is re-exported, so naming one in public makes
+/// its next minor bump a breaking release here.
+const FOREIGN_CRATES: [&str; 2] = ["comrak", "aozora"];
+
+/// The names a foreign type can go by in one file: the qualified prefixes,
+/// plus whatever that file imported from those crates. The import is the only
+/// way a bare `AstNode` gets into scope, so reading the `use` lines is what
+/// turns this from a grep for `comrak::` — which `Options::comrak_mut` would
+/// have failed but `StreamingIrBuilder::walk_block` would not — into a rule.
+fn foreign_names(src: &str) -> Vec<String> {
+    let mut names: Vec<String> = FOREIGN_CRATES
+        .iter()
+        .map(|krate| format!("{krate}::"))
+        .collect();
+    let mut pending = String::new();
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if pending.is_empty()
+            && !FOREIGN_CRATES
+                .iter()
+                .any(|krate| trimmed.starts_with(&format!("use {krate}::")))
+        {
+            continue;
+        }
+        pending.push_str(trimmed);
+        if !pending.contains(';') {
+            continue;
+        }
+        // Type imports only: a lowercase tail is a module segment, and a
+        // free function imported from either crate is caught by the prefix
+        // where it is called.
+        names.extend(
+            idents(&pending)
+                .into_iter()
+                .filter(|ident| ident.starts_with(char::is_uppercase)),
+        );
+        pending.clear();
+    }
+    names
+}
+
+fn idents(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// A line that opens something a consumer can name: a `pub ` item or field —
+/// never `pub(crate)`, which is why the prefix carries its space — or a trait
+/// impl on one of this crate's public types.
+fn opens_public_surface(line: &str, publics: &[String]) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("pub ") {
+        return true;
+    }
+    let Some(rest) = trimmed.strip_prefix("impl ").or_else(|| {
+        trimmed
+            .strip_prefix("impl<")
+            .and_then(|r| r.split_once('>').map(|(_, tail)| tail))
+    }) else {
+        return false;
+    };
+    rest.rsplit(" for ")
+        .next()
+        .map(|target| idents(target).first().cloned().unwrap_or_default())
+        .is_some_and(|target| publics.contains(&target))
+}
+
+/// The declaration at `start`, joined across the lines a signature may wrap
+/// onto and cut at the body it introduces. Comments are dropped first: a
+/// parameter documented as coming from upstream is prose, not surface.
+fn declaration_text(lines: &[&str], start: usize) -> String {
+    let mut text = String::new();
+    let mut depth = 0isize;
+    for line in lines.iter().skip(start).take(16) {
+        let code = line.split_once("//").map_or(*line, |(before, _)| before);
+        text.push_str(code.trim());
+        text.push(' ');
+        depth += isize::try_from(code.matches('(').count()).unwrap_or(0)
+            - isize::try_from(code.matches(')').count()).unwrap_or(0);
+        let ends = code.trim_end();
+        if depth <= 0 && (code.contains('{') || ends.ends_with(';') || ends.ends_with(',')) {
+            break;
+        }
+    }
+    text.find('{')
+        .map_or_else(|| text.clone(), |body| text[..body].to_owned())
+}
+
+fn names_a_foreign_type(decl: &str, foreign: &[String]) -> Option<String> {
+    let words = idents(decl);
+    foreign
+        .iter()
+        .find(|name| {
+            name.strip_suffix("::").map_or_else(
+                || words.contains(name),
+                |krate| decl.contains(&format!("{krate}::")),
+            )
+        })
+        .cloned()
+}
+
+#[test]
+fn no_public_declaration_names_a_comrak_or_aozora_type() {
+    let publics: Vec<String> = public_type_decls().into_iter().map(|d| d.name).collect();
+    let mut checked = 0usize;
+    for (path, src) in sources() {
+        let foreign = foreign_names(&src);
+        let lines: Vec<&str> = src.lines().collect();
+        for start in 0..lines.len() {
+            if !opens_public_surface(lines[start], &publics) {
+                continue;
+            }
+            checked += 1;
+            let decl = declaration_text(&lines, start);
+            assert!(
+                names_a_foreign_type(&decl, &foreign).is_none(),
+                "{}:{}: `{}` names a type from an unexported pre-1.0 dependency; a minor \
+                 bump of it would be a breaking release of this crate (ADR-0021)",
+                path.display(),
+                start + 1,
+                decl.trim()
+            );
+        }
+    }
+    assert!(
+        checked > 40,
+        "only {checked} public declarations found; the reader must be retargeted, not deleted"
+    );
+}
+
+#[test]
+fn the_foreign_type_rule_rejects_the_surface_this_crate_used_to_ship() {
+    // The three shapes that were public before comrak and aozora were hidden.
+    // Without this, the rule above could pass by finding nothing at all.
+    let file = "\
+use comrak::nodes::AstNode;
+
+impl From<&aozora::Diagnostic> for Diagnostic {
+    fn from(d: &aozora::Diagnostic) -> Self {
+        Self
+    }
+}
+
+impl Options {
+    pub fn comrak_mut(&mut self) -> &mut comrak::Options<'static> {
+        &mut self.comrak
+    }
+}
+
+impl StreamingIrBuilder {
+    pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
+        Vec::new()
+    }
+}
+";
+    let publics = vec!["Diagnostic".to_owned()];
+    let foreign = foreign_names(file);
+    let lines: Vec<&str> = file.lines().collect();
+    let caught: Vec<usize> = (0..lines.len())
+        .filter(|&start| opens_public_surface(lines[start], &publics))
+        .filter(|&start| names_a_foreign_type(&declaration_text(&lines, start), &foreign).is_some())
+        .collect();
+    assert_eq!(
+        caught.len(),
+        3,
+        "the rule must catch the `From` impl, the comrak escape hatch and the bare \
+         `AstNode` parameter; caught lines {caught:?}"
+    );
 }

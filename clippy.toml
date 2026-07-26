@@ -19,6 +19,12 @@ too-many-lines-threshold = 80
 cognitive-complexity-threshold = 18
 type-complexity-threshold = 250
 max-fn-params-bools = 1 # pass an enum instead of two-plus bool flags
+# The lint's own advice for a pile of bools is "refactor into a config
+# struct". `Options` IS that struct — one independently switchable knob per
+# field, each set by its own `with_*` — so the advice has nowhere left to go.
+# Pinned to today's count (9 public + 2 `#[cfg(test)]` spec knobs) rather than
+# left slack, so adding a knob stays a deliberate edit.
+max-struct-bools = 11
 enum-variant-name-threshold = 2
 enum-variant-size-threshold = 256
 

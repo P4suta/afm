@@ -250,7 +250,7 @@ impl Constructs {
         let diagnostics: Vec<Diagnostic> = snapshot
             .diagnostics()
             .iter()
-            .map(Diagnostic::from)
+            .map(Diagnostic::from_upstream)
             .collect();
 
         // The common case: the caller already wrote the canonical text, so

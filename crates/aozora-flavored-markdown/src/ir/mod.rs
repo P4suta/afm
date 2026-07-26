@@ -78,7 +78,7 @@ pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> Ir
 /// container that opens in one block and closes in a later one still emits a
 /// matched pair.
 #[derive(Debug)]
-pub struct StreamingIrBuilder {
+pub(crate) struct StreamingIrBuilder {
     constructs: Constructs,
     consumed: usize,
     /// Closing markup for each still-open container, innermost last.
@@ -88,8 +88,7 @@ pub struct StreamingIrBuilder {
 impl StreamingIrBuilder {
     /// `source` is the text handed to the parser, so the spans this builder
     /// emits are offsets into it.
-    #[must_use]
-    pub fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str) -> Self {
         Self {
             constructs: Constructs::build(source),
             consumed: 0,
@@ -103,16 +102,8 @@ impl StreamingIrBuilder {
         &self.constructs
     }
 
-    /// The text a caller must hand to `comrak::parse_document`. Walking
-    /// blocks of any other parse would step the cursor out of lockstep with
-    /// the table.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        self.constructs.text()
-    }
-
     /// Walk a single comrak block, advancing the shared cursor.
-    pub fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
+    pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<IrBlock> {
         let cursor = self.constructs.cursor_at(self.consumed);
         let mut walker = IrWalker::new(cursor, mem::take(&mut self.open));
         walker.walk_top(node);
@@ -128,7 +119,7 @@ impl StreamingIrBuilder {
     /// `</div>`, and a consumer concatenating them leaves the container
     /// swallowing everything that follows.
     #[must_use]
-    pub fn finish(self) -> Vec<IrBlock> {
+    pub(crate) fn finish(self) -> Vec<IrBlock> {
         drain_open_containers(self.open)
     }
 }
@@ -687,6 +678,8 @@ mod tests {
     //! synthesised nodes: only the lexer can say which construct a given
     //! piece of source resolves to.
 
+    use core::ops::Range as ByteRange;
+
     use super::*;
     use comrak::nodes::LineColumn;
 
@@ -787,6 +780,36 @@ mod tests {
         assert_eq!(range.start.line, 3);
         assert_eq!(range.end.line, 7);
         assert_eq!(range.end.column, 12);
+    }
+
+    #[test]
+    fn the_streaming_builder_threads_its_cursor_across_blocks() {
+        // Two top-level blocks, each with its own inline sentinel: the cursor
+        // has to thread, or the second block resolves against the first
+        // block's entry. Reached from inside the crate since the builder is
+        // `pub(crate)` — the public per-block path is `render_blocks_to_ir`.
+        let src = "｜A《a》\n\n｜B《b》";
+        let mut builder = StreamingIrBuilder::new(src);
+        let arena = comrak::Arena::new();
+        let comrak = comrak::Options::default();
+        let root = comrak::parse_document(&arena, builder.constructs().text(), &comrak);
+        let mut children = root.children();
+        let first = builder.walk_block(children.next().expect("first block"));
+        let second = builder.walk_block(children.next().expect("second block"));
+
+        for (blocks, expected) in [(&first, "｜A《a》"), (&second, "｜B《b》")] {
+            let [IrBlock::Paragraph { children, .. }] = blocks.as_slice() else {
+                panic!("expected a single paragraph, got {blocks:#?}");
+            };
+            let span = children
+                .iter()
+                .find_map(|inline| match inline {
+                    IrInline::Aozora { kind, span, .. } if kind == "ruby" => *span,
+                    _ => None,
+                })
+                .expect("a ruby inline carrying its source span");
+            assert_eq!(&src[ByteRange::from(span)], expected);
+        }
     }
 
     #[test]

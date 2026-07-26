@@ -336,7 +336,7 @@ fn unclosed_container_at_eof_gets_a_synthesised_close() {
 
 #[test]
 fn aozora_disabled_path_emits_no_aozora_ir_variants() {
-    let opts = Options::commonmark_only();
+    let opts = Options::commonmark();
     let result = render_to_ir("｜青梅《おうめ》", &opts);
     let inlines = match &result.ir.blocks[0] {
         IrBlock::Paragraph { children, .. } => children,
@@ -706,32 +706,6 @@ fn render_blocks_to_ir_emits_aozora_block_per_top_level_block() {
     });
     assert!(saw_ruby_in_first, "expected ruby in first block");
     assert!(saw_page_break, "expected page break block");
-}
-
-#[test]
-fn streaming_ir_builder_threads_cursor_across_blocks() {
-    // Two top-level blocks, each with its own inline sentinel: the cursor
-    // must thread so the second block resolves against the second entry.
-    use aozora_flavored_markdown::ir::StreamingIrBuilder;
-    use comrak::parse_document;
-
-    let src = "｜A《a》\n\n｜B《b》";
-    let builder = StreamingIrBuilder::new(src);
-    let comrak_arena = comrak::Arena::new();
-    let opts = comrak::Options::default();
-    let root = parse_document(&comrak_arena, builder.text(), &opts);
-    let mut builder = builder;
-    let mut block_iter = root.children();
-    let first = builder.walk_block(block_iter.next().expect("first block"));
-    let second = builder.walk_block(block_iter.next().expect("second block"));
-
-    for (blocks, expected) in [(&first, "｜A《a》"), (&second, "｜B《b》")] {
-        let IrBlock::Paragraph { children, .. } = &blocks[0] else {
-            panic!("expected paragraph, got {blocks:#?}");
-        };
-        let (span, _) = find_inline_kind(children, "ruby");
-        assert_eq!(slice(src, span), expected);
-    }
 }
 
 #[test]

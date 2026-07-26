@@ -10,7 +10,7 @@ use aozora_flavored_markdown::ir::{IrBlock, IrInline, IrTableAlign};
 use aozora_flavored_markdown::{Options, render_blocks_to_ir, render_to_ir};
 
 fn ir_for(src: &str) -> Vec<IrBlock> {
-    render_to_ir(src, &Options::commonmark_only()).ir.blocks
+    render_to_ir(src, &Options::commonmark()).ir.blocks
 }
 
 fn first_inline(block: &IrBlock) -> Option<&IrInline> {
@@ -115,7 +115,7 @@ fn thematic_break_projects() {
 #[test]
 fn gfm_table_projects_with_alignment_and_rows() {
     // GFM table needs the `table` extension; default has it but
-    // commonmark_only() doesn't, so use default to force tables on.
+    // commonmark() does not, so use default to force tables on.
     let src = "| a | b | c |\n|---|:--:|--:|\n| 1 | 2 | 3 |\n";
     let result = render_to_ir(src, &Options::default());
     let IrBlock::Table {
@@ -258,7 +258,7 @@ fn image_without_title_omits_title_field() {
 
 #[test]
 fn aozora_disabled_render_to_ir_runs_commonmark_path() {
-    let opts = Options::commonmark_only().with_source_line_anchors(true);
+    let opts = Options::commonmark().with_source_line_anchors(true);
     let result = render_to_ir("# Heading\n\nbody\n", &opts);
     assert_eq!(result.ir.blocks.len(), 2);
     assert!(matches!(result.ir.blocks[0], IrBlock::Heading { .. }));
@@ -275,7 +275,7 @@ fn aozora_enabled_render_to_ir_with_anchors_path() {
 
 #[test]
 fn render_blocks_to_ir_empty_aozora_disabled_path() {
-    let opts = Options::commonmark_only();
+    let opts = Options::commonmark();
     let (blocks, diagnostics) = render_blocks_to_ir("", &opts);
     assert!(blocks.is_empty());
     assert!(diagnostics.is_empty());
@@ -291,8 +291,19 @@ fn render_blocks_to_ir_paragraph_carries_source_line() {
 
 #[test]
 fn options_with_source_line_anchors_builder_toggles_field() {
-    let opts = Options::default().with_source_line_anchors(true);
-    assert!(opts.source_line_anchors());
-    let off = Options::default().with_source_line_anchors(false);
-    assert!(!off.source_line_anchors());
+    // No getter to read the bit back with — `Options` is write-only
+    // configuration — so the toggle is observed where it is meant to be
+    // observed, in the rendered HTML.
+    let on = render_to_ir("p\n", &Options::default().with_source_line_anchors(true));
+    assert!(
+        on.html.contains("data-aozora-md-source-line"),
+        "{}",
+        on.html
+    );
+    let off = render_to_ir("p\n", &Options::default().with_source_line_anchors(false));
+    assert!(
+        !off.html.contains("data-aozora-md-source-line"),
+        "{}",
+        off.html
+    );
 }

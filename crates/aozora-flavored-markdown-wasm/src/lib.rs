@@ -50,7 +50,7 @@ pub struct RenderOptions {
 fn build_options(opts: RenderOptions) -> Options {
     let mut base = Options::default();
     if let Some(v) = opts.aozora_enabled {
-        base = base.with_aozora_enabled(v);
+        base = base.with_aozora(v);
     }
     if let Some(v) = opts.source_line_anchors {
         base = base.with_source_line_anchors(v);
