@@ -33,11 +33,8 @@ fn anchors_apply_to_headings() {
 
 #[test]
 fn anchors_not_applied_when_aozora_disabled_and_option_off() {
-    // commonmark_only() has source_line_anchors: false. Adding the
+    // commonmark() has source_line_anchors: false. Adding the
     // builder afterwards should still flip the bit.
-    let on = render(
-        "p\n",
-        &Options::commonmark_only().with_source_line_anchors(true),
-    );
+    let on = render("p\n", &Options::commonmark().with_source_line_anchors(true));
     assert!(on.html.contains(r#"<p data-aozora-md-source-line=""#));
 }

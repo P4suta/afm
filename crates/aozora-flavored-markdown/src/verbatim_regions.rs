@@ -59,8 +59,8 @@ pub(crate) fn restore(canonical: &str, originals: &[&str]) -> String {
 fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
     let arena = comrak::Arena::new();
     // The dialect `render` parses, so what one holds verbatim the other does.
-    let options = Options::default();
-    let root = comrak::parse_document(&arena, source, &options.comrak);
+    let options = Options::default().comrak();
+    let root = comrak::parse_document(&arena, source, &options);
     let line_starts = line_starts(source);
     let mut ranges: Vec<Range<usize>> = root
         .descendants()

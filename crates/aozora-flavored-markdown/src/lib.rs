@@ -27,6 +27,12 @@ struct ReadmeDoctests;
 mod ast_splice;
 mod classes;
 mod code_block_mask;
+// The CommonMark / GFM spec runners. Inside `src/` rather than `tests/`
+// because the spec's expected output is raw HTML, which only a `#[cfg(test)]`
+// constructor turns on — an integration test is a separate crate and would
+// need that switch to be public. Coverage counts them here too.
+#[cfg(test)]
+mod conformance;
 mod constructs;
 pub mod diagnostics;
 mod fragment;
@@ -80,150 +86,213 @@ use crate::constructs::Constructs;
 
 /// Parse-time configuration for [`render`] and friends.
 ///
-/// `comrak::Options` is held `'static`: we install neither URL rewriters nor
-/// broken-link callbacks — comrak's only non-`'static` fields — so a borrow
-/// parameter would be dead weight in the public API.
-#[derive(Debug, Clone)]
+/// Every knob is one this crate implements in **both** of its outputs, HTML
+/// and IR. comrak's remaining ones stay off the surface because they are not:
+/// footnotes and description lists reach the HTML and drop out of the IR of
+/// the same call, and `render.sourcepos` collides with
+/// [`Options::with_source_line_anchors`]. Raw-HTML passthrough has no setter
+/// at all, so no configuration reachable from outside this crate can turn a
+/// render into an XSS sink.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Options {
-    comrak: comrak::Options<'static>,
-    aozora_enabled: bool,
+    aozora: bool,
+    hardbreaks: bool,
+    smart_punctuation: bool,
+    cjk_friendly_emphasis: bool,
     source_line_anchors: bool,
+    tables: bool,
+    strikethrough: bool,
+    autolinks: bool,
+    task_lists: bool,
+    // Raw HTML, and the GFM filter that only bites when raw HTML is passing
+    // through, exist for the conformance runners alone. The fields are not
+    // compiled into a released build, so there is nothing for a public setter
+    // to reach even by accident.
+    #[cfg(test)]
+    raw_html: bool,
+    #[cfg(test)]
+    tagfilter: bool,
 }
 
 impl Default for Options {
-    /// GFM extensions on, plus hardbreaks so each source newline becomes a
-    /// `<br>` — verse and dialogue boundaries are load-bearing in 青空文庫
-    /// source. Raw-HTML passthrough stays off, so this is XSS-safe on
-    /// untrusted input.
-    ///
-    /// ```
-    /// use aozora_flavored_markdown::Options;
-    ///
-    /// let opts = Options::default();
-    /// assert!(opts.aozora_enabled());
-    /// assert!(opts.comrak().extension.table);
-    /// assert!(!opts.source_line_anchors());
-    /// ```
+    /// The Aozora dialect — see [`Options::new`].
     fn default() -> Self {
-        let mut comrak = comrak::Options::default();
-        comrak.extension.strikethrough = true;
-        comrak.extension.table = true;
-        comrak.extension.autolink = true;
-        comrak.extension.tasklist = true;
-        comrak.render.hardbreaks = true;
-        Self {
-            comrak,
-            aozora_enabled: true,
-            source_line_anchors: false,
-        }
+        Self::new()
     }
 }
 
 impl Options {
-    /// Plain CommonMark, for the CommonMark 0.31.2 conformance runner.
-    ///
-    /// # Security
-    ///
-    /// **Never use on untrusted input.** The spec's expected output contains
-    /// raw HTML, so this turns on comrak's passthrough
-    /// (`render.unsafe = true`): raw HTML is emitted verbatim and URLs go
-    /// unsanitized, `javascript:` included. That is an XSS sink, hence
-    /// `#[doc(hidden)]`. Production callers want [`Options::default`].
-    #[doc(hidden)]
-    #[must_use]
-    pub fn commonmark_only() -> Self {
-        let mut comrak = comrak::Options::default();
-        comrak.render.r#unsafe = true;
-        Self {
-            comrak,
-            aozora_enabled: false,
-            source_line_anchors: false,
-        }
-    }
-
-    /// Pure GFM, for the GFM 0.29 conformance runner.
-    ///
-    /// # Security
-    ///
-    /// Same raw-HTML XSS sink as [`Options::commonmark_only`], for the same
-    /// reason. Never use on untrusted input.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn gfm_only() -> Self {
-        let mut comrak = comrak::Options::default();
-        comrak.extension.strikethrough = true;
-        comrak.extension.table = true;
-        comrak.extension.autolink = true;
-        comrak.extension.tasklist = true;
-        comrak.extension.tagfilter = true;
-        comrak.render.r#unsafe = true;
-        Self {
-            comrak,
-            aozora_enabled: false,
-            source_line_anchors: false,
-        }
-    }
-
-    /// Tag every top-level block with `data-aozora-md-source-line="N"`
-    /// (1-based). The obsidian adapter maps per-block post-processor calls
-    /// back to slices of the rendered fragment without re-parsing. Off by
-    /// default; costs one extra AST walk plus a streaming insert, both
-    /// O(blocks).
+    /// GFM extensions and 青空文庫 notation on, plus hardbreaks so each
+    /// source newline becomes a `<br>` — verse and dialogue boundaries are
+    /// load-bearing in 青空文庫 source.
     ///
     /// ```
     /// use aozora_flavored_markdown::Options;
-    /// let opts = Options::default().with_source_line_anchors(true);
-    /// assert!(opts.source_line_anchors());
+    ///
+    /// let opts = Options::new();
+    /// assert_eq!(opts, Options::default());
+    /// assert_ne!(opts, Options::commonmark());
     /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            aozora: true,
+            hardbreaks: true,
+            smart_punctuation: false,
+            cjk_friendly_emphasis: true,
+            source_line_anchors: false,
+            tables: true,
+            strikethrough: true,
+            autolinks: true,
+            task_lists: true,
+            #[cfg(test)]
+            raw_html: false,
+            #[cfg(test)]
+            tagfilter: false,
+        }
+    }
+
+    /// Plain CommonMark 0.31.2: no GFM extension, no notation, no hardbreaks
+    /// — what the spec's 652 examples are rendered with, so this crate's
+    /// superset claim is checked rather than asserted.
+    #[must_use]
+    pub fn commonmark() -> Self {
+        Self {
+            aozora: false,
+            hardbreaks: false,
+            cjk_friendly_emphasis: false,
+            tables: false,
+            strikethrough: false,
+            autolinks: false,
+            task_lists: false,
+            ..Self::new()
+        }
+    }
+
+    /// [`Options::commonmark`] plus the four GFM extensions.
+    #[must_use]
+    pub fn gfm() -> Self {
+        Self {
+            tables: true,
+            strikethrough: true,
+            autolinks: true,
+            task_lists: true,
+            ..Self::commonmark()
+        }
+    }
+
+    /// Recognise 青空文庫 notation. Off, the source flows straight through
+    /// comrak with no lexer pass and no HTML post-processing.
+    #[must_use]
+    pub fn with_aozora(mut self, on: bool) -> Self {
+        self.aozora = on;
+        self
+    }
+
+    /// Turn each source newline into a `<br>`.
+    #[must_use]
+    pub fn with_hardbreaks(mut self, on: bool) -> Self {
+        self.hardbreaks = on;
+        self
+    }
+
+    /// Rewrite ASCII quotes, dashes and ellipses to their typographic forms.
+    #[must_use]
+    pub fn with_smart_punctuation(mut self, on: bool) -> Self {
+        self.smart_punctuation = on;
+        self
+    }
+
+    /// Let emphasis open and close against CJK punctuation, which
+    /// CommonMark's flanking rules on their own refuse.
+    #[must_use]
+    pub fn with_cjk_friendly_emphasis(mut self, on: bool) -> Self {
+        self.cjk_friendly_emphasis = on;
+        self
+    }
+
+    /// Tag every top-level block with `data-aozora-md-source-line="N"`
+    /// (1-based), so a host can map a rendered fragment back to a slice of
+    /// the source without re-parsing. Costs one extra AST walk plus a
+    /// streaming insert, both O(blocks).
     #[must_use]
     pub fn with_source_line_anchors(mut self, on: bool) -> Self {
         self.source_line_anchors = on;
         self
     }
 
-    /// With `false`, the input flows straight through comrak with no Aozora
-    /// lexing or HTML post-processing — how the spec-conformance runners
-    /// check that this wrapper does not perturb upstream behaviour.
-    ///
-    /// ```
-    /// use aozora_flavored_markdown::Options;
-    /// let opts = Options::default().with_aozora_enabled(false);
-    /// assert!(!opts.aozora_enabled());
-    /// ```
+    /// GFM tables.
     #[must_use]
-    pub fn with_aozora_enabled(mut self, on: bool) -> Self {
-        self.aozora_enabled = on;
+    pub fn with_tables(mut self, on: bool) -> Self {
+        self.tables = on;
         self
     }
 
-    /// See [`Options::with_aozora_enabled`].
+    /// GFM `~~strikethrough~~`.
     #[must_use]
-    pub fn aozora_enabled(&self) -> bool {
-        self.aozora_enabled
+    pub fn with_strikethrough(mut self, on: bool) -> Self {
+        self.strikethrough = on;
+        self
     }
 
-    /// See [`Options::with_source_line_anchors`].
+    /// GFM bare-URL autolinking.
     #[must_use]
-    pub fn source_line_anchors(&self) -> bool {
-        self.source_line_anchors
+    pub fn with_autolinks(mut self, on: bool) -> Self {
+        self.autolinks = on;
+        self
     }
 
-    /// Inspect a comrak knob directly. The dialect is configured by
-    /// [`Options::default`].
+    /// GFM `- [ ]` task list items.
     #[must_use]
-    pub fn comrak(&self) -> &comrak::Options<'static> {
-        &self.comrak
+    pub fn with_task_lists(mut self, on: bool) -> Self {
+        self.task_lists = on;
+        self
     }
 
-    /// Escape hatch for comrak tuning the `with_*` builders do not cover.
-    ///
-    /// # Stability
-    ///
-    /// Comrak's option surface is **not** covered by this crate's `SemVer`
-    /// guarantee — a comrak major bump may change these fields.
-    pub fn comrak_mut(&mut self) -> &mut comrak::Options<'static> {
-        &mut self.comrak
+    /// Built per call and never stored: comrak's own options type is neither
+    /// comparable nor hashable, and holding one would pull its field set —
+    /// pre-1.0, and far wider than this one — into ours.
+    fn comrak(&self) -> comrak::Options<'static> {
+        let mut comrak = comrak::Options::default();
+        comrak.extension.strikethrough = self.strikethrough;
+        comrak.extension.table = self.tables;
+        comrak.extension.autolink = self.autolinks;
+        comrak.extension.tasklist = self.task_lists;
+        comrak.extension.cjk_friendly_emphasis = self.cjk_friendly_emphasis;
+        comrak.parse.smart = self.smart_punctuation;
+        comrak.render.hardbreaks = self.hardbreaks;
+        // Rebound rather than mutated under a `#[cfg]` block, which no
+        // spelling of satisfies `semicolon_outside_block` and
+        // `semicolon_if_nothing_returned` at once.
+        #[cfg(test)]
+        let comrak = {
+            let mut comrak = comrak;
+            comrak.extension.tagfilter = self.tagfilter;
+            comrak.render.r#unsafe = self.raw_html;
+            comrak
+        };
+        comrak
+    }
+}
+
+#[cfg(test)]
+impl Options {
+    // The conformance baseline: [`Options::commonmark`] with raw HTML passing
+    // through, because the spec's expected output contains it. Never
+    // reachable from outside the crate — that is the point of the `cfg`.
+    pub(crate) fn spec_commonmark() -> Self {
+        Self {
+            raw_html: true,
+            ..Self::commonmark()
+        }
+    }
+
+    // GFM's disallowed-raw-html filter. Only observable with raw HTML on, so
+    // it belongs to the runner rather than the public surface.
+    pub(crate) fn with_tagfilter(mut self, on: bool) -> Self {
+        self.tagfilter = on;
+        self
     }
 }
 
@@ -346,13 +415,14 @@ fn drive_pipeline<F, T>(input: &str, options: &Options, project: F) -> (String, 
 where
     F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
 {
-    if !options.aozora_enabled {
+    let comrak_options = options.comrak();
+    if !options.aozora {
         let comrak_arena = comrak::Arena::new();
-        let root = comrak::parse_document(&comrak_arena, input, &options.comrak);
+        let root = comrak::parse_document(&comrak_arena, input, &comrak_options);
         // No lexer pass, so no constructs and no sentinels: the input goes
         // to comrak as the caller wrote it.
         let extra = project(root, &Constructs::none());
-        let html = format_root(root, options, None);
+        let html = format_root(root, &comrak_options, options.source_line_anchors, None);
         return (html, Vec::new(), extra);
     }
 
@@ -375,7 +445,7 @@ where
     let constructs = Constructs::build(&masked_source);
 
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(&comrak_arena, constructs.text(), &options.comrak);
+    let root = comrak::parse_document(&comrak_arena, constructs.text(), &comrak_options);
 
     // Both walkers cursor over the same construct table, each with its own
     // cursor, so they stay in lockstep without serial coupling.
@@ -383,23 +453,28 @@ where
 
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
-    let html = format_root(root, options, Some(mask_originals.as_slice()));
+    let html = format_root(
+        root,
+        &comrak_options,
+        options.source_line_anchors,
+        Some(mask_originals.as_slice()),
+    );
     (html, constructs.diagnostics().to_vec(), extra)
 }
 
-/// Formats per top-level child when `source_line_anchors` is on, so each
-/// child's first open tag can pick up its `data-aozora-md-source-line`.
+/// Formats per top-level child when `anchors` is on, so each child's first
+/// open tag can pick up its `data-aozora-md-source-line`.
 fn format_root<'a>(
     root: &'a AstNode<'a>,
-    options: &Options,
+    comrak: &comrak::Options<'static>,
+    anchors: bool,
     mask_originals: Option<&[char]>,
 ) -> String {
-    let html = if options.source_line_anchors {
-        source_line_anchors::format_root_with_anchors(root, &options.comrak)
+    let html = if anchors {
+        source_line_anchors::format_root_with_anchors(root, comrak)
     } else {
         let mut html = String::new();
-        comrak::format_html(root, &options.comrak, &mut html)
-            .expect("formatting to a String never fails");
+        comrak::format_html(root, comrak, &mut html).expect("formatting to a String never fails");
         html
     };
     if let Some(originals) = mask_originals {
@@ -454,9 +529,9 @@ pub fn render_blocks_to_ir(
     if !source_within_span_budget(input) {
         return (Vec::new(), vec![Diagnostic::source_too_large(input.len())]);
     }
-    if !options.aozora_enabled {
+    if !options.aozora {
         let comrak_arena = comrak::Arena::new();
-        let root = comrak::parse_document(&comrak_arena, input, &options.comrak);
+        let root = comrak::parse_document(&comrak_arena, input, &options.comrak());
         let blocks = collect_rendered_blocks(root, options, Vec::new(), &[]);
         return (blocks, Vec::new());
     }
@@ -467,7 +542,11 @@ pub fn render_blocks_to_ir(
     // same one, so both outputs of this call describe the same document.
     let mut builder = ir::StreamingIrBuilder::new(&masked_source);
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(&comrak_arena, builder.constructs().text(), &options.comrak);
+    let root = comrak::parse_document(
+        &comrak_arena,
+        builder.constructs().text(),
+        &options.comrak(),
+    );
     // IR projection runs before AST mutation so it walks the
     // sentinel-bearing Text nodes; AST splicing afterwards rewrites
     // the same nodes for `comrak::format_html` consumption. A single
@@ -510,6 +589,7 @@ fn collect_rendered_blocks<'a>(
     // Masks are restored with a cursor rather than the one pass the
     // document path makes: handing every block the whole slice would replay
     // block 1's originals into block 2.
+    let comrak_options = options.comrak();
     let mut blocks = Vec::new();
     let mut mask_cursor = mask_originals;
     for (idx, child) in root.children().enumerate() {
@@ -517,10 +597,10 @@ fn collect_rendered_blocks<'a>(
         let line = constructs::saturating_u32(data.sourcepos.start.line).max(1);
         drop(data);
         let rendered = if options.source_line_anchors {
-            source_line_anchors::format_block_with_anchor(child, &options.comrak)
+            source_line_anchors::format_block_with_anchor(child, &comrak_options)
         } else {
             let mut buf = String::new();
-            comrak::format_html(child, &options.comrak, &mut buf)
+            comrak::format_html(child, &comrak_options, &mut buf)
                 .expect("formatting a String never fails");
             buf
         };
@@ -682,36 +762,50 @@ mod tests {
     }
 
     #[test]
-    fn gfm_only_options_have_aozora_disabled_and_gfm_extensions_enabled() {
-        let opts = Options::gfm_only();
-        assert!(!opts.aozora_enabled, "gfm_only must skip the aozora pass");
-        assert!(opts.comrak.extension.strikethrough);
-        assert!(opts.comrak.extension.table);
-        assert!(opts.comrak.extension.autolink);
-        assert!(opts.comrak.extension.tasklist);
-        assert!(opts.comrak.extension.tagfilter);
-        assert!(opts.comrak.render.r#unsafe);
+    fn gfm_options_have_aozora_disabled_and_gfm_extensions_enabled() {
+        let opts = Options::gfm();
+        assert!(!opts.aozora, "gfm must skip the aozora pass");
+        let comrak = opts.comrak();
+        assert!(comrak.extension.strikethrough);
+        assert!(comrak.extension.table);
+        assert!(comrak.extension.autolink);
+        assert!(comrak.extension.tasklist);
+        assert!(!comrak.render.r#unsafe, "gfm is safe on untrusted input");
     }
 
     #[test]
-    fn options_builders_and_getters_round_trip() {
-        // Exercise the public builder / getter surface (doctested, but run
-        // here too so the coverage gate counts it).
-        let opts = Options::default()
-            .with_aozora_enabled(false)
-            .with_source_line_anchors(true);
-        assert!(!opts.aozora_enabled());
-        assert!(opts.source_line_anchors());
-        assert!(opts.comrak().extension.table);
+    fn every_builder_flips_exactly_the_knob_it_names() {
+        // Each `with_*` is a one-bit edit, so equality against the base with
+        // that one knob restored is the whole contract — and it is checkable
+        // only because hiding comrak made `Options` comparable.
+        let base = Options::default();
+        for flipped in [
+            base.clone().with_aozora(false),
+            base.clone().with_hardbreaks(false),
+            base.clone().with_smart_punctuation(true),
+            base.clone().with_cjk_friendly_emphasis(false),
+            base.clone().with_source_line_anchors(true),
+            base.clone().with_tables(false),
+            base.clone().with_strikethrough(false),
+            base.clone().with_autolinks(false),
+            base.clone().with_task_lists(false),
+        ] {
+            assert_ne!(flipped, base, "a builder that changed nothing");
+        }
+        assert_eq!(
+            base.clone().with_tables(false).with_tables(true),
+            base,
+            "flipping a knob back must restore the value"
+        );
     }
 
     #[test]
-    fn gfm_only_renders_strikethrough_and_does_not_recognise_ruby() {
-        // gfm_only's contract: GFM extensions on, Aozora pre-pass off.
+    fn gfm_renders_strikethrough_and_does_not_recognise_ruby() {
+        // `gfm`'s contract: GFM extensions on, Aozora pre-pass off.
         // The strikethrough must produce `<del>`; the ruby-shaped
         // `｜...《》` source must survive verbatim because the lexer
         // never ran.
-        let opts = Options::gfm_only();
+        let opts = Options::gfm();
         let html = render("~~strike~~ ｜青梅《おうめ》", &opts).html;
         assert!(html.contains("<del>strike</del>"), "html: {html}");
         assert!(
@@ -737,36 +831,39 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // (a) Spec-conformance constructors are #[doc(hidden)] but still
-    // wire raw-HTML passthrough on for the spec runners. These tests pin
-    // that the hidden constructors keep their unsafe spec config so a
-    // future refactor that breaks the spec wiring is caught here.
+    // (a) The spec runners need raw-HTML passthrough, and nothing else may
+    // have it. The constructor that supplies it is `#[cfg(test)]`, so these
+    // two tests are the whole of what can reach `render.unsafe`.
     // -------------------------------------------------------------------
 
     #[test]
-    fn commonmark_only_enables_raw_html_and_disables_aozora() {
-        let opts = Options::commonmark_only();
+    fn spec_commonmark_enables_raw_html_and_disables_aozora() {
+        let opts = Options::spec_commonmark();
         assert!(
-            opts.comrak.render.r#unsafe,
-            "commonmark_only must enable raw-HTML passthrough for the spec runner"
+            opts.comrak().render.r#unsafe,
+            "spec_commonmark must enable raw-HTML passthrough for the runner"
         );
+        assert!(!opts.aozora, "spec_commonmark must skip the aozora pass");
         assert!(
-            !opts.aozora_enabled,
-            "commonmark_only must skip the aozora pass"
+            opts.with_tagfilter(true).comrak().extension.tagfilter,
+            "the runner's per-example tagfilter must reach comrak"
         );
     }
 
     #[test]
-    fn default_does_not_enable_raw_html() {
-        // The production constructor must NOT inherit the spec runners'
-        // raw-HTML passthrough — that is the XSS-safety contract that
-        // motivated hiding commonmark_only / gfm_only.
-        let opts = Options::default();
+    fn no_public_constructor_enables_raw_html() {
+        // The XSS-safety contract: raw HTML is reachable from the
+        // `#[cfg(test)]` constructor above and from nowhere else.
+        for opts in [Options::default(), Options::commonmark(), Options::gfm()] {
+            assert!(
+                !opts.comrak().render.r#unsafe,
+                "{opts:?} must leave raw HTML escaped (no render.unsafe)"
+            );
+        }
         assert!(
-            !opts.comrak.render.r#unsafe,
-            "default must leave raw HTML escaped (no render.unsafe)"
+            Options::default().aozora,
+            "default must run the aozora pass"
         );
-        assert!(opts.aozora_enabled, "default must run the aozora pass");
     }
 
     // -------------------------------------------------------------------

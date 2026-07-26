@@ -1,5 +1,5 @@
 //! Per-top-level-block render with `data-aozora-md-source-line` injection,
-//! behind `Options::source_line_anchors`.
+//! behind `Options::with_source_line_anchors`.
 //!
 //! Formatting each top-level child into its own buffer makes the Nth child
 //! the Nth anchored tag: no depth tracking, no full-document HTML scan, and

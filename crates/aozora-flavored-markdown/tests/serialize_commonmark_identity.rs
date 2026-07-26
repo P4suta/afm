@@ -59,11 +59,19 @@ fn load(fixture: &str) -> Vec<SpecExample> {
     serde_json::from_str(fixture).expect("spec fixture parses as JSON")
 }
 
-/// The dialect that shows the most: raw HTML passes through, so a mutation
-/// inside an HTML block reaches the comparison instead of being swallowed by
-/// the default's escaping.
+/// Pure CommonMark, so the comparison reads the spec's examples the way the
+/// spec means them rather than through the Aozora dialect.
+///
+/// No configuration passes raw HTML through any more, and comrak does not
+/// escape what it will not emit: every raw block and every raw span collapses
+/// to the same `<!-- raw HTML omitted -->`. So this comparison is blind to a
+/// rewrite *inside* one raw region that leaves the region count alone — which
+/// costs nothing here, because the only rewrite it is ever asked about is the
+/// blank-run collapse, and a blank run inside a raw region ends it and moves
+/// the count. The teeth are the byte-exact `blank_runs_collapsed` assertion
+/// above this one; this is the second opinion.
 fn html(src: &str) -> String {
-    render(src, &Options::commonmark_only()).html
+    render(src, &Options::commonmark()).html
 }
 
 /// `src` with every run of three or more line breaks cut back to two — the

@@ -4,7 +4,8 @@
 //!
 //! Owning the type rather than re-exporting `aozora::Diagnostic` decouples
 //! this crate's API from the parser's `SemVer`, as the IR enums and
-//! `sentinels` do. Upstream maps in via [`From`].
+//! `sentinels` do. Upstream maps in through a crate-private constructor —
+//! a public `From` would put the parser's type back in this one's surface.
 
 use core::ops::Range;
 
@@ -137,12 +138,13 @@ impl Diagnostic {
     }
 }
 
-impl From<&aozora::Diagnostic> for Diagnostic {
-    fn from(d: &aozora::Diagnostic) -> Self {
+impl Diagnostic {
+    /// Flatten one upstream lexer observation into this crate's shape.
+    pub(crate) fn from_upstream(d: &aozora::Diagnostic) -> Self {
         let span = d.span();
         Self {
-            severity: d.severity().into(),
-            source: d.source().into(),
+            severity: Severity::from_upstream(d.severity()),
+            source: DiagnosticSource::from_upstream(d.source()),
             code: d.code(),
             message: d.to_string(),
             span: Span::new(span.start, span.end),
@@ -150,8 +152,8 @@ impl From<&aozora::Diagnostic> for Diagnostic {
     }
 }
 
-impl From<aozora::Severity> for Severity {
-    fn from(s: aozora::Severity) -> Self {
+impl Severity {
+    pub(crate) fn from_upstream(s: aozora::Severity) -> Self {
         // `aozora::Severity` is `#[non_exhaustive]`; a future variant maps
         // to the most conservative routing (`Error`).
         match s {
@@ -162,8 +164,8 @@ impl From<aozora::Severity> for Severity {
     }
 }
 
-impl From<aozora::DiagnosticSource> for DiagnosticSource {
-    fn from(s: aozora::DiagnosticSource) -> Self {
+impl DiagnosticSource {
+    pub(crate) fn from_upstream(s: aozora::DiagnosticSource) -> Self {
         // `aozora::DiagnosticSource` is `#[non_exhaustive]`; an unknown
         // future variant is treated as a source-side issue.
         match s {
@@ -194,13 +196,16 @@ mod tests {
 
     #[test]
     fn note_severity_maps_through_from_upstream() {
-        assert_eq!(Severity::from(aozora::Severity::Note), Severity::Note);
+        assert_eq!(
+            Severity::from_upstream(aozora::Severity::Note),
+            Severity::Note
+        );
     }
 
     #[test]
     fn internal_source_maps_through_from_upstream() {
         assert_eq!(
-            DiagnosticSource::from(aozora::DiagnosticSource::Internal),
+            DiagnosticSource::from_upstream(aozora::DiagnosticSource::Internal),
             DiagnosticSource::Internal
         );
     }
