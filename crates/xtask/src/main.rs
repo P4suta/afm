@@ -17,14 +17,6 @@ use clap::{Parser, Subcommand};
 
 mod spec_refresh;
 
-/// ADR-0001 upstream diff budget, in lines. The vendored tree is verbatim
-/// (no hooks), so the budget is 0; changing it requires a new ADR.
-const UPSTREAM_DIFF_BUDGET_LINES: usize = 0;
-
-/// Upstream comrak repository URL. `upstream-sync` shallow-clones a
-/// single tag from this remote.
-const UPSTREAM_COMRAK_URL: &str = "https://github.com/kivikakk/comrak.git";
-
 #[derive(Parser, Debug)]
 #[command(version, about = "aozora-flavored-markdown workspace automation", long_about = None)]
 struct Cli {
@@ -34,14 +26,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Verify the ADR-0001 upstream-diff policy is in force.
-    UpstreamDiff,
-    /// Replace `upstream/comrak/` with the source tree at the given
-    /// upstream tag. Pure tree-replace (ADR-0001).
-    UpstreamSync {
-        /// Upstream tag name (e.g. `v0.53.0`).
-        tag: String,
-    },
     /// Fail if any comment under `crates/` names a retired upstream-internal
     /// path, or if doc comments outgrow their pinned line budget.
     CommentDiscipline,
@@ -81,8 +65,6 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::UpstreamDiff => upstream_diff(),
-        Command::UpstreamSync { tag } => upstream_sync(&tag),
         Command::CommentDiscipline => comment_discipline(Path::new(".")),
         Command::NewAdr { title } => new_adr(&title),
         Command::SpecRefresh { input, output } => {
@@ -246,9 +228,9 @@ const RETIRED_UPSTREAM_PATHS: &[(&str, &str)] = &[
     ("AozoraNode", "not on the public surface"),
 ];
 
-/// One comment line that names a retired upstream path.
+/// One line naming something retired: an upstream path, or a repo path.
 #[derive(Debug, PartialEq, Eq)]
-struct CommentViolation {
+struct Violation {
     line: usize,
     needle: &'static str,
     why: &'static str,
@@ -280,10 +262,24 @@ const SCANNED_FILES: &[(&str, &str)] = &[("rs", "//"), ("toml", "#")];
 /// Directories that are never authored here.
 ///
 /// `target/` is cargo output (including each fuzz crate's own), `pkg/` is
-/// wasm-pack output, `node_modules/` is bun's. `upstream/` is the verbatim
-/// vendored comrak tree, which ADR-0001 budgets zero edits for — gating prose
-/// nobody may rewrite would only be a trap.
-const UNSCANNED_DIRS: &[&str] = &["target", "pkg", "node_modules", "upstream", ".git"];
+/// wasm-pack output, `node_modules/` is bun's.
+// The rest are generated or fetched too. They only start to matter now that
+// the retired-path scan below reads every file rather than `.rs` and `.toml`:
+// `dist/` is the release bundle xtask itself writes, `coverage/` an llvm-cov
+// report, `corpus/` and `artifacts/` are cargo-fuzz's, `.cargo/` the registry
+// cache `.gitignore` reserves at this path, `.vite/` the playground's cache.
+const UNSCANNED_DIRS: &[&str] = &[
+    "target",
+    "pkg",
+    "node_modules",
+    ".git",
+    "dist",
+    "coverage",
+    "corpus",
+    "artifacts",
+    ".cargo",
+    ".vite",
+];
 
 /// Return every comment line in `src` that names a retired upstream path.
 ///
@@ -291,7 +287,7 @@ const UNSCANNED_DIRS: &[&str] = &["target", "pkg", "node_modules", "upstream", "
 /// Rust that one token covers `///`, `//!` and plain `//` alike. Prose rots
 /// the same way whichever marker introduces it, and the compiler already owns
 /// everything else.
-fn scan_comments(src: &str, marker: &str) -> Vec<CommentViolation> {
+fn scan_comments(src: &str, marker: &str) -> Vec<Violation> {
     let banned: Vec<(String, &str, &str)> = RETIRED_UPSTREAM_PATHS
         .iter()
         .map(|&(needle, why)| (fold_separators(needle), needle, why))
@@ -306,7 +302,7 @@ fn scan_comments(src: &str, marker: &str) -> Vec<CommentViolation> {
         let folded = fold_separators(trimmed);
         for (folded_needle, needle, why) in &banned {
             if folded.contains(folded_needle.as_str()) {
-                out.push(CommentViolation {
+                out.push(Violation {
                     line: idx + 1,
                     needle,
                     why,
@@ -318,9 +314,70 @@ fn scan_comments(src: &str, marker: &str) -> Vec<CommentViolation> {
     out
 }
 
+// Repo-relative paths that no longer exist, each with the reason it is gone.
+//
+// Two things separate these from `RETIRED_UPSTREAM_PATHS` above, and both were
+// forced by how this drift actually showed up. A dead *path* rots in file
+// content, not only in prose — a `linguist-vendored` glob, a CODEOWNERS owner
+// line, a bacon watch list, a CI paths-filter — and it rots in files that carry
+// no comment marker this gate knew and that no compiler ever opens. Deleting
+// the vendored comrak tree (ADR-0024) left 15 files naming it, in four file
+// kinds; three had an extension this gate read, and exactly one of those had
+// its hit on a comment line. A hand sweep found the other 14.
+//
+// A path is a fact on disk, so the check needs no judgement: if the directory
+// is gone, every line still naming it is wrong. `every_banned_repo_path_is_gone`
+// holds the list to that fact.
+const RETIRED_REPO_PATHS: &[(&str, &str)] = &[(
+    "upstream/",
+    "the vendored comrak tree is gone — comrak resolves from crates.io (ADR-0024)",
+)];
+
+// Where a retired path is a record rather than drift. The changelog says what
+// was removed and a decision record says why; both are dated documents, and
+// rewriting them to keep a lint quiet would delete the only account of the
+// decision. It is why ADR-0024 amends ADR-0015's `comrak` source bullet by
+// reference instead of editing it.
+const HISTORY_PATHS: &[&str] = &["CHANGELOG.md", "docs/adr"];
+
+// The file that defines `RETIRED_REPO_PATHS` necessarily spells every path it
+// bans, so the path scan skips it — its comments are still read for retired
+// upstream prose. `file!()` is the workspace-relative path cargo compiled this
+// file from, so the exclusion cannot drift away from the list it exists for.
+const RETIRED_PATH_LIST_FILE: &str = file!();
+
+// Return every line in `src` that names a retired repo path.
+//
+// Whole lines, not just comments: `upstream/comrak/** linguist-vendored` is not
+// a comment in any language, and it was exactly as wrong as the prose beside it.
+fn scan_repo_paths(src: &str) -> Vec<Violation> {
+    let mut out = Vec::new();
+    for (idx, raw) in src.lines().enumerate() {
+        for &(needle, why) in RETIRED_REPO_PATHS {
+            if raw.contains(needle) {
+                out.push(Violation {
+                    line: idx + 1,
+                    needle,
+                    why,
+                    // A generated bundle is one enormous line; report enough to
+                    // find it and no more.
+                    text: raw.trim().chars().take(160).collect(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Collect every scannable file under `dir` with the comment marker its kind
 /// uses, skipping the directories nobody here authors.
-fn collect_scannable_files(dir: &Path, out: &mut Vec<(PathBuf, &'static str)>) -> Result<()> {
+// Every file is collected, not only the kinds with a marker: the retired-path
+// scan reads them all, and `None` records that a file has no comments to read.
+fn collect_scannable_files(
+    dir: &Path,
+    root: &Path,
+    out: &mut Vec<(PathBuf, Option<&'static str>)>,
+) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
@@ -330,15 +387,19 @@ fn collect_scannable_files(dir: &Path, out: &mut Vec<(PathBuf, &'static str)>) -
             if name.to_str().is_some_and(|n| UNSCANNED_DIRS.contains(&n)) {
                 continue;
             }
-            collect_scannable_files(&path, out)?;
-        } else if let Some(marker) = path
+            collect_scannable_files(&path, root, out)?;
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(path.as_path());
+        if HISTORY_PATHS.iter().any(|h| relative.starts_with(h)) {
+            continue;
+        }
+        let marker = path
             .extension()
             .and_then(|e| e.to_str())
             .and_then(|ext| SCANNED_FILES.iter().find(|&&(kind, _)| kind == ext))
-            .map(|&(_, marker)| marker)
-        {
-            out.push((path, marker));
-        }
+            .map(|&(_, marker)| marker);
+        out.push((path, marker));
     }
     out.sort();
     Ok(())
@@ -355,15 +416,27 @@ fn comment_discipline(root: &Path) -> Result<()> {
     }
 
     let mut files = Vec::new();
-    collect_scannable_files(root, &mut files)?;
+    collect_scannable_files(root, root, &mut files)?;
 
     let mut total = 0usize;
     for (path, marker) in &files {
-        let src =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        for v in scan_comments(&src, marker) {
+        let src = match fs::read_to_string(path) {
+            Ok(src) => src,
+            // A file with a comment marker is source, so failing to read it is
+            // a real error. Anything else may legitimately be bytes — a fuzz
+            // corpus seed, a wasm bundle — and is simply not text to scan.
+            Err(_) if marker.is_none() => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+
+        let mut hits = marker.map_or_else(Vec::new, |marker| scan_comments(&src, marker));
+        if !path.ends_with(RETIRED_PATH_LIST_FILE) {
+            hits.extend(scan_repo_paths(&src));
+        }
+
+        for v in hits {
             if total == 0 {
-                println!("comment-discipline: comments naming retired upstream paths:");
+                println!("comment-discipline: lines naming something retired:");
             }
             total += 1;
             println!(
@@ -379,16 +452,18 @@ fn comment_discipline(root: &Path) -> Result<()> {
 
     if total > 0 {
         bail!(
-            "comment-discipline: {total} comment reference(s) to retired upstream paths. \
-             The boundary is the sibling parser's public API only (ADR-0021) — describe the \
-             behaviour instead of naming an upstream internal."
+            "comment-discipline: {total} reference(s) to a retired upstream path or a repo path \
+             that no longer exists. For an upstream name the boundary is the sibling parser's \
+             public API only (ADR-0021) — describe the behaviour instead. For a repo path there \
+             is nothing to describe: the file is gone, so the line is wrong."
         );
     }
 
     println!(
-        "comment-discipline: clean ({} file(s), {} banned path(s) checked)",
+        "comment-discipline: clean ({} file(s), {} upstream + {} repo path(s) checked)",
         files.len(),
-        RETIRED_UPSTREAM_PATHS.len()
+        RETIRED_UPSTREAM_PATHS.len(),
+        RETIRED_REPO_PATHS.len()
     );
 
     doc_volume_ratchet(root)
@@ -414,11 +489,11 @@ fn comment_discipline(root: &Path) -> Result<()> {
 /// The failure is never "delete a comment". It is: say *why*, once, in the
 /// place a reader will meet the constraint — and stop restating what the
 /// types and the code already say.
-// Raised by 17 for `aozora_flavored_markdown::verbatim_regions`: a new module
-// whose reason to exist is why `serialize` may protect what `render` cannot,
-// and the contract that buys `serialize` its callers. Prose grew because the
-// surface did; nothing else in this move is restatement.
-const MAX_DOC_LINES: u64 = 1_625;
+// Lowered by 38 when the vendored-comrak machinery left this file
+// (ADR-0024): `upstream_diff`, `upstream_sync` and `copy_dir_recursive`, plus
+// their sub-command docs, took their prose with them. Bookkeeping after a cut,
+// not a decision.
+const MAX_DOC_LINES: u64 = 1_587;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured
@@ -549,191 +624,6 @@ fn doc_volume_ratchet(root: &Path) -> Result<()> {
         MAX_DOC_RATIO_PER_100K / 1000,
         MAX_DOC_RATIO_PER_100K % 1000,
     );
-    Ok(())
-}
-
-/// Verify the ADR-0001 upstream-diff policy is in force.
-///
-/// Reads the pinned SHA + tag from `upstream/comrak/COMRAK_SHA` and
-/// asserts that `upstream/comrak/UPSTREAM_DIFF.md` mentions the
-/// current budget number ([`UPSTREAM_DIFF_BUDGET_LINES`]).
-///
-/// Byte-level enforcement against the upstream remote (network
-/// fetch + diff) is **not** part of this gate: developers run
-/// `cargo xtask upstream-sync <tag>` (a pure tree replace per ADR-0001)
-/// to refresh the vendored tree, and any local modification
-/// has to pass code review. The gate here catches accidental drift
-/// in the policy file itself.
-fn upstream_diff() -> Result<()> {
-    let sha_path = PathBuf::from("upstream/comrak/COMRAK_SHA");
-    let raw =
-        fs::read_to_string(&sha_path).with_context(|| format!("reading {}", sha_path.display()))?;
-
-    // COMRAK_SHA is two lines: the pinned commit SHA on line 1, the
-    // upstream tag name (e.g. "v0.52.0") on line 2. Both are optional to
-    // mention in the output but the SHA is required for the gate.
-    let mut lines = raw.lines().map(str::trim).filter(|s| !s.is_empty());
-    let sha = lines.next().unwrap_or_default();
-    let tag = lines.next().unwrap_or_default();
-    if sha.is_empty() {
-        bail!("{} is empty", sha_path.display());
-    }
-
-    let diff_md_path = PathBuf::from("upstream/comrak/UPSTREAM_DIFF.md");
-    let diff_md = fs::read_to_string(&diff_md_path)
-        .with_context(|| format!("reading {}", diff_md_path.display()))?;
-
-    // We want the budget number to appear in a phrase that names a
-    // line count, not as a stray digit. `<n>-line` and `<n> lines`
-    // are the two phrasings UPSTREAM_DIFF.md uses; either is enough.
-    let needle_hyphen = format!("{UPSTREAM_DIFF_BUDGET_LINES}-line");
-    let needle_word = format!("{UPSTREAM_DIFF_BUDGET_LINES} lines");
-    if !diff_md.contains(&needle_hyphen) && !diff_md.contains(&needle_word) {
-        bail!(
-            "{} does not mention the {}-line upstream diff budget (ADR-0001)",
-            diff_md_path.display(),
-            UPSTREAM_DIFF_BUDGET_LINES,
-        );
-    }
-
-    if tag.is_empty() {
-        println!("upstream-diff: vendored comrak pinned at {sha}");
-    } else {
-        println!("upstream-diff: vendored comrak pinned at {sha} ({tag})");
-    }
-    println!(
-        "upstream-diff: budget {UPSTREAM_DIFF_BUDGET_LINES} lines (ADR-0001), policy documented in {}",
-        diff_md_path.display()
-    );
-
-    Ok(())
-}
-
-/// Replace `upstream/comrak/` with the source tree at `tag`.
-///
-/// Pure tree-replace (ADR-0001): there are no aozora-flavored-markdown patches to re-apply
-/// because the diff budget is 0. We preserve the two
-/// aozora-md-side metadata files (`COMRAK_SHA` and `UPSTREAM_DIFF.md`)
-/// across the wipe, then rewrite `COMRAK_SHA` with the new pin.
-///
-/// Network: shells out to `git clone --depth 1 --branch <tag>`.
-/// Run from a developer machine with internet access; CI does not
-/// invoke this command.
-fn upstream_sync(tag: &str) -> Result<()> {
-    let upstream_dir = PathBuf::from("upstream/comrak");
-    if !upstream_dir.is_dir() {
-        bail!(
-            "upstream-sync: {} not found; run from the workspace root",
-            upstream_dir.display()
-        );
-    }
-
-    let sha_path = upstream_dir.join("COMRAK_SHA");
-    let diff_md_path = upstream_dir.join("UPSTREAM_DIFF.md");
-    let preserved: Vec<(PathBuf, Vec<u8>)> = [&sha_path, &diff_md_path]
-        .into_iter()
-        .filter_map(|p| fs::read(p).ok().map(|c| (p.clone(), c)))
-        .collect();
-
-    let scratch = PathBuf::from("target/upstream-sync-tmp");
-    if scratch.exists() {
-        fs::remove_dir_all(&scratch)
-            .with_context(|| format!("removing stale {}", scratch.display()))?;
-    }
-    if let Some(parent) = scratch.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("ensuring {}", parent.display()))?;
-    }
-
-    let status = ProcessCommand::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            tag,
-            UPSTREAM_COMRAK_URL,
-        ])
-        .arg(&scratch)
-        .status()
-        .context("running `git clone`")?;
-    if !status.success() {
-        bail!("git clone failed for tag {tag:?}");
-    }
-
-    let sha_out = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(&scratch)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("running `git rev-parse HEAD`")?;
-    if !sha_out.status.success() {
-        bail!(
-            "git rev-parse failed: {}",
-            String::from_utf8_lossy(&sha_out.stderr)
-        );
-    }
-    let sha = String::from_utf8(sha_out.stdout)
-        .context("git rev-parse output not UTF-8")?
-        .trim()
-        .to_owned();
-
-    // Drop the .git/ directory — we vendor the source tree, not a
-    // working clone.
-    let dot_git = scratch.join(".git");
-    if dot_git.exists() {
-        fs::remove_dir_all(&dot_git).with_context(|| format!("removing {}", dot_git.display()))?;
-    }
-
-    // Wipe and replace.
-    fs::remove_dir_all(&upstream_dir)
-        .with_context(|| format!("removing {}", upstream_dir.display()))?;
-    copy_dir_recursive(&scratch, &upstream_dir)
-        .with_context(|| format!("copying scratch tree into {}", upstream_dir.display()))?;
-
-    // Restore aozora-flavored-markdown metadata, then update COMRAK_SHA with the new pin.
-    for (path, content) in preserved {
-        fs::write(&path, content).with_context(|| format!("restoring {}", path.display()))?;
-    }
-    fs::write(&sha_path, format!("{sha}\n{tag}\n"))
-        .with_context(|| format!("writing {}", sha_path.display()))?;
-
-    fs::remove_dir_all(&scratch).with_context(|| format!("cleaning {}", scratch.display()))?;
-
-    println!("upstream-sync: replaced upstream/comrak/ with comrak {tag} ({sha})");
-    println!("upstream-sync: review the diff and run `just ci` before committing");
-    Ok(())
-}
-
-/// Copy `src/` into `dst/` recursively. Mirrors the subset of
-/// behaviour we need from a real `cp -R` for vendored source trees:
-/// regular files are copied byte-for-byte, directories are
-/// reconstructed, and symlinks fail loudly (comrak's tree has none,
-/// and silently dropping them would break a future upstream change
-/// without warning).
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).with_context(|| format!("mkdir {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("read_dir {}", src.display()))? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else if ty.is_symlink() {
-            bail!(
-                "unsupported symlink at {}; upstream comrak should only contain \
-                 regular files and directories",
-                from.display()
-            );
-        } else {
-            // Regular file (or platform-specific kind we treat as a
-            // file). `is_file()` would be too narrow on some
-            // filesystems; `!is_dir() && !is_symlink()` handles
-            // hardlinked entries that `fs::copy` accepts.
-            fs::copy(&from, &to)
-                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
-        }
-    }
     Ok(())
 }
 
@@ -931,12 +821,174 @@ fn is_semver_triple(s: &str) -> bool {
         })
 }
 
+// ---------------------------------------------------------------------------
+// dependency provenance
+// ---------------------------------------------------------------------------
+//
+// A test rather than a sub-command, deliberately. ADR-0024 retires the
+// vendored tree on the argument that no replacement gate is needed — the
+// `checksum` in `Cargo.lock` is verified by cargo on every build, which is
+// strictly stronger than any grep. That is true exactly while the checksum is
+// *there*, and re-introducing a `path` dependency silently removes it. So this
+// asserts the premise of the argument, and adds no gate to argue with.
+#[cfg(test)]
+mod provenance {
+    // The one source every crate this workspace does not own must resolve from.
+    //
+    // Vendoring made cargo resolve a dependency by `path` here while `cargo
+    // publish` stripped that `path` and handed consumers the registry crate:
+    // one manifest, two build graphs, and the local one carried no checksum for
+    // anything to verify. `Cargo.lock` records which of the two is in force, so
+    // the lockfile — not a policy sentence — is where "we build what we ship"
+    // is decidable (ADR-0024).
+    pub(super) const CRATES_IO_SOURCE: &str =
+        "registry+https://github.com/rust-lang/crates.io-index";
+
+    // A `[[package]]` block of `Cargo.lock`, reduced to its provenance. `source`
+    // is absent exactly when cargo resolved the package from inside this repo.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub(super) struct LockedPackage {
+        pub(super) name: String,
+        pub(super) source: Option<String>,
+        pub(super) checksum: Option<String>,
+    }
+
+    // Read the `[[package]]` blocks of a lockfile.
+    //
+    // Hand-read rather than pulling a TOML parser into xtask for three keys:
+    // `Cargo.lock` is machine-written in one shape — a `[[package]]` header,
+    // then `key = "value"` lines — that cargo has kept stable across lock
+    // formats. Any other table header ends the current block, so a trailing
+    // `[metadata]` cannot have its keys read onto the last package.
+    pub(super) fn parse_locked_packages(lock: &str) -> Vec<LockedPackage> {
+        let mut out = Vec::new();
+        let mut current: Option<LockedPackage> = None;
+        for line in lock.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                out.extend(current.take());
+                if line == "[[package]]" {
+                    current = Some(LockedPackage::default());
+                }
+                continue;
+            }
+            let Some(pkg) = current.as_mut() else {
+                continue;
+            };
+            if let Some(name) = quoted_value(line, "name") {
+                pkg.name = name;
+            } else if let Some(source) = quoted_value(line, "source") {
+                pkg.source = Some(source);
+            } else if let Some(checksum) = quoted_value(line, "checksum") {
+                pkg.checksum = Some(checksum);
+            }
+        }
+        out.extend(current);
+        out
+    }
+
+    // `key = "value"` -> `value`, for that exact key. A longer key that merely
+    // starts with it (`names = …`) fails at the `=`, and a `dependencies` list
+    // entry has no `=` at all.
+    fn quoted_value(line: &str, key: &str) -> Option<String> {
+        let rest = line.strip_prefix(key)?.trim_start();
+        let value = rest.strip_prefix('=')?.trim_start().strip_prefix('"')?;
+        let end = value.find('"')?;
+        Some(value[..end].to_owned())
+    }
+
+    // The package names cargo resolves from inside this repo. A `[[package]]`
+    // with no `source` is legitimate for exactly these.
+    pub(super) fn workspace_member_names(manifest: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut inside = false;
+        for line in manifest.lines() {
+            let line = line.trim();
+            if !inside {
+                inside = line.starts_with("members") && line.contains('[');
+                continue;
+            }
+            if line.starts_with(']') {
+                break;
+            }
+            if let Some(path) = line.split('"').nth(1) {
+                out.push(path.rsplit('/').next().unwrap_or(path).to_owned());
+            }
+        }
+        out
+    }
+
+    // Dependency lines in a manifest that carry a `path`, with line numbers.
+    fn manifest_dependency_paths(manifest: &str) -> Vec<(usize, String)> {
+        let pattern = regex::Regex::new(r#"^[A-Za-z0-9_-]+\s*=\s*\{[^}]*\bpath\s*=\s*"([^"]+)""#)
+            .expect("dependency path pattern compiles");
+        manifest
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| pattern.captures(line).map(|c| (idx + 1, c[1].to_owned())))
+            .collect()
+    }
+
+    // Every way the graph resolved here can stop being the graph a consumer
+    // gets: a tree vendored into the repo, a source that is not the public
+    // registry, or a lock entry without the checksum cargo re-verifies on
+    // every build.
+    pub(super) fn dependency_provenance_failures(manifest: &str, lock: &str) -> Vec<String> {
+        let members = workspace_member_names(manifest);
+        let mut out = Vec::new();
+
+        for pkg in parse_locked_packages(lock) {
+            if members.contains(&pkg.name) {
+                continue;
+            }
+            let Some(source) = pkg.source.as_deref() else {
+                out.push(format!(
+                    "{}: locked with no `source`, i.e. resolved from a path inside this repo. \
+                     `cargo publish` strips the path, so consumers would compile a graph nobody \
+                     built here (ADR-0024).",
+                    pkg.name
+                ));
+                continue;
+            };
+            if source != CRATES_IO_SOURCE {
+                out.push(format!(
+                    "{}: resolves from `{source}`, not crates.io.",
+                    pkg.name
+                ));
+                continue;
+            }
+            if pkg.checksum.is_none() {
+                out.push(format!(
+                    "{}: locked without a `checksum`; nothing verifies the crate on build.",
+                    pkg.name
+                ));
+            }
+        }
+
+        for (line, path) in manifest_dependency_paths(manifest) {
+            if !path.starts_with("crates/") {
+                out.push(format!(
+                    "Cargo.toml:{line}: dependency path `{path}` leaves `crates/` — a tree \
+                     vendored into this repo builds locally and vanishes on publish (ADR-0024)."
+                ));
+            }
+        }
+
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::provenance::{
+        CRATES_IO_SOURCE, dependency_provenance_failures, parse_locked_packages,
+        workspace_member_names,
+    };
     use super::{
-        MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, RETIRED_UPSTREAM_PATHS, SCANNED_FILES,
-        aozora_pin_pattern, count_doc_lines, doc_budget_failure, fold_separators, is_semver_triple,
-        scan_comments,
+        MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path, PathBuf, RETIRED_PATH_LIST_FILE,
+        RETIRED_REPO_PATHS, RETIRED_UPSTREAM_PATHS, SCANNED_FILES, aozora_pin_pattern,
+        count_doc_lines, doc_budget_failure, fold_separators, fs, is_semver_triple, scan_comments,
+        scan_repo_paths,
     };
 
     /// The workspace size [`MAX_DOC_LINES`] was pinned against. Only its
@@ -1143,6 +1195,226 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].line, 1);
         assert_eq!(hits[1].line, 3);
+    }
+
+    // --- retired repo paths -------------------------------------------------
+    //
+    // What the comment scan above could not see. When the vendored comrak tree
+    // was deleted, 15 files still named it — a `linguist-vendored` glob, a
+    // CODEOWNERS entry, a bacon watch list, a CI paths-filter, a PR-template
+    // line, a coverage-ignore regex, a typos exclusion — and almost none of
+    // those lines is a comment in a file kind this gate read. Replaying the
+    // pre-change tree through `scan_repo_paths` flags all 15.
+
+    // The banned path, assembled so this file's own prose stays clean whatever
+    // the scan skips.
+    fn retired_repo_path() -> &'static str {
+        RETIRED_REPO_PATHS
+            .first()
+            .map(|&(path, _)| path)
+            .expect("the banned list names at least one retired repo path")
+    }
+
+    #[test]
+    fn flags_a_retired_repo_path_outside_any_comment() {
+        let src = format!("{}comrak/** linguist-vendored\n", retired_repo_path());
+        let hits = scan_repo_paths(&src);
+        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].needle, retired_repo_path());
+    }
+
+    #[test]
+    fn flags_a_retired_repo_path_in_a_file_kind_with_no_comment_marker() {
+        // A CI paths-filter and a CODEOWNERS line, in files the comment scan
+        // never opened and could not have parsed if it had.
+        let src = format!(
+            "      - '{path}**'\n/{path}comrak/ @P4suta\n",
+            path = retired_repo_path()
+        );
+        let hits = scan_repo_paths(&src);
+        assert_eq!(hits.len(), 2, "expected two violations, got {hits:?}");
+        assert_eq!((hits[0].line, hits[1].line), (1, 2));
+    }
+
+    #[test]
+    fn a_live_path_is_not_a_retired_one() {
+        assert!(scan_repo_paths("watch = [\"crates/xtask/src\"]\n").is_empty());
+    }
+
+    #[test]
+    fn a_very_long_line_is_reported_in_full_only_as_far_as_it_is_useful() {
+        // Generated bundles are one line of megabytes; the report has to stay
+        // readable or the gate is one nobody runs twice.
+        let src = format!("{}{}", retired_repo_path(), "x".repeat(10_000));
+        let hits = scan_repo_paths(&src);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.chars().count() <= 160);
+    }
+
+    // The list is a claim about the filesystem, so the filesystem settles it.
+    // A path that came back for a good reason must fail here — loudly, in the
+    // gate's own tests — rather than fail every unrelated PR from then on.
+    #[test]
+    fn every_banned_repo_path_is_gone() {
+        let root = repo_root();
+        for &(path, why) in RETIRED_REPO_PATHS {
+            let full = root.join(path);
+            assert!(
+                !full.exists(),
+                "{} exists again, but the ban says: {why}",
+                full.display()
+            );
+        }
+    }
+
+    // The path scan skips the one file that must spell every path it bans. If
+    // `file!()` ever stopped naming that file the exclusion would silently
+    // cover nothing — or, worse, cover some other file.
+    #[test]
+    fn the_skipped_file_is_the_one_that_defines_the_ban_list() {
+        let listed = repo_root().join(RETIRED_PATH_LIST_FILE);
+        assert!(listed.is_file(), "{} is not a file", listed.display());
+        let src = fs::read_to_string(&listed).expect("reading the ban-list file");
+        assert!(
+            src.contains("const RETIRED_REPO_PATHS"),
+            "{} does not define the ban list",
+            listed.display()
+        );
+    }
+
+    // --- dependency provenance ----------------------------------------------
+
+    // The workspace root, from the manifest dir cargo compiled this crate in.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    // A minimal manifest declaring this workspace's members.
+    fn members_manifest() -> &'static str {
+        "[workspace]\nmembers = [\n    \"crates/xtask\",\n]\n"
+    }
+
+    // The exact provenance the vendored tree had: resolved by `path`, so the
+    // lockfile recorded neither a source nor a checksum for it, while `cargo
+    // publish` stripped the path and handed consumers registry comrak. Four
+    // gates believed they were holding the two together; the one that named
+    // itself for the job grepped a markdown file for the words "0-line" and
+    // computed no diff at all, so a hand edit sat inside the "verbatim" tree
+    // for months (ADR-0024).
+    #[test]
+    fn a_path_resolved_dependency_has_no_provenance() {
+        let lock = "[[package]]\nname = \"comrak\"\nversion = \"0.52.0\"\ndependencies = [\n \"entities\",\n]\n";
+        let failures = dependency_provenance_failures(members_manifest(), lock);
+        assert_eq!(failures.len(), 1, "expected one failure, got {failures:?}");
+        assert!(failures[0].contains("comrak"), "{failures:?}");
+        assert!(failures[0].contains("no `source`"), "{failures:?}");
+    }
+
+    // The same divergence written the other way round — in the manifest, where
+    // a reviewer would actually meet it.
+    #[test]
+    fn a_dependency_path_leaving_crates_has_no_provenance() {
+        let manifest = format!(
+            "{}\n[workspace.dependencies]\ncomrak = {{ version = \"0.52.0\", path = \"{}comrak\" }}\n",
+            members_manifest(),
+            retired_repo_path()
+        );
+        let failures = dependency_provenance_failures(&manifest, "");
+        assert_eq!(failures.len(), 1, "expected one failure, got {failures:?}");
+        assert!(failures[0].contains("leaves `crates/`"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_dependency_path_inside_crates_is_fine() {
+        let manifest = format!(
+            "{}\n[workspace.dependencies]\naozora-flavored-markdown-test-support = {{ path = \"crates/aozora-flavored-markdown-test-support\" }}\n",
+            members_manifest()
+        );
+        assert!(dependency_provenance_failures(&manifest, "").is_empty());
+    }
+
+    #[test]
+    fn a_git_source_has_no_provenance() {
+        // The pre-ADR-0015 shape for the sibling parser. A git rev is not on
+        // crates.io either, so it is the same divergence as a path.
+        let lock = "[[package]]\nname = \"aozora\"\nversion = \"0.5.0\"\nsource = \"git+https://github.com/P4suta/aozora.git#a53c632\"\n";
+        let failures = dependency_provenance_failures(members_manifest(), lock);
+        assert_eq!(failures.len(), 1, "expected one failure, got {failures:?}");
+        assert!(failures[0].contains("not crates.io"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_registry_dependency_without_a_checksum_has_no_provenance() {
+        let lock = format!(
+            "[[package]]\nname = \"comrak\"\nversion = \"0.52.0\"\nsource = \"{CRATES_IO_SOURCE}\"\n"
+        );
+        let failures = dependency_provenance_failures(members_manifest(), &lock);
+        assert_eq!(failures.len(), 1, "expected one failure, got {failures:?}");
+        assert!(failures[0].contains("checksum"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_workspace_member_may_resolve_from_inside_the_repo() {
+        let lock = "[[package]]\nname = \"xtask\"\nversion = \"0.5.0\"\n";
+        assert!(dependency_provenance_failures(members_manifest(), lock).is_empty());
+    }
+
+    #[test]
+    fn a_trailing_table_does_not_inherit_the_last_package() {
+        // `[metadata]` after the packages must not have its keys read onto the
+        // last `[[package]]`, or a source could be invented for one.
+        let lock = format!(
+            "[[package]]\nname = \"comrak\"\n[metadata]\nsource = \"{CRATES_IO_SOURCE}\"\nchecksum = \"aac0\"\n"
+        );
+        let packages = parse_locked_packages(&lock);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].source, None);
+    }
+
+    #[test]
+    fn member_names_are_read_from_the_manifest_paths() {
+        let manifest = "[workspace]\nresolver = \"3\"\nmembers = [\n    \"crates/one\",\n    # a note\n    \"crates/two\",\n]\nexclude = [\"crates/three\"]\n";
+        assert_eq!(workspace_member_names(manifest), ["one", "two"]);
+    }
+
+    // The acceptance criterion this change was written against, made
+    // executable — and widened from "comrak's lock entry has a source and a
+    // checksum" to every dependency, because "comrak specifically" is what the
+    // gates that missed the divergence already believed they were checking.
+    #[test]
+    fn every_dependency_in_the_workspace_lockfile_comes_from_the_registry() {
+        let root = repo_root();
+        let manifest =
+            fs::read_to_string(root.join("Cargo.toml")).expect("reading the workspace manifest");
+        let lock =
+            fs::read_to_string(root.join("Cargo.lock")).expect("reading the workspace lockfile");
+
+        // Guard the invariant against passing vacuously: a parser that read
+        // nothing would satisfy every assertion below it.
+        let packages = parse_locked_packages(&lock);
+        assert!(
+            packages.len() > 100,
+            "only {} package(s) parsed out of Cargo.lock",
+            packages.len()
+        );
+        let comrak = packages
+            .iter()
+            .find(|p| p.name == "comrak")
+            .expect("comrak is in the lockfile");
+        assert_eq!(comrak.source.as_deref(), Some(CRATES_IO_SOURCE));
+        assert!(
+            comrak.checksum.is_some(),
+            "comrak is locked without a checksum"
+        );
+        assert_eq!(workspace_member_names(&manifest).len(), 7);
+
+        let failures = dependency_provenance_failures(&manifest, &lock);
+        assert!(
+            failures.is_empty(),
+            "dependency provenance:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]

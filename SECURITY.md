@@ -25,35 +25,29 @@ In scope:
   or a desynced construct cursor swapping one notation's content for
   another's. Gated by the `check_no_sentinel_leak` invariant.
 - CommonMark / GFM conformance regressions that enable a bypass.
-- Integer overflow or out-of-bounds reads. Every crate here, and the
-  vendored comrak, is `#![forbid(unsafe_code)]`.
+- Integer overflow or out-of-bounds reads. Every crate here is
+  `#![forbid(unsafe_code)]`.
 
 Out of scope:
 
-- Bugs in `upstream/comrak/` that also reproduce against pristine comrak at
-  the same tag — report those at <https://github.com/kivikakk/comrak>.
+- Bugs that reproduce against comrak on its own at the version this
+  workspace pins — report those at <https://github.com/kivikakk/comrak>.
 - Slow-but-terminating inputs. Those are perf issues.
 - Dependency advisories with no exploitation path here; cargo-deny catches
   them at CI time.
 
-## Vendored comrak advisory tracking
+## Advisory tracking
 
-comrak is vendored as a **path** dependency (ADR-0001), so it never appears
-in the registry graph `cargo audit` and `cargo deny` walk — a real
-supply-chain blind spot for a vendored fork.
+Every dependency, comrak included, resolves from crates.io and appears in
+`Cargo.lock` with a `source` and a `checksum` (ADR-0024), so `just audit`
+(RustSec) and `just deny` walk the complete graph. Both ride every pull
+request; there is no cron workflow.
 
-`just audit-comrak` closes it, wired into `just ci` and run as its own CI
-leg. It synthesises a one-crate `Cargo.lock` pinning comrak at the vendored
-version *as a crates.io package* and runs the authoritative `cargo audit`
-engine against it, so RustSec version-range matching applies exactly as it
-would to a registry dependency. It rides every pull request; there is no
-cron workflow.
-
-On failure the gate prints the matching `RUSTSEC-…` id, and the fix is
-normally `just upstream-sync <tag>`. An advisory that provably does not
-apply to how this crate drives comrak — as a black box, with raw-HTML
-passthrough off by default — may instead be recorded as a documented
-`ignore` in the recipe, mirroring `deny.toml`'s convention.
+On a hit the gate prints the matching `RUSTSEC-…` id, and the fix is
+normally a version bump. An advisory that provably does not apply to how
+this crate drives the dependency — comrak is driven as a black box, with
+raw-HTML passthrough off by default — may instead be recorded as a
+documented `ignore` in `deny.toml`.
 
 ## Release profile: `panic = "abort"`
 

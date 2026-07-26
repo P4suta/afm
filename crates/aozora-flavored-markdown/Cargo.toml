@@ -1,6 +1,6 @@
 [package]
 name        = "aozora-flavored-markdown"
-description = "Aozora Flavored Markdown: CommonMark + GFM + Aozora Bunko notation integration over a vendored comrak fork"
+description = "Aozora Flavored Markdown: CommonMark + GFM + Aozora Bunko notation integrated in one dialect, built on comrak"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

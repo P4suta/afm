@@ -10,13 +10,15 @@ dual-licensed under Apache-2.0 OR MIT (see LICENSE-APACHE and LICENSE-MIT).
 
 
 ================================================================================
-1. Vendored comrak (BSD-2-Clause, with embedded MIT / BSD-2 / CC-BY-SA 4.0)
+1. comrak (BSD-2-Clause, with embedded MIT / BSD-2 / CC-BY-SA 4.0)
 ================================================================================
 
-The directory upstream/comrak/ is a vendored fork of comrak v0.52.0
-(https://github.com/kivikakk/comrak), originally authored by Asherah Connor
-("kivikakk") and the Comrak contributors, 2017-2025. The upstream is
-distributed under the BSD-2-Clause license.
+aozora-flavored-markdown links the comrak crate (https://crates.io/crates/comrak),
+originally authored by Asherah Connor ("kivikakk") and the Comrak contributors,
+2017-2025, and distributed under the BSD-2-Clause license. No comrak source is
+redistributed from this repository — it resolves from crates.io like any other
+dependency (ADR-0024) — but binaries built here link it, so its notice is
+reproduced by reference below.
 
 comrak itself incorporates code derived from several upstream projects:
 
@@ -29,10 +31,8 @@ comrak itself incorporates code derived from several upstream projects:
     2014-2015)
   - the comrak test suite (BSD-2-Clause, (c) John MacFarlane, 2014)
 
-See upstream/comrak/COPYING for the full and authoritative text of each of
-these notices. aozora-flavored-markdown's modifications to the vendored tree are kept within the
-200-line diff budget documented in ADR-0001 (docs/adr/0001-*.md) and
-upstream/comrak/UPSTREAM_DIFF.md.
+The COPYING file inside the comrak crate carries the full and authoritative
+text of each of these notices.
 
 
 ================================================================================
@@ -102,8 +102,8 @@ copyright has lapsed under Japanese law.
 5. aozora-flavored-markdown (Apache-2.0 OR MIT)
 ================================================================================
 
-All original aozora-flavored-markdown source code — everything outside upstream/comrak/ and
-spec/ — is dual-licensed under Apache-2.0 OR MIT at the user's option.
+All original aozora-flavored-markdown source code — everything outside spec/ and
+docs/specs/ — is dual-licensed under Apache-2.0 OR MIT at the user's option.
 See LICENSE-APACHE and LICENSE-MIT for the full license texts. By
 contributing to aozora-flavored-markdown you agree that your contribution is dual-licensed
 under the same terms (see CONTRIBUTING.md).

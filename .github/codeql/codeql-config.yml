@@ -1,6 +1,0 @@
-name: aozora-flavored-markdown CodeQL config
-
-# upstream/comrak is a verbatim vendored fork, not aozora-flavored-markdown's code; exclude it
-# so results stay focused on the in-tree crates.
-paths-ignore:
-  - upstream/comrak

@@ -18,7 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 # Scans Rust (the workspace) and TypeScript/JavaScript (aozora-flavored-markdown-wasm
-# + the playground). Vendored comrak is excluded via codeql-config.yml.
+# + the playground). Every path in the repo is ours now that comrak comes from
+# the registry (ADR-0024), so there is nothing to exclude and no config file.
 jobs:
   codeql:
     name: codeql (${{ matrix.language }})
@@ -33,7 +34,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          config-file: ./.github/codeql/codeql-config.yml
       - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"

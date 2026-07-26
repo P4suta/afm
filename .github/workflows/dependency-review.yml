@@ -28,7 +28,7 @@ jobs:
           fail-on-severity: moderate
 
           # Keep in sync with deny.toml's license allow-list.
-          # BSD-2-Clause is required for the vendored comrak tree.
+          # BSD-2-Clause is required for the comrak dependency.
           # Zlib covers zlib-rs, pulled by the EPUB generator's zip dependency.
           # CC-BY-SA-4.0 covers spec/*.json fixtures that inherit it
           # from the CommonMark / GFM specs (test data, not runtime deps).

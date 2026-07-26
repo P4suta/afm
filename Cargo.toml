@@ -11,8 +11,6 @@ members = [
     "crates/aozora-flavored-markdown-epub-cli",
     "crates/xtask",
 ]
-# upstream/comrak is vendored verbatim (ADR-0001), not a workspace crate.
-exclude = ["upstream/comrak"]
 
 [workspace.package]
 version       = "0.5.0"
@@ -144,9 +142,11 @@ aozora-flavored-markdown-test-support = { path = "crates/aozora-flavored-markdow
 # build graph; the wasm crate opts into `json` on its own.
 aozora = { version = "0.5.0", default-features = false }
 
-# Vendored comrak fork (path, not crates.io). `default-features = false` drops
-# the comrak CLI (`cli` / `syntect` / `bon`); aozora-flavored-markdown-cli is our own binary.
-comrak = { version = "0.52.0", path = "upstream/comrak", default-features = false }
+# CommonMark + GFM engine, from crates.io (ADR-0024). One build graph locally,
+# in CI and after publication; `Cargo.lock` carries the checksum cargo verifies
+# on every build. `default-features = false` drops the comrak CLI
+# (`cli` / `syntect` / `bon`); aozora-flavored-markdown-cli is our own binary.
+comrak = { version = "0.52.0", default-features = false }
 
 # Error handling
 thiserror = "2.0.18"
@@ -209,7 +209,8 @@ strip    = "none"
 debug    = 1
 
 [profile.dev]
-# Faster incremental for large workspaces with a vendored tree
+# Faster incremental rebuilds: debug info stays in .o files instead of being
+# packed into every binary.
 split-debuginfo = "unpacked"
 
 # Optimise proc-macros/build scripts/most upstream in dev to speed the test cycle

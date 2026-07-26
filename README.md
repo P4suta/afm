@@ -89,9 +89,10 @@ Full API docs are on
   <https://www.aozora.gr.jp/annotation/> parses, and no unconsumed
   `［＃` marker reaches the rendered HTML.
 - **Single binary**, no runtime process dependencies.
-- **Zero parse-time hooks** in vendored comrak — Aozora recognition
-  lives in the sibling [`P4suta/aozora`](https://github.com/P4suta/aozora)
-  crate and is spliced into the comrak AST here.
+- **Zero parse-time hooks** in comrak — it is an unmodified crates.io
+  dependency. Aozora recognition lives in the sibling
+  [`P4suta/aozora`](https://github.com/P4suta/aozora) crate and is spliced
+  into the comrak AST here.
 
 ## Development
 
@@ -123,6 +124,4 @@ Vulnerabilities go through GitHub Security Advisories — see
 ## License
 
 Dual-licensed under [Apache-2.0](./LICENSE-APACHE) OR [MIT](./LICENSE-MIT).
-The vendored `upstream/comrak/` tree stays under its upstream
-BSD-2-Clause license. See [NOTICE](./NOTICE) for the full third-party
-attribution index.
+See [NOTICE](./NOTICE) for the full third-party attribution index.

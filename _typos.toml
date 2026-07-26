@@ -30,7 +30,6 @@ Yasunobu    = "Yasunobu"
 
 [files]
 extend-exclude = [
-    "upstream/",             # vendored comrak owns its own spelling
     "spec/aozora/fixtures/", # Aozora Bunko source files
     "spec/sources/",         # vendored upstream spec sources (CommonMark/GFM)
     "spec/*.json",           # generated from spec/sources/

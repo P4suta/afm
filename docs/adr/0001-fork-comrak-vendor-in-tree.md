@@ -1,6 +1,6 @@
 # 0001. Fork comrak and vendor it in-tree
 
-- Status: accepted
+- Status: superseded by ADR-0024
 - Date: 2026-04-23
 - Tags: architecture, parser, fork
 
@@ -48,4 +48,5 @@ Harder:
 
 - [comrak v0.52.0](https://github.com/kivikakk/comrak/tree/v0.52.0)
 - [Aozora annotation spec](https://www.aozora.gr.jp/annotation/)
-- [upstream diff policy](../../upstream/comrak/UPSTREAM_DIFF.md)
+- [ADR-0024](0024-depend-on-crates-io-comrak.md) — retires the vendored tree
+  and the `upstream/comrak/UPSTREAM_DIFF.md` policy file this ADR pointed at.

@@ -40,13 +40,6 @@ pre-commit:
       fail_text: |
         `typos` found a probable typo. Re-run `just typos`, or add an
         exception to `_typos.toml` if the token is intentional.
-    # Vendored comrak drift guard (ADR-0001, 0-line budget); runs only on changes there.
-    upstream-diff:
-      glob: "upstream/comrak/**"
-      run: just upstream-diff
-      fail_text: |
-        The vendored `upstream/comrak/` tree drifted from its pin
-        (ADR-0001, 0-line budget). A genuine comrak change needs its own ADR.
 
 commit-msg:
   commands:

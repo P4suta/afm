@@ -5,9 +5,9 @@
 //! asserts the rendered HTML is byte-identical to the spec's expected output.
 //!
 //! Drift expectations:
-//! - comrak 0.52.0 upstream claims "100% CommonMark compatibility" and passes
-//!   all 652 examples. aozora-flavored-markdown wraps comrak verbatim (the vendored
-//!   tree is bit-for-bit upstream), so we expect 652/652 here too.
+//! - comrak 0.52.0 claims "100% CommonMark compatibility" and passes all 652
+//!   examples. aozora-flavored-markdown wraps it unmodified, so we expect
+//!   652/652 here too.
 //! - If this count drops, it means our wrapper (lex pre-pass, options
 //!   default, post-process HTML splice) inadvertently mutated CommonMark
 //!   behaviour — a regression that breaks the 100 % compat guarantee.

@@ -52,7 +52,6 @@ jobs:
               - 'Dockerfile'
               - 'docker-compose*.yml'
               - 'Justfile'
-              - 'upstream/**'
               - 'playground/**'
               - '.github/**'
 
@@ -167,17 +166,6 @@ jobs:
       - uses: ./.github/actions/setup-dev-image
       - run: just ${{ matrix.target }}
 
-  # Phase-1 (parallel with `check`). Repo-shape sanity (vendored comrak
-  # diff = 0 per ADR-0001) does not depend on rust compilation.
-  upstream-diff:
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: ./.github/actions/setup-dev-image
-      - run: just upstream-diff
-
   # Phase-1 (parallel). Pure grep on the bare runner; catches tool-version
   # pin drift across Dockerfile / playground/package.json / docs.yml.
   verify-version-pins:
@@ -231,8 +219,6 @@ jobs:
       - run: just coverage
 
   # Phase-2 (needs check; `udeps` is nightly and needs the dep graph compiled).
-  # `audit-comrak` is its own leg so a RUSTSEC advisory against the vendored
-  # path-dep comrak (invisible to `cargo audit`/`deny`) gets a named check.
   audit:
     runs-on: ubuntu-latest
     needs: [changes, check]
@@ -240,7 +226,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [deny, shear, audit, audit-comrak, udeps]
+        target: [deny, shear, audit, udeps]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-dev-image
@@ -262,7 +248,6 @@ jobs:
       - dist-assets-check
       - wasm-build
       - lint
-      - upstream-diff
       - verify-version-pins
       - build-and-test
       - spec
