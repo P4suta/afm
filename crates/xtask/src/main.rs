@@ -414,7 +414,11 @@ fn comment_discipline(root: &Path) -> Result<()> {
 /// The failure is never "delete a comment". It is: say *why*, once, in the
 /// place a reader will meet the constraint — and stop restating what the
 /// types and the code already say.
-const MAX_DOC_LINES: u64 = 1_608;
+// Raised by 17 for `aozora_flavored_markdown::verbatim_regions`: a new module
+// whose reason to exist is why `serialize` may protect what `render` cannot,
+// and the contract that buys `serialize` its callers. Prose grew because the
+// surface did; nothing else in this move is restatement.
+const MAX_DOC_LINES: u64 = 1_625;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured

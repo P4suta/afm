@@ -590,9 +590,14 @@ fn every_construct_of_a_pure_aozora_document_is_accounted_for() {
 #[test]
 fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
     // On pure 青空文庫 source `aozora_flavored_markdown::serialize` is a thin
-    // delegate, so the two must produce identical bytes. The corpus holds no
-    // CommonMark, which is exactly the boundary the next test pins.
+    // delegate, so the two must produce identical bytes. What CommonMark reads
+    // as block structure is not pure 青空文庫 source, which is why the rule
+    // fixtures are skipped for the same reason the word comparison skips them
+    // — and the boundary is what the next test pins.
     for (label, src) in pure_aozora_fixtures() {
+        if RULE_IS_MARKUP_HERE.contains(label) {
+            continue;
+        }
         let aozora_out = parse(src).to_source();
         let md_out = aozora_flavored_markdown::serialize(src);
         assert_eq!(
@@ -603,20 +608,23 @@ fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
 }
 
 #[test]
-fn the_delegation_stops_at_a_fenced_code_block() {
-    // The one place this crate must *not* agree with the parser. The parser
-    // is CommonMark-blind by design (ADR-0010) and rewrites a fence body like
-    // prose; this crate masks it first. Asserting the divergence, rather than
-    // only the agreement above, is what keeps a future "simplify the delegate"
-    // from silently reintroducing the bug — the parity corpus cannot say it,
-    // because a fenced fixture there would fail the test above by design.
-    let src = "```\n｜青梅《おうめ》\n```\n";
-    let aozora_out = parse(src).to_source();
-    let md_out = aozora_flavored_markdown::serialize(src);
-    assert_eq!(md_out, src, "the fence body must survive this crate");
-    assert_ne!(
-        aozora_out, src,
-        "the parser is expected to rewrite an unmasked fence body; if it no \
-         longer does, `code_block_mask` has lost its reason to exist"
-    );
+fn the_delegation_stops_where_commonmark_owns_the_bytes() {
+    // Where this crate must *not* agree with the parser. The parser is
+    // CommonMark-blind by design (ADR-0010) and rewrites a fence body like
+    // prose, and isolates a rule row that CommonMark reads as the underline of
+    // a setext heading; this crate lifts both out of its reach first.
+    // Asserting the divergence, rather than only the agreement above, is what
+    // keeps a future "simplify the delegate" from silently reintroducing the
+    // bug — the parity corpus cannot say it, because such a fixture there
+    // would fail the test above by design.
+    for src in ["```\n｜青梅《おうめ》\n```\n", "本文\n----------\n"] {
+        let aozora_out = parse(src).to_source();
+        let md_out = aozora_flavored_markdown::serialize(src);
+        assert_eq!(md_out, src, "the source must survive this crate: {src:?}");
+        assert_ne!(
+            aozora_out, src,
+            "the parser is expected to rewrite this unprotected source; if it \
+             no longer does, the protection has lost its reason to exist"
+        );
+    }
 }

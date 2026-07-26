@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 4b336a7e95333c4e6f8c82ba7b6e742c07745b393f270f8a03bb0a498e5f661c # shrinks to src = "```\n｜青梅《おうめ》\n［＃改ページ］\n```\n"
 cc ddfe9dd7dfb29ec5503cd956a33e4577bcc5a1c51bc9afe72ba8dfba16c627d4 # shrinks to (src, _) = ("```\n｜青梅《おうめ》\n［＃改ページ］\n```\n\n```\n\n```\n\n", "")
+cc 1c1fec395f2cd17835afb310fba43e494d178238ae1cbdab4503b482541aacff # shrinks to src = "`｜青梅《おうめ》` in a code span, ｜青梅《おうめ》 outside\n"
