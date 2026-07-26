@@ -24,7 +24,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use aozora_flavored_markdown::{Options, canonicalize, render, render_blocks_to_ir, render_to_ir};
+use aozora_flavored_markdown::{
+    Options, RenderedBlocks, canonicalize, render, render_blocks, render_to_ir,
+};
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
@@ -272,7 +274,7 @@ fn no_reachable_configuration_lets_raw_html_through_the_ir_paths() {
     for (label, opts) in reachable_options() {
         for src in XSS_PAYLOADS {
             assert_inert(&label, src, &render_to_ir(src, &opts).html);
-            let (blocks, _) = render_blocks_to_ir(src, &opts);
+            let RenderedBlocks { blocks, .. } = render_blocks(src, &opts);
             let joined: String = blocks.iter().map(|b| b.html.as_str()).collect();
             assert_inert(&label, src, &joined);
         }
@@ -415,7 +417,7 @@ proptest! {
         );
         // The per-block path restores the code-block mask a block at a time,
         // so it can leak where the document path does not.
-        let (blocks, _) = render_blocks_to_ir(&src, &opts);
+        let RenderedBlocks { blocks, .. } = render_blocks(&src, &opts);
         let joined: String = blocks.iter().map(|b| b.html.as_str()).collect();
         assert_html_invariants(&src, &joined);
     }

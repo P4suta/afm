@@ -7,18 +7,18 @@
 //! else. Without this contract a renderer change silently ships unstyled
 //! markup, or leaves a rule behind for a class that has been renamed away.
 //!
-//! `AOZORA_MD_CLASSES` is derived from the parser's own `AOZORA_CLASSES`
+//! `classes::all()` is derived from the parser's own `AOZORA_CLASSES`
 //! (ADR-0011), so the contract cannot drift from what the renderer emits;
 //! the themes are what can drift, in either direction, and the two sweeps
 //! below pin both.
 
-use core::str;
+use core::{ptr, str};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use aozora_flavored_markdown::html::render_to_string;
-use aozora_flavored_markdown::{AOZORA_MD_CLASSES, is_contract_class};
+use aozora_flavored_markdown::classes;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::check_css_class_contract;
 
 /// Classes the themes define that the renderer never emits: the host-page
@@ -78,30 +78,19 @@ fn theme_selectors(name: &str) -> HashSet<String> {
     collect_class_selectors(&css)
 }
 
-/// Whether a selector a theme defines is one it is allowed to define: an
-/// emitted class exactly, a numeric modifier of an open-ended family
-/// (`aozora-md-indent-2` for the `aozora-md-indent` stem), or the themes'
-/// own opt-in root.
+/// Whether a selector a theme defines is one it is allowed to define: a
+/// class the renderer can emit — `is_known` already carries the numeric
+/// modifiers of an open-ended family — or the themes' own opt-in root.
 fn is_theme_selector(class: &str) -> bool {
-    if is_contract_class(class) || THEME_ONLY_CLASSES.contains(&class) {
-        return true;
-    }
-    match class.rsplit_once('-') {
-        Some((stem, suffix)) => {
-            !suffix.is_empty()
-                && suffix.bytes().all(|b| b.is_ascii_digit())
-                && is_contract_class(stem)
-        }
-        None => false,
-    }
+    classes::is_known(class) || THEME_ONLY_CLASSES.contains(&class)
 }
 
 #[test]
 fn every_class_has_a_horizontal_theme_rule() {
     let selectors = theme_selectors("aozora-md-horizontal.css");
-    let missing: Vec<&str> = AOZORA_MD_CLASSES
+    let missing: Vec<&str> = classes::all()
         .iter()
-        .map(String::as_str)
+        .copied()
         .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
@@ -113,9 +102,9 @@ fn every_class_has_a_horizontal_theme_rule() {
 #[test]
 fn every_class_has_a_vertical_theme_rule() {
     let selectors = theme_selectors("aozora-md-vertical.css");
-    let missing: Vec<&str> = AOZORA_MD_CLASSES
+    let missing: Vec<&str> = classes::all()
         .iter()
-        .map(String::as_str)
+        .copied()
         .filter(|c| !selectors.contains(*c))
         .collect();
     assert!(
@@ -187,21 +176,76 @@ fn the_contract_is_the_parsers_own_list_rebranded() {
         .iter()
         .map(|class| class.replacen("aozora-", "aozora-md-", 1))
         .collect();
-    assert_eq!(*AOZORA_MD_CLASSES, expected);
+    assert_eq!(classes::all(), expected);
     let mut seen: HashSet<&str> = HashSet::new();
-    for class in AOZORA_MD_CLASSES.iter() {
-        assert!(seen.insert(class), "duplicate entry: {class}");
+    for class in classes::all() {
+        assert!(seen.insert(*class), "duplicate entry: {class}");
     }
 }
 
 #[test]
-fn contract_membership_is_exact() {
-    // The public predicate answers exact spelling only: the numeric
-    // variants of an open-ended family are recognised by their stem, which
-    // is what `is_theme_selector` above (and the Tier G predicate) rely on.
-    assert!(is_contract_class("aozora-md-indent"));
-    assert!(!is_contract_class("aozora-md-indent-2"));
-    assert!(!is_contract_class("aozora-indent"));
+fn the_class_list_is_interned_once_and_handed_out_by_reference() {
+    // `all()` replaced a `pub static … : LazyLock<Vec<String>>`, and the
+    // interning it hides is the reason a consumer no longer reads a laziness
+    // wrapper out of the signature. `&'static [&'static str]` is also exactly
+    // the return type an implementation that leaked a fresh `String` per call
+    // would have — the leak would be invisible to every other test in this
+    // file, and to rustdoc. Pointer identity across two calls is what says
+    // the interning happened once.
+    let (first, second) = (classes::all(), classes::all());
+    assert!(
+        ptr::eq(first, second),
+        "all() handed back a different slice on the second call, so it is re-interning \
+         (and leaking) per call rather than once"
+    );
+    assert!(
+        first.iter().zip(second).all(|(a, b)| ptr::eq(*a, *b)),
+        "the entries are re-leaked per call even though the slice is not"
+    );
+}
+
+#[test]
+fn contract_membership_covers_the_numeric_family() {
+    // The listed stem, a numeric variant of it that the list does not carry
+    // verbatim, and the parser's own brand — which this crate never emits.
+    assert!(classes::is_known("aozora-md-indent"));
+    assert!(classes::is_known("aozora-md-indent-2"));
+    assert!(!classes::is_known("aozora-indent"));
+}
+
+#[test]
+fn membership_is_the_listed_class_plus_a_numeric_suffix_and_nothing_else() {
+    // Quantified over the whole list rather than over the two or three names
+    // somebody remembered, because the rule is the parser's and applies to
+    // every entry: `AOZORA_CLASSES` carries each slug family member verbatim
+    // (`aozora-bouten-goma`) and collapses only the open-ended *numeric*
+    // variants to their stem. So a suffix means a number, or it means the
+    // token is not one the renderer can emit.
+    for &class in classes::all() {
+        assert!(classes::is_known(class), "a listed class must be known");
+        for n in ["0", "1", "2", "10", "07", "4294967296"] {
+            let numeric = format!("{class}-{n}");
+            assert!(
+                classes::is_known(&numeric),
+                "the numeric family member {numeric} must be known"
+            );
+        }
+        // `zzq` is not a slug the parser publishes, so `<listed>-zzq` is a
+        // token no renderer emits. Accepting it was the slack that let the
+        // checkers paper over a predicate rejecting `aozora-md-indent-2`.
+        let slug = format!("{class}-zzq");
+        assert!(
+            !classes::is_known(&slug),
+            "{slug} is neither listed nor numeric, so it must not be known"
+        );
+        // Two numeric segments never compose: the parser writes one amount.
+        let doubled = format!("{class}-2-3");
+        assert!(!classes::is_known(&doubled), "{doubled} must not be known");
+    }
+    // Shapes with nothing to split on, or a split that yields an empty half.
+    for class in ["", "indent", "aozora", "-", "-2", "aozora-md-indent-"] {
+        assert!(!classes::is_known(class), "{class:?} must not be known");
+    }
 }
 
 #[test]
@@ -225,7 +269,7 @@ fn collect_class_selectors_tolerates_trailing_hyphen() {
 }
 
 // ---------------------------------------------------------------------------
-// Render-direction contract: construct → aozora-md-* class → AOZORA_MD_CLASSES
+// Render-direction contract: construct → aozora-md-* class → classes::all()
 //
 // The theme tests above prove the emitted classes ⊆ CSS ⊆ the contract. The
 // test below closes the other half of the loop: every aozora-md-* class a
@@ -250,6 +294,14 @@ const RENDER_CORPUS: &[(&str, &str)] = &[
     ("page break", "前\n\n［＃改ページ］\n\n後"),
     ("section break (kaicho)", "前\n\n［＃改丁］\n\n後"),
     ("indent leaf", "前［＃地から１字下げ］後"),
+    // The numeric family, reached from source rather than asserted on a
+    // hand-written token: this one renders `aozora-md-indent-2`, the class
+    // the contract predicate used to answer `false` for.
+    ("indent leaf (numeric family)", "［＃２字下げ］見出し"),
+    (
+        "align-end leaf (numeric family)",
+        "本文［＃地から２字上げ］",
+    ),
     ("align-end leaf", "前［＃地付き］末尾"),
     (
         "indent container",
@@ -273,13 +325,55 @@ const RENDER_CORPUS: &[(&str, &str)] = &[
 
 #[test]
 fn every_rendered_class_is_recognised() {
+    let mut emitted: HashSet<String> = HashSet::new();
     for (label, src) in RENDER_CORPUS {
-        let html = render_to_string(src);
+        let html = to_html(src);
         if let Err(violation) = check_css_class_contract(&html) {
             panic!(
-                "corpus item {label:?} emitted an aozora-md-* class not in \
-                 AOZORA_MD_CLASSES:\n  {violation}\n  src = {src:?}\n  html = {html}"
+                "corpus item {label:?} emitted an aozora-md-* class \
+                 classes::is_known() rejects:\n  {violation}\n  src = {src:?}\n  html = {html}"
             );
         }
+        emitted.extend(rendered_class_tokens(&html));
     }
+    // Anti-vacuity, and the half of the contract the sweep alone cannot
+    // state: the corpus must keep reaching the open-ended numeric family,
+    // whose members the derived list does not carry verbatim. Without this
+    // the sweep goes quiet the day the notation for `［＃２字下げ］` changes,
+    // and the family stops being checked against a real render.
+    let numeric: Vec<&String> = emitted.iter().filter(|c| ends_in_a_number(c)).collect();
+    assert!(
+        !numeric.is_empty(),
+        "no corpus item emitted a numeric-family class any more; \
+         retarget the corpus rather than deleting the guard. Emitted: {emitted:?}"
+    );
+    for class in numeric {
+        assert!(
+            !classes::all().contains(&class.as_str()),
+            "{class} is carried verbatim now, so it no longer exercises the family rule"
+        );
+    }
+}
+
+/// Every `class="…"` token in rendered HTML, tag-position-blind because the
+/// renderer emits the attribute in one fixed shape and the corpus above is
+/// small enough to read.
+fn rendered_class_tokens(html: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("class=\"") {
+        let after = &rest[at + "class=\"".len()..];
+        let Some(end) = after.find('"') else { break };
+        out.extend(after[..end].split_whitespace().map(ToOwned::to_owned));
+        rest = &after[end..];
+    }
+    out
+}
+
+/// A class whose last hyphen-separated segment is a number — the open-ended
+/// family the parser publishes by stem only.
+fn ends_in_a_number(class: &str) -> bool {
+    class
+        .rsplit_once('-')
+        .is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
 }

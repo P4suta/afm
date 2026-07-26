@@ -1,4 +1,4 @@
-//! End-to-end HTML invariants for `aozora_flavored_markdown::render_to_string`.
+//! End-to-end HTML invariants for `aozora_flavored_markdown::to_html`.
 //!
 //! The splicer (`ast_splice`) replaces the lexer's sentinels in the comrak
 //! AST before `comrak::format_html`. The invariants asserted here are
@@ -16,7 +16,7 @@
 //! - **Document order**: Aozora-derived markup appears in the output
 //!   in the same order as the corresponding constructs appear in
 //!   source.
-//! - **Determinism**: `render_to_string(x)` produces identical output
+//! - **Determinism**: `to_html(x)` produces identical output
 //!   on independent invocations.
 //! - **No panic on malformed shapes**: proptest-driven random
 //!   combinations of Aozora triggers and plain text never crash.
@@ -24,7 +24,7 @@
 //! The tests here deliberately overlap with `property_html_shape` and
 //! the lexer's own validate phase — defence-in-depth is the point.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown::{Options, render as render_with_diag, sentinels};
 use aozora_flavored_markdown_test_support::check_no_bare_bracket;
 use aozora_flavored_markdown_test_support::generators::aozora_fragment;
@@ -36,7 +36,7 @@ use proptest::prelude::*;
 
 #[test]
 fn render_consumes_every_inline_sentinel_on_simple_ruby() {
-    let html = render_to_string("｜青梅《おうめ》へ");
+    let html = to_html("｜青梅《おうめ》へ");
     assert!(
         !html.contains(sentinels::INLINE),
         "sentinels::INLINE leaked into HTML: {html:?}"
@@ -45,7 +45,7 @@ fn render_consumes_every_inline_sentinel_on_simple_ruby() {
 
 #[test]
 fn render_consumes_every_block_sentinel_on_page_break() {
-    let html = render_to_string("前\n\n［＃改ページ］\n\n後");
+    let html = to_html("前\n\n［＃改ページ］\n\n後");
     for s in [
         sentinels::BLOCK_LEAF,
         sentinels::BLOCK_OPEN,
@@ -57,7 +57,7 @@ fn render_consumes_every_block_sentinel_on_page_break() {
 
 #[test]
 fn render_consumes_sentinels_for_mixed_inline_and_block() {
-    let html = render_to_string("｜漢字《かんじ》の話。\n\n［＃改ページ］\n\n［＃ほげ］まとめ");
+    let html = to_html("｜漢字《かんじ》の話。\n\n［＃改ページ］\n\n［＃ほげ］まとめ");
     for s in [
         sentinels::INLINE,
         sentinels::BLOCK_LEAF,
@@ -74,7 +74,7 @@ fn render_consumes_sentinels_for_mixed_inline_and_block() {
 
 #[test]
 fn explicit_ruby_count_matches_input_count() {
-    let html = render_to_string("｜青梅《おうめ》と｜鶴見《つるみ》、｜立川《たちかわ》");
+    let html = to_html("｜青梅《おうめ》と｜鶴見《つるみ》、｜立川《たちかわ》");
     let ruby_count = html.matches("<ruby>").count();
     assert_eq!(
         ruby_count, 3,
@@ -84,7 +84,7 @@ fn explicit_ruby_count_matches_input_count() {
 
 #[test]
 fn unknown_annotation_count_matches_input_count() {
-    let html = render_to_string("［＃ほげ］と［＃ふが］と［＃ぴよ］");
+    let html = to_html("［＃ほげ］と［＃ふが］と［＃ぴよ］");
     let annotation_count = html.matches("aozora-md-directive").count();
     assert!(
         annotation_count >= 3,
@@ -98,7 +98,7 @@ fn unknown_annotation_count_matches_input_count() {
 
 #[test]
 fn aozora_constructs_render_in_source_order() {
-    let html = render_to_string("｜一《いち》と｜二《に》と［＃ほげ］と｜三《さん》");
+    let html = to_html("｜一《いち》と｜二《に》と［＃ほげ］と｜三《さん》");
     // Find every "ruby" / "annotation" landmark and confirm the
     // sequence is Ruby, Ruby, Annotation, Ruby.
     let order = order_of_landmarks(&html, &["<ruby>", "aozora-md-directive"]);
@@ -129,7 +129,7 @@ fn order_of_landmarks(html: &str, needles: &[&'static str]) -> Vec<&'static str>
 #[test]
 fn render_is_deterministic() {
     let src = "｜青梅《おうめ》前［＃改ページ］後\n［＃ほげ］続き";
-    assert_eq!(render_to_string(src), render_to_string(src));
+    assert_eq!(to_html(src), to_html(src));
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ fn tier_a_holds_for_every_static_fixture() {
         "前［＃ここから２字下げ］本文［＃ここで字下げ終わり］後",
     ];
     for src in fixtures {
-        let html = render_to_string(src);
+        let html = to_html(src);
         assert!(
             tier_a_holds(&html),
             "Tier-A leaked ［＃ for input {src:?}, html = {html:?}"
@@ -177,7 +177,7 @@ fn parse_is_well_formed(src: &str) -> bool {
 proptest! {
     /// Arbitrary combinations of Aozora triggers must:
     ///
-    /// 1. Not panic `render_to_string` — the pipeline must be total.
+    /// 1. Not panic `to_html` — the pipeline must be total.
     /// 2. Not leak any sentinel character into the rendered HTML. A source
     ///    cannot contribute one of its own (a PUA codepoint an author types
     ///    is replaced with U+FFFD), so this holds for malformed input too —
@@ -187,7 +187,7 @@ proptest! {
     ///    into rendered HTML (Tier-A canary).
     #[test]
     fn render_survives_arbitrary_aozora_shaped_input(src in aozora_fragment(16)) {
-        let html = render_to_string(&src);
+        let html = to_html(&src);
         for s in [sentinels::INLINE, sentinels::BLOCK_LEAF, sentinels::BLOCK_OPEN, sentinels::BLOCK_CLOSE] {
             prop_assert!(
                 !html.contains(s),
@@ -207,8 +207,8 @@ proptest! {
     /// Determinism: two independent invocations produce identical HTML.
     #[test]
     fn render_determinism(src in aozora_fragment(16)) {
-        let a = render_to_string(&src);
-        let b = render_to_string(&src);
+        let a = to_html(&src);
+        let b = to_html(&src);
         prop_assert_eq!(a, b);
     }
 }
@@ -219,25 +219,25 @@ proptest! {
 
 #[test]
 fn malformed_unclosed_bracket_does_not_panic() {
-    drop(render_to_string("前［＃"));
-    drop(render_to_string("［＃ほげ"));
-    let a = render_to_string("［＃");
-    let b = render_to_string("［＃");
+    drop(to_html("前［＃"));
+    drop(to_html("［＃ほげ"));
+    let a = to_html("［＃");
+    let b = to_html("［＃");
     assert_eq!(a, b);
 }
 
 #[test]
 fn malformed_unclosed_ruby_does_not_panic() {
-    drop(render_to_string("｜青梅《"));
-    drop(render_to_string("《》"));
-    drop(render_to_string("｜"));
-    drop(render_to_string("※"));
+    drop(to_html("｜青梅《"));
+    drop(to_html("《》"));
+    drop(to_html("｜"));
+    drop(to_html("※"));
 }
 
 #[test]
 fn malformed_stray_close_bracket_does_not_panic() {
-    drop(render_to_string("stray］text"));
-    drop(render_to_string("》trailing"));
+    drop(to_html("stray］text"));
+    drop(to_html("》trailing"));
 }
 
 // ---------------------------------------------------------------------------
@@ -246,9 +246,9 @@ fn malformed_stray_close_bracket_does_not_panic() {
 
 #[test]
 fn source_containing_pua_characters_does_not_panic() {
-    let html = render_to_string("before\u{E001}after");
+    let html = to_html("before\u{E001}after");
     assert!(!html.is_empty(), "render must produce some output");
-    let a = render_to_string("before\u{E001}after");
-    let b = render_to_string("before\u{E001}after");
+    let a = to_html("before\u{E001}after");
+    let b = to_html("before\u{E001}after");
     assert_eq!(a, b);
 }

@@ -18,9 +18,9 @@
 //! its own — this crate's name does.
 
 // The two brands live next to the contract they define — the published
-// `AOZORA_MD_CLASSES` is the parser's own list under the rewritten brand —
-// so the rewrite below cannot be changed without the contract following it.
-use crate::classes::{BRAND, REBRAND};
+// `classes::all()` is the parser's own list under the rewritten brand — so
+// the rewrite below cannot be changed without the contract following it.
+use crate::classes::{BRAND, PREFIX};
 
 /// The wrapper the renderer puts around an all-inline document.
 const PARAGRAPH_OPEN: &str = "<p>";
@@ -66,7 +66,7 @@ fn rebrand(fragment: &str) -> String {
         let Some(end) = rest.find('"') else {
             break;
         };
-        out.push_str(&rest[..end].replace(BRAND, REBRAND));
+        out.push_str(&rest[..end].replace(BRAND, PREFIX));
         rest = &rest[end..];
     }
     out.push_str(rest);

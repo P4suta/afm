@@ -785,7 +785,7 @@ mod tests {
         // Two top-level blocks, each with its own inline sentinel: the cursor
         // has to thread, or the second block resolves against the first
         // block's entry. Reached from inside the crate since the builder is
-        // `pub(crate)` — the public per-block path is `render_blocks_to_ir`.
+        // `pub(crate)` — the public per-block path is `render_blocks`.
         let src = "｜A《a》\n\n｜B《b》";
         let mut builder = StreamingIrBuilder::new(src);
         let arena = comrak::Arena::new();

@@ -22,8 +22,8 @@ use std::collections::HashSet;
 use std::error::Error as StdError;
 
 use aozora_flavored_markdown::{
-    Diagnostic, Error, Options, Rendered, RenderedBlock, RenderedIr, canonicalize, html, render,
-    render_blocks_to_ir, render_to_ir,
+    Error, Options, Rendered, RenderedBlocks, RenderedIr, canonicalize, render, render_blocks,
+    render_to_ir, to_html,
 };
 
 /// One byte past the budget on a 64-bit target: the length a refusal reports.
@@ -143,17 +143,16 @@ fn the_rendering_entry_points_gained_no_result_of_their_own() {
     for src in MALFORMED {
         let rendered: Rendered = render(src, &Options::default());
         let ir: RenderedIr = render_to_ir(src, &Options::default());
-        let (blocks, diagnostics): (Vec<RenderedBlock>, Vec<Diagnostic>) =
-            render_blocks_to_ir(src, &Options::default());
-        let direct: String = html::render_to_string(src);
+        let streamed: RenderedBlocks = render_blocks(src, &Options::default());
+        let direct: String = to_html(src);
         assert!(
             !rendered.html.is_empty()
                 && !ir.html.is_empty()
-                && !blocks.is_empty()
+                && !streamed.blocks.is_empty()
                 && !direct.is_empty(),
             "malformed notation must still render a document: {src:?}"
         );
-        seen += rendered.diagnostics.len() + ir.diagnostics.len() + diagnostics.len();
+        seen += rendered.diagnostics.len() + ir.diagnostics.len() + streamed.diagnostics.len();
     }
     assert!(
         seen > 0,

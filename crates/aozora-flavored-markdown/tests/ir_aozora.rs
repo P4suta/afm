@@ -688,10 +688,10 @@ fn a_canonicalised_source_still_reports_ranges_into_the_callers_text() {
 }
 
 #[test]
-fn render_blocks_to_ir_emits_aozora_block_per_top_level_block() {
-    use aozora_flavored_markdown::render_blocks_to_ir;
-    let (blocks, _) =
-        render_blocks_to_ir("｜青梅《おうめ》\n\n［＃改ページ］", &Options::default());
+fn render_blocks_emits_aozora_block_per_top_level_block() {
+    use aozora_flavored_markdown::{RenderedBlocks, render_blocks};
+    let RenderedBlocks { blocks, .. } =
+        render_blocks("｜青梅《おうめ》\n\n［＃改ページ］", &Options::default());
     let saw_ruby_in_first = blocks[0].ir.iter().any(|b| {
         matches!(
             b,
@@ -716,9 +716,10 @@ fn streaming_blocks_drain_a_container_the_source_never_closed() {
     // chunked-cancellation path, ADR-0009) swallows the rest of the note
     // into the open container — while the block `html` of the very same
     // call is balanced.
-    use aozora_flavored_markdown::render_blocks_to_ir;
+    use aozora_flavored_markdown::{RenderedBlocks, render_blocks};
 
-    let (blocks, _) = render_blocks_to_ir("［＃ここから２字下げ］\n\n本文", &Options::default());
+    let RenderedBlocks { blocks, .. } =
+        render_blocks("［＃ここから２字下げ］\n\n本文", &Options::default());
     let kinds: Vec<&str> = blocks
         .iter()
         .flat_map(|b| aozora_blocks(&b.ir))
@@ -746,10 +747,10 @@ fn streaming_container_markers_pair_across_block_boundaries() {
     // The open marker is one top-level block and the close another. The
     // builder threads its container stack across `walk_block` calls, so the
     // close still finds its open instead of being dropped as an orphan.
-    use aozora_flavored_markdown::render_blocks_to_ir;
+    use aozora_flavored_markdown::{RenderedBlocks, render_blocks};
 
     let src = "［＃ここから２字下げ］\n\n本文\n\n［＃ここで字下げ終わり］";
-    let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+    let RenderedBlocks { blocks, .. } = render_blocks(src, &Options::default());
     let kinds: Vec<&str> = blocks
         .iter()
         .flat_map(|b| aozora_blocks(&b.ir))

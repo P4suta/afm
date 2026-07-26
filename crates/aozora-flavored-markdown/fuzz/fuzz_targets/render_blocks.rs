@@ -1,4 +1,4 @@
-//! Fuzz target — `aozora_flavored_markdown::render_blocks_to_ir` on arbitrary UTF-8.
+//! Fuzz target — `aozora_flavored_markdown::render_blocks` on arbitrary UTF-8.
 //!
 //! The chunked path the wasm `renderBlocks` export drives. It carries state
 //! the whole-document path does not — the code-block mask is restored with a
@@ -19,7 +19,7 @@
 
 #![no_main]
 
-use aozora_flavored_markdown::{Options, render_blocks_to_ir};
+use aozora_flavored_markdown::{Options, RenderedBlocks, render_blocks};
 use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_sentinel_leak};
 use libfuzzer_sys::fuzz_target;
 
@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(src) = core::str::from_utf8(data) else {
         return;
     };
-    let (blocks, _) = render_blocks_to_ir(src, &Options::default());
+    let RenderedBlocks { blocks, .. } = render_blocks(src, &Options::default());
     let mut joined = String::new();
     for block in &blocks {
         if let Err(e) = check_no_sentinel_leak(src, &block.html) {

@@ -49,7 +49,7 @@
 //! markup comparison is skipped for those fixtures — every other check in
 //! this file still runs on them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use aozora::Snapshot;
 
@@ -67,8 +67,7 @@ fn canonical(src: &str) -> String {
         .expect("a fixture is never past the parser's span budget")
 }
 
-use aozora_flavored_markdown::html as md_html;
-use aozora_flavored_markdown::{AOZORA_MD_CLASSES, Options};
+use aozora_flavored_markdown::{Options, classes, to_html};
 use aozora_flavored_markdown_test_support::check_html_tag_balance;
 
 /// Pure-青空文庫 documents: no CommonMark emphasis, headings, lists or code
@@ -409,7 +408,7 @@ fn both_renderers_agree_on_the_text_inside_every_aozora_element() {
             continue;
         }
         let aozora = element_text_histogram(&aozora_only_render(src), "aozora-");
-        let md = element_text_histogram(&md_html::render_to_string(src), "aozora-md-");
+        let md = element_text_histogram(&to_html(src), "aozora-md-");
         if aozora != md {
             diffs.push(format!(
                 "{label} ({src:?})\n  aozora:    {aozora:?}\n  aozora-md: {md:?}"
@@ -435,7 +434,7 @@ fn both_renderers_agree_on_the_words_of_the_document() {
             continue;
         }
         let aozora = packed(&text_content(&aozora_only_render(src)));
-        let md = packed(&text_content(&md_html::render_to_string(src)));
+        let md = packed(&text_content(&to_html(src)));
         if aozora != md {
             diffs.push(format!(
                 "{label} ({src:?})\n  aozora:    {aozora:?}\n  aozora-md: {md:?}"
@@ -457,7 +456,7 @@ fn both_renderers_agree_on_the_aozora_markup_of_pure_aozora_input() {
             continue;
         }
         let aozora_out = aozora_only_render(src);
-        let md_out = md_html::render_to_string(src);
+        let md_out = to_html(src);
         let aozora_classes = class_stem_histogram(&aozora_out, "aozora-");
         let md_classes = class_stem_histogram(&md_out, "aozora-md-");
         if aozora_classes != md_classes {
@@ -482,31 +481,23 @@ fn both_renderers_agree_on_the_aozora_markup_of_pure_aozora_input() {
 
 #[test]
 fn every_emitted_class_is_in_the_pinned_contract() {
-    // The pinned list (`AOZORA_MD_CLASSES`) tracks the `aozora-md-*` stems
-    // this crate emits. The `aozora-*` brand from the parser is
-    // checked against the same stems with a `aozora-` prefix strip — same
-    // family of stems, different brand prefix.
-    let known: HashSet<&str> = AOZORA_MD_CLASSES.iter().map(String::as_str).collect();
+    // `classes::is_known` is the library's own answer, and this asks it
+    // rather than re-deriving one: the family rule lived in three places at
+    // once — here, in the Tier G checker, and (rejecting `aozora-md-indent-2`)
+    // in the library — and the two copies out here were loose enough that the
+    // library's being wrong changed no result. Both brands are checked against
+    // the one predicate; the parser's `aozora-` output is rebranded first,
+    // since it is the same family of stems under the other brand.
     let mut violations = Vec::new();
     for (label, src) in pure_aozora_fixtures() {
         for (renderer, html, prefix) in [
             ("aozora", aozora_only_render(src), "aozora-"),
-            ("aozora-md", md_html::render_to_string(src), "aozora-md-"),
+            ("aozora-md", to_html(src), "aozora-md-"),
         ] {
             for (stem, _count) in class_stem_histogram(&html, prefix) {
                 let full = format!("aozora-md-{stem}");
-                if known.contains(full.as_str()) {
+                if classes::is_known(&full) {
                     continue;
-                }
-                // Family-suffix variants — `aozora-md-indent-2`,
-                // `aozora-md-section-break-choho`, `aozora-md-bouten-goma`-suffixed
-                // forms, etc. Accept any suffix when the family stem
-                // is in the pinned list.
-                if let Some(stem_end) = full.rfind('-') {
-                    let family = &full[..stem_end];
-                    if known.contains(family) {
-                        continue;
-                    }
                 }
                 violations.push(format!(
                     "{renderer} emitted unknown stem {stem:?} for {label} ({src:?})"
@@ -527,7 +518,7 @@ fn both_renderers_satisfy_tier_a_no_bare_bracket() {
     for (label, src) in pure_aozora_fixtures() {
         for (renderer, html) in [
             ("aozora", rebranded(&aozora_only_render(src))),
-            ("aozora-md", md_html::render_to_string(src)),
+            ("aozora-md", to_html(src)),
         ] {
             assert!(
                 check_no_bare_bracket(&html).is_ok(),
@@ -543,7 +534,7 @@ fn both_renderers_satisfy_tier_b_no_pua_leak() {
     for (label, src) in pure_aozora_fixtures() {
         for (renderer, html) in [
             ("aozora", aozora_only_render(src)),
-            ("aozora-md", md_html::render_to_string(src)),
+            ("aozora-md", to_html(src)),
         ] {
             for s in [
                 sentinels::INLINE,
@@ -570,7 +561,7 @@ fn this_crate_closes_every_tag_it_opens() {
     // construct whose source run went missing used to take its markup's
     // other half with it.
     for (label, src) in pure_aozora_fixtures() {
-        let html = md_html::render_to_string(src);
+        let html = to_html(src);
         assert!(
             check_html_tag_balance(&html).is_ok(),
             "unbalanced markup on {label} ({src:?}): {:?}\n{html}",

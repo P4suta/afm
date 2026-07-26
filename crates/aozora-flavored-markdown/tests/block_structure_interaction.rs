@@ -15,7 +15,7 @@
 //! surfaces here. They also pin the Tier-A invariant (no bare `［＃`
 //! leaking) across every shape.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::assert_no_bare_bracket as assert_tier_a;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ use aozora_flavored_markdown_test_support::assert_no_bare_bracket as assert_tier
 
 #[test]
 fn heading_with_inline_ruby_renders_ruby_inside_heading() {
-    let html = render_to_string("# ｜青梅《おうめ》について");
+    let html = to_html("# ｜青梅《おうめ》について");
     assert!(
         html.starts_with("<h1>"),
         "heading must be rendered as <h1>, got {html:?}"
@@ -40,7 +40,7 @@ fn heading_with_inline_ruby_renders_ruby_inside_heading() {
 fn heading_followed_by_page_break_separates_cleanly() {
     // The ATX heading is a single block; the block-leaf PageBreak
     // that follows is a sibling block.
-    let html = render_to_string("# Chapter one\n\n［＃改ページ］\n\n# Chapter two");
+    let html = to_html("# Chapter one\n\n［＃改ページ］\n\n# Chapter two");
     assert!(
         html.contains("<h1>Chapter one</h1>"),
         "first heading must render, got {html:?}"
@@ -62,7 +62,7 @@ fn heading_followed_by_page_break_separates_cleanly() {
 
 #[test]
 fn blockquote_with_inline_ruby_keeps_ruby_inside_block() {
-    let html = render_to_string("> ｜青梅《おうめ》を引用\n> — 出典");
+    let html = to_html("> ｜青梅《おうめ》を引用\n> — 出典");
     assert!(
         html.contains("<blockquote>"),
         "blockquote must render, got {html:?}"
@@ -78,7 +78,7 @@ fn blockquote_with_inline_ruby_keeps_ruby_inside_block() {
 fn blockquote_with_forward_bouten_still_promotes() {
     // Target `X` appears inside the blockquote before the annotation —
     // should trigger the forward-ref bouten promotion.
-    let html = render_to_string("> Xは重要\n>\n> X［＃「X」に傍点］に注目");
+    let html = to_html("> Xは重要\n>\n> X［＃「X」に傍点］に注目");
     assert!(
         html.contains("<blockquote>"),
         "blockquote must render, got {html:?}"
@@ -96,7 +96,7 @@ fn blockquote_with_forward_bouten_still_promotes() {
 
 #[test]
 fn list_item_with_inline_ruby_carries_ruby() {
-    let html = render_to_string("- ｜一《いち》\n- ｜二《に》\n- ｜三《さん》");
+    let html = to_html("- ｜一《いち》\n- ｜二《に》\n- ｜三《さん》");
     assert!(
         html.contains("<ul>") || html.contains("<ol>"),
         "list must render, got {html:?}"
@@ -112,7 +112,7 @@ fn list_item_with_inline_ruby_carries_ruby() {
 
 #[test]
 fn list_item_with_unknown_annotation_wraps_inside_item() {
-    let html = render_to_string("- 一［＃ほげ］\n- 二［＃ふが］");
+    let html = to_html("- 一［＃ほげ］\n- 二［＃ふが］");
     // Each list item gets its own aozora-md-directive wrapper.
     assert_eq!(
         html.matches(r#"<span class="aozora-md-directive" hidden>"#)
@@ -131,7 +131,7 @@ fn list_item_with_unknown_annotation_wraps_inside_item() {
 fn thematic_break_coexists_with_page_break() {
     // Two ways to separate sections: CommonMark `---` thematic break,
     // and Aozora `［＃改ページ］`. They must not interfere.
-    let html = render_to_string("before\n\n---\n\n［＃改ページ］\n\nafter");
+    let html = to_html("before\n\n---\n\n［＃改ページ］\n\nafter");
     assert!(
         html.contains("<hr"),
         "thematic break must render, got {html:?}"
@@ -147,7 +147,7 @@ fn thematic_break_coexists_with_page_break() {
 fn fenced_code_block_preserves_aozora_markup_as_code() {
     // Aozora trigger characters inside a code fence MUST NOT be
     // interpreted. The fenced block is a raw literal per CommonMark.
-    let html = render_to_string("```\n｜青梅《おうめ》\n［＃改ページ］\n```");
+    let html = to_html("```\n｜青梅《おうめ》\n［＃改ページ］\n```");
     assert!(
         html.contains("<pre>"),
         "code fence must render as <pre>, got {html:?}"
@@ -175,7 +175,7 @@ fn fenced_code_block_preserves_aozora_markup_as_code() {
 
 #[test]
 fn nested_blockquote_inside_list_with_ruby_renders_all_layers() {
-    let html = render_to_string("- > ｜桃《もも》引用\n- item2");
+    let html = to_html("- > ｜桃《もも》引用\n- item2");
     // The nested structure: <ul><li><blockquote>…</blockquote>…</li><li>item2</li></ul>
     assert!(
         html.contains("<ul>") || html.contains("<ol>"),
@@ -198,7 +198,7 @@ fn nested_blockquote_inside_list_with_ruby_renders_all_layers() {
 
 #[test]
 fn page_break_only_document_renders_single_div() {
-    let html = render_to_string("［＃改ページ］");
+    let html = to_html("［＃改ページ］");
     assert!(
         html.contains(r#"<div class="aozora-md-page-break"></div>"#),
         "page-break-only doc must render the div, got {html:?}"
@@ -215,13 +215,13 @@ fn page_break_only_document_renders_single_div() {
 
 #[test]
 fn empty_document_produces_empty_html() {
-    let html = render_to_string("");
+    let html = to_html("");
     assert_eq!(html, "", "empty input must yield empty HTML");
 }
 
 #[test]
 fn whitespace_only_document_produces_empty_html() {
-    let html = render_to_string("   \n\n   \n");
+    let html = to_html("   \n\n   \n");
     assert_eq!(
         html.trim(),
         "",

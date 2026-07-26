@@ -15,7 +15,7 @@
 //!   stray sentinel visible.
 //! * Tier-A canary: no bare `［＃` ever reaches the rendered HTML.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::{assert_no_bare_bracket, check_no_sentinel_leak};
 
 /// Render, then hold the output to Tier A plus Tier B. Both predicates come
@@ -23,7 +23,7 @@ use aozora_flavored_markdown_test_support::{assert_no_bare_bracket, check_no_sen
 /// definition of either tier; checking at the render site is what gives
 /// Tier B the source it reads.
 fn render_checked(src: &str) -> String {
-    let html = render_to_string(src);
+    let html = to_html(src);
     assert_no_bare_bracket(&html);
     if let Err(violation) = check_no_sentinel_leak(src, &html) {
         panic!("{violation}\n  full html = {html:?}");
@@ -145,7 +145,7 @@ fn orphan_open_does_not_panic_but_leaves_sentinel_paragraph() {
     // No matching `［＃ここで字下げ終わり］`: splice refuses to wrap;
     // the rendered HTML contains whatever the sentinel paragraph
     // renders as, but MUST NOT panic or corrupt the tree.
-    let html = render_to_string("［＃ここから字下げ］\n本文");
+    let html = to_html("［＃ここから字下げ］\n本文");
     assert!(
         html.contains("本文"),
         "body content must survive orphan open: {html:?}"
@@ -158,7 +158,7 @@ fn orphan_open_does_not_panic_but_leaves_sentinel_paragraph() {
 
 #[test]
 fn orphan_close_does_not_panic() {
-    let html = render_to_string("本文\n［＃ここで字下げ終わり］");
+    let html = to_html("本文\n［＃ここで字下げ終わり］");
     assert!(
         html.contains("本文"),
         "body must survive orphan close: {html:?}"

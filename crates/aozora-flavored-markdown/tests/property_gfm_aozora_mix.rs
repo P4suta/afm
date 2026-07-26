@@ -25,7 +25,7 @@
 //! plus Tier A (no bare `［＃` leak), gated on a clean parse so unbalanced
 //! inputs don't sabotage the test.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown::{Options, render as render_to_diagnostics};
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::aozora_fragment;
@@ -44,7 +44,7 @@ fn parse_is_well_formed(src: &str) -> bool {
 }
 
 fn assert_mix_invariants(src: &str) {
-    let html = render_to_string(src);
+    let html = to_html(src);
 
     // Always-on predicates: sentinel leak, tag balance, content model,
     // markup completeness, escape invariants, etc.

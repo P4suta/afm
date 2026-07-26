@@ -4,7 +4,7 @@
  * Class contract: every `aozora-md-*` class token the renderer can emit
  * MUST have at least one rule in this file, and this file must style
  * nothing else. The integration test `css_class_contract.rs` walks both
- * directions against AOZORA_MD_CLASSES (derived from the parser's own
+ * directions against classes::all() (derived from the parser's own
  * published list), so a renamed or added class fails CI rather than
  * shipping unstyled.
  *

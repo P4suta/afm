@@ -28,7 +28,7 @@
 //! The generator over-samples the indent-followed-by-heading shape so
 //! the indent-leakage failure mode is exercised heavily.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::check_heading_integrity;
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::kanji_fragment;
@@ -77,7 +77,7 @@ proptest! {
     /// inside the heading body.
     #[test]
     fn heading_body_never_carries_forbidden_classes(src in heading_biased_src()) {
-        let html = render_to_string(&src);
+        let html = to_html(&src);
         check_heading_integrity(&html)
             .unwrap_or_else(|e| panic!("Tier C violated for src={src:?}, html={html}: {e}"));
     }

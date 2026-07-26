@@ -37,8 +37,8 @@ use std::path::{Path, PathBuf};
 
 use aozora_flavored_markdown::ir::{Block, Document, Inline, Position, Range, TableAlign};
 use aozora_flavored_markdown::{
-    Diagnostic, DiagnosticSource, Options, Rendered, RenderedBlock, RenderedIr, Severity, Span,
-    render, render_blocks_to_ir, render_to_ir,
+    Diagnostic, DiagnosticSource, Options, Rendered, RenderedBlock, RenderedBlocks, RenderedIr,
+    Severity, Span, render, render_blocks, render_to_ir,
 };
 use aozora_flavored_markdown_test_support::config;
 use proptest::prelude::*;
@@ -160,7 +160,15 @@ fn every_ir_value_the_api_hands_back_clones_compares_and_hashes() {
 #[test]
 fn every_render_output_type_clones_and_compares() {
     behaves_as_a_value(&render(SAMPLE, &Options::default()));
-    let (blocks, diagnostics) = render_blocks_to_ir(SAMPLE, &Options::default());
+    // The whole envelope, not only its parts: `render_blocks` used to hand
+    // back a tuple, which is `Clone`/`Eq` for free and says nothing about
+    // whether the type this crate owns is.
+    behaves_as_a_value(&render_blocks(SAMPLE, &Options::default()));
+    let RenderedBlocks {
+        blocks,
+        diagnostics,
+        ..
+    } = render_blocks(SAMPLE, &Options::default());
     assert!(!blocks.is_empty(), "the sample must produce blocks");
     for block in &blocks {
         behaves_as_a_value(block);
@@ -353,6 +361,11 @@ fn the_default_of_every_defaulted_type_is_its_empty_value() {
     assert!(
         block.ir.is_empty() && block.html.is_empty() && block.source_line == 0,
         "the default block is the empty one: {block:?}"
+    );
+    let blocks = RenderedBlocks::default();
+    assert!(
+        blocks.blocks.is_empty() && blocks.diagnostics.is_empty(),
+        "the default streaming render is the empty one: {blocks:?}"
     );
 }
 
@@ -612,12 +625,7 @@ fn the_geometric_types_are_left_unsealed_on_purpose() {
 /// and it is the *symmetry* with `canonicalize` that would motivate it. Read
 /// off the source rather than asserted per function, so an entry point added
 /// later is covered without editing this.
-const INFALLIBLE_BY_DESIGN: &[&str] = &[
-    "render",
-    "render_to_ir",
-    "render_blocks_to_ir",
-    "render_to_string",
-];
+const INFALLIBLE_BY_DESIGN: &[&str] = &["render", "render_to_ir", "render_blocks", "to_html"];
 
 /// The name a `pub fn` declares, `const` and `async` spellings included.
 fn public_fn_name(decl: &str) -> Option<String> {
@@ -684,6 +692,239 @@ fn the_canonicaliser_is_the_only_public_function_that_can_fail() {
         "the fallible one must be `canonicalize`, not {:?}",
         fallible[0]
     );
+}
+
+/// The return type a `pub fn` names: the text after the first arrow outside
+/// any parameter list, with a `where` clause cut off first. No public function
+/// in this crate carries an `Fn`-bounded generic — a second arrow — and the
+/// entry-point round-trip below is what would report it if one arrived.
+fn return_type(decl: &str) -> Option<&str> {
+    let head = decl.split(" where ").next().unwrap_or(decl);
+    let bytes = head.as_bytes();
+    let mut depth = 0i32;
+    for (idx, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'-' if depth == 0 && bytes.get(idx + 1) == Some(&b'>') => {
+                return Some(head[idx + 2..].trim());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The leading identifier of a return type — `RenderedBlocks` of
+/// `RenderedBlocks`, `Result` of `Result<String, Error>`.
+fn head_of(ty: &str) -> String {
+    idents(ty).first().cloned().unwrap_or_default()
+}
+
+#[test]
+fn no_public_function_returns_an_anonymous_tuple() {
+    // The shape this rule exists for shipped: `render_blocks_to_ir` handed
+    // back `(Vec<RenderedBlock>, Vec<Diagnostic>)`. A tuple cannot carry
+    // `#[non_exhaustive]`, cannot name its own members, and cannot grow one
+    // without breaking every destructuring at every call site — so the
+    // sealing rule two tests up had nothing to bind to. Every other public
+    // output is a named type; the ones the entry points return must further
+    // be *this crate's* named types, sealed.
+    let publics: Vec<String> = public_type_decls().into_iter().map(|d| d.name).collect();
+    let sealed: BTreeSet<String> = public_type_decls()
+        .into_iter()
+        .filter(|d| d.sealed)
+        .map(|d| d.name)
+        .collect();
+    let mut entry_points: BTreeSet<String> = BTreeSet::new();
+    let mut checked = 0usize;
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for start in 0..lines.len() {
+            if !opens_public_surface(lines[start], &publics) {
+                continue;
+            }
+            let decl = declaration_text(&lines, start);
+            let Some(name) = public_fn_name(&decl) else {
+                continue;
+            };
+            let Some(ty) = return_type(&decl) else {
+                continue;
+            };
+            checked += 1;
+            assert!(
+                !ty.starts_with('('),
+                "{}:{}: `{name}` returns the anonymous tuple `{ty}`; a tuple cannot be \
+                 `#[non_exhaustive]`, so growing it is a breaking release with no way to \
+                 stage it (ADR-0013)",
+                path.display(),
+                start + 1,
+            );
+            if !INFALLIBLE_BY_DESIGN.contains(&name.as_str()) {
+                continue;
+            }
+            entry_points.insert(name.clone());
+            let head = head_of(ty);
+            assert!(
+                head == "String" || sealed.contains(&head),
+                "{}:{}: entry point `{name}` returns `{ty}`, which is neither a `String` \
+                 nor a sealed public type of this crate",
+                path.display(),
+                start + 1,
+            );
+        }
+    }
+    assert!(
+        checked > 15,
+        "only {checked} returning public functions found; the reader must be retargeted"
+    );
+    assert_eq!(
+        entry_points,
+        INFALLIBLE_BY_DESIGN
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect::<BTreeSet<String>>(),
+        "an entry point is gone or renamed; retarget the rule rather than letting it pass \
+         by finding nothing"
+    );
+    // The reader itself, on the signature that used to be here and on the one
+    // shape it must not misread.
+    assert_eq!(
+        return_type(
+            "pub fn render_blocks_to_ir(i: &str, o: &Options) -> (Vec<RenderedBlock>, Vec<Diagnostic>) "
+        ),
+        Some("(Vec<RenderedBlock>, Vec<Diagnostic>)"),
+        "the reader must see the retired tuple return"
+    );
+    assert_eq!(
+        return_type("pub fn f(cb: fn(u8) -> u8) -> String "),
+        Some("String"),
+        "an arrow inside the parameter list is not the return type"
+    );
+}
+
+/// Types whose whole job is *when* a value is built, not what it is. A public
+/// signature naming one publishes an implementation detail a consumer cannot
+/// act on and this crate cannot change without a breaking release.
+const LAZINESS_WRAPPERS: &[&str] = &["LazyLock", "OnceLock", "LazyCell", "OnceCell", "Lazy"];
+
+fn names_a_laziness_wrapper(decl: &str) -> Option<&'static str> {
+    let words = idents(decl);
+    LAZINESS_WRAPPERS
+        .iter()
+        .copied()
+        .find(|wrapper| words.iter().any(|word| word == wrapper))
+}
+
+#[test]
+fn no_public_declaration_names_a_laziness_wrapper() {
+    // The sibling rule below catches a *foreign crate's* type on the surface.
+    // This one catches the std wrapper that was on it: `AOZORA_MD_CLASSES`
+    // was a `pub static … : LazyLock<Vec<String>>`, so every consumer read
+    // the interning strategy out of the signature and would have seen a
+    // breaking change had it moved to a `OnceLock` or a plain `const`.
+    // Laziness is the module's business; `&'static [&'static str]` is the
+    // contract.
+    let publics: Vec<String> = public_type_decls().into_iter().map(|d| d.name).collect();
+    let mut checked = 0usize;
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for start in 0..lines.len() {
+            if !opens_public_surface(lines[start], &publics) {
+                continue;
+            }
+            checked += 1;
+            let decl = declaration_text(&lines, start);
+            assert!(
+                names_a_laziness_wrapper(&decl).is_none(),
+                "{}:{}: `{}` names a laziness wrapper; hand out the value it interns \
+                 (`&'static [&'static str]`) and keep the wrapper private",
+                path.display(),
+                start + 1,
+                decl.trim()
+            );
+        }
+    }
+    assert!(
+        checked > 40,
+        "only {checked} public declarations found; the reader must be retargeted, not deleted"
+    );
+    assert_eq!(
+        names_a_laziness_wrapper(
+            "pub static AOZORA_MD_CLASSES: LazyLock<Vec<String>> = LazyLock::new(|| "
+        ),
+        Some("LazyLock"),
+        "the rule must catch the surface this crate used to ship, or it can pass by \
+         finding nothing"
+    );
+    assert_eq!(
+        names_a_laziness_wrapper("pub fn all() -> &'static [&'static str] "),
+        None,
+        "the replacement surface must stay clean"
+    );
+}
+
+/// The modules a consumer is meant to read, and therefore the only ones that
+/// may appear in the rendered docs. Everything else this crate makes `pub` is
+/// reachable for a mechanical reason — the leak checks read `sentinels::ALL`
+/// — and carries `#[doc(hidden)]` to say so.
+const DOCUMENTED_MODULES: &[&str] = &["classes", "diagnostics", "ir", "theme"];
+
+/// The attributes attached to the declaration at `decl`: the unbroken run of
+/// `#[…]` lines directly above it. Narrower than [`attributes_above`], which
+/// also reads the comment block, so a `#[doc(hidden)]` on a *neighbouring*
+/// item in the same paragraph-less run cannot be mistaken for this one's.
+fn attributes_directly_above<'a>(lines: &[&'a str], decl: usize) -> Vec<&'a str> {
+    lines[..decl]
+        .iter()
+        .rev()
+        .take_while(|line| line.trim_start().starts_with("#["))
+        .map(|line| line.trim())
+        .collect()
+}
+
+/// The name a column-0 `pub mod` declares, inline (`pub mod x {`) and file
+/// (`pub mod x;`) spellings alike.
+fn declared_module(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("pub mod ")?;
+    let name = rest.split([';', ' ', '{']).next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+#[test]
+fn every_public_module_is_documented_surface_or_hidden() {
+    // A rule over the module list rather than a note on the one module that
+    // needed hiding: `pub mod sentinels` published the PUA representation to
+    // rustdoc for as long as nothing said it must not, and `pub mod html`
+    // published a second entry point for the same render. Adding a module to
+    // `DOCUMENTED_MODULES` is the deliberate act; making one `pub` is not.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let Some(name) = declared_module(line) else {
+                continue;
+            };
+            seen.insert(name.to_owned());
+            let hidden = attributes_directly_above(&lines, idx).contains(&"#[doc(hidden)]");
+            assert!(
+                hidden || DOCUMENTED_MODULES.contains(&name),
+                "{}:{}: `pub mod {name}` is neither documented surface nor `#[doc(hidden)]`; \
+                 a module a consumer cannot use is one rustdoc should not show them",
+                path.display(),
+                idx + 1
+            );
+        }
+    }
+    // The rule above passes vacuously on a crate with no `pub mod` at all,
+    // so the modules it is written about are named.
+    for name in DOCUMENTED_MODULES.iter().chain(once(&"sentinels")) {
+        assert!(
+            seen.contains(*name),
+            "`pub mod {name}` is gone or renamed; retarget this rule rather than \
+             letting it pass by finding nothing. Found: {seen:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 
 fn main() -> ExitCode {
     let Some(path) = env::args().nth(1) else {
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let html = render_to_string(&utf8);
+    let html = to_html(&utf8);
 
     if let Err(e) = io::stdout().write_all(html.as_bytes()) {
         eprintln!("write failed: {e}");

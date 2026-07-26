@@ -82,7 +82,7 @@ missing. Beyond that:
   `ir::Block::Aozora` / `ir::Inline::Aozora` (ADR-0022). Tests in
   `tests/ir_aozora.rs`. Bumping the IR schema is semver-major: the wasm
   bridge and the obsidian plugin validate it on the JS side.
-- **CSS classes** — `AOZORA_MD_CLASSES` is derived from the sibling
+- **CSS classes** — `classes::all()` is derived from the sibling
   renderer's list (rebranded per ADR-0011), so nothing is hand-kept. A new
   class needs a rule in both `theme/aozora-md-{horizontal,vertical}.css`;
   `tests/css_class_contract.rs` fails until they agree in both directions.

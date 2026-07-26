@@ -25,7 +25,7 @@
 struct ReadmeDoctests;
 
 mod ast_splice;
-mod classes;
+pub mod classes;
 mod code_block_mask;
 // The CommonMark / GFM spec runners. Inside `src/` rather than `tests/`
 // because the spec's expected output is raw HTML, which only a `#[cfg(test)]`
@@ -36,7 +36,6 @@ mod conformance;
 mod constructs;
 pub mod diagnostics;
 mod fragment;
-pub mod html;
 pub mod ir;
 mod source_line_anchors;
 #[cfg(feature = "theme")]
@@ -47,6 +46,9 @@ mod verbatim_regions;
 ///
 /// Owned here rather than re-exported from the sibling parser: the
 /// substitution is ours to make, so the constants are ours to keep stable.
+// Hidden rather than private: the leak checks in the test-support crate read
+// `ALL`, and a consumer has no use for the internal representation.
+#[doc(hidden)]
 pub mod sentinels {
     use crate::{code_block_mask, constructs};
 
@@ -73,8 +75,6 @@ pub mod sentinels {
     pub const ALL: [char; 5] = [INLINE, BLOCK_LEAF, BLOCK_OPEN, BLOCK_CLOSE, MASK];
 }
 
-#[doc(inline)]
-pub use classes::{AOZORA_MD_CLASSES, is_contract_class};
 #[doc(inline)]
 pub use diagnostics::{Diagnostic, DiagnosticSource, Severity, Span};
 
@@ -368,6 +368,21 @@ pub fn render(input: &str, options: &Options) -> Rendered {
     Rendered { html, diagnostics }
 }
 
+/// Render the Aozora dialect to HTML, dropping diagnostics.
+///
+/// The shape a caller with nothing to report to reaches for. A
+/// diagnostic-aware path — a `--strict` flag, an LSP, a corpus sweep — calls
+/// [`render`] and reads [`Rendered::diagnostics`].
+///
+/// ```
+/// let html = aozora_flavored_markdown::to_html("｜青梅《おうめ》");
+/// assert!(html.contains("<ruby>"));
+/// ```
+#[must_use]
+pub fn to_html(input: &str) -> String {
+    render(input, &Options::default()).html
+}
+
 /// Render aozora-flavored-markdown source to a structured IR + HTML + diagnostics.
 ///
 /// Notation that changes the document's *shape* rather than its content is
@@ -484,7 +499,7 @@ fn format_root<'a>(
     }
 }
 
-/// One block of [`render_blocks_to_ir`]'s output.
+/// One block of [`RenderedBlocks`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedBlock {
@@ -496,13 +511,21 @@ pub struct RenderedBlock {
     pub source_line: u32,
 }
 
+/// Output of [`render_blocks`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RenderedBlocks {
+    pub blocks: Vec<RenderedBlock>,
+    /// Document-scoped rather than per-block: the lexer pass is not
+    /// block-scoped, so a construct's diagnostic has no one block to sit in.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// Per-block streaming render, one [`RenderedBlock`] per top-level comrak
 /// child in document order.
 ///
 /// Serves the obsidian chunked-cancellation path (ADR-0009): the JS bridge
-/// checks its `AbortSignal` between blocks. Diagnostics come back attached
-/// to the document rather than per-block, because the lexer pass is not
-/// block-scoped.
+/// checks its `AbortSignal` between blocks.
 ///
 /// A paired container spanning several blocks emits its open and close
 /// markers in the blocks they appear in, and one the source never closes is
@@ -512,28 +535,30 @@ pub struct RenderedBlock {
 /// # Examples
 ///
 /// ```
-/// use aozora_flavored_markdown::{Options, render_blocks_to_ir};
+/// use aozora_flavored_markdown::{Options, RenderedBlocks, render_blocks};
 ///
-/// let (blocks, diagnostics) =
-///     render_blocks_to_ir("first paragraph\n\n｜second《せかんど》paragraph", &Options::default());
+/// let RenderedBlocks { blocks, diagnostics, .. } =
+///     render_blocks("first paragraph\n\n｜second《せかんど》paragraph", &Options::default());
 /// assert_eq!(blocks.len(), 2);
 /// assert!(diagnostics.is_empty());
 /// ```
 ///
 /// Oversized input degrades as in [`render`].
 #[must_use]
-pub fn render_blocks_to_ir(
-    input: &str,
-    options: &Options,
-) -> (Vec<RenderedBlock>, Vec<Diagnostic>) {
+pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     if !source_within_span_budget(input) {
-        return (Vec::new(), vec![Diagnostic::source_too_large(input.len())]);
+        return RenderedBlocks {
+            blocks: Vec::new(),
+            diagnostics: vec![Diagnostic::source_too_large(input.len())],
+        };
     }
     if !options.aozora {
         let comrak_arena = comrak::Arena::new();
         let root = comrak::parse_document(&comrak_arena, input, &options.comrak());
-        let blocks = collect_rendered_blocks(root, options, Vec::new(), &[]);
-        return (blocks, Vec::new());
+        return RenderedBlocks {
+            blocks: collect_rendered_blocks(root, options, Vec::new(), &[]),
+            diagnostics: Vec::new(),
+        };
     }
 
     let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
@@ -566,8 +591,10 @@ pub fn render_blocks_to_ir(
     // becomes its own `RenderedBlock`; giving the drain the same shape
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
-    let blocks = collect_rendered_blocks(root, options, blocks_ir, &mask_originals);
-    (blocks, diagnostics)
+    RenderedBlocks {
+        blocks: collect_rendered_blocks(root, options, blocks_ir, &mask_originals),
+        diagnostics,
+    }
 }
 
 fn collect_rendered_blocks<'a>(
@@ -724,6 +751,16 @@ mod tests {
         let r = render("hello, world", &Options::default());
         assert!(r.html.contains("hello, world"), "html: {}", r.html);
         assert!(r.diagnostics.is_empty());
+    }
+
+    // Moved here with the `html` module's deletion: the shim's own two tests
+    // said the same thing about the same call, one construct apart.
+    #[test]
+    fn to_html_renders_commonmark_and_notation_from_one_call() {
+        let html = to_html("Hello.\n\n｜青梅《おうめ》");
+        assert!(html.contains("<p>Hello.</p>"), "html: {html}");
+        assert!(html.contains("<ruby>"), "missing ruby tag: {html}");
+        assert!(html.contains("おうめ"), "missing ruby text: {html}");
     }
 
     #[test]
@@ -954,7 +991,7 @@ mod tests {
         assert!(r.html.contains("<h1>hi</h1>"), "html: {}", r.html);
         let ir = render_to_ir("para", &Options::default());
         assert!(!ir.ir.blocks.is_empty());
-        let (blocks, _) = render_blocks_to_ir("a\n\nb", &Options::default());
+        let RenderedBlocks { blocks, .. } = render_blocks("a\n\nb", &Options::default());
         assert_eq!(blocks.len(), 2);
         assert_eq!(canonicalize("plain"), Ok("plain".to_owned()));
     }

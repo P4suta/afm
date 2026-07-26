@@ -14,7 +14,7 @@
 #![no_main]
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::assert_html_invariants;
 use libfuzzer_sys::fuzz_target;
 
@@ -22,6 +22,6 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = decode_sjis(data) else {
         return;
     };
-    let html = render_to_string(&text);
+    let html = to_html(&text);
     assert_html_invariants(&text, &html);
 });

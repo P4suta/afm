@@ -1,6 +1,6 @@
 //! HTML well-formedness invariant — drives a small battery of
 //! real-world shapes through
-//! `aozora_flavored_markdown::html::render_to_string` and assert the resulting
+//! `aozora_flavored_markdown::to_html` and assert the resulting
 //! HTML is balanced (every open tag has a matching close in the
 //! correct order). Guards against renderer bugs that the Tier-A
 //! bracket canary can't catch — e.g. a `<div>` open without its
@@ -12,7 +12,7 @@
 //! `corpus_sweep.rs` can call it; this file is the fast-path
 //! unit coverage for shapes with known expected-balanced output.
 
-use aozora_flavored_markdown::html::render_to_string;
+use aozora_flavored_markdown::to_html;
 use aozora_flavored_markdown_test_support::{WellFormedError, check_well_formed};
 
 /// Small helper: fail with the full HTML context so a violation is
@@ -27,36 +27,30 @@ fn assert_balanced(html: &str, label: &str) {
 
 #[test]
 fn plain_paragraph_is_balanced() {
-    assert_balanced(&render_to_string("hello world"), "plain");
+    assert_balanced(&to_html("hello world"), "plain");
 }
 
 #[test]
 fn ruby_output_is_balanced() {
-    assert_balanced(&render_to_string("｜青梅《おうめ》"), "ruby");
+    assert_balanced(&to_html("｜青梅《おうめ》"), "ruby");
 }
 
 #[test]
 fn forward_bouten_with_goma_is_balanced() {
     assert_balanced(
-        &render_to_string("可哀想［＃「可哀想」に傍点］と彼は言った"),
+        &to_html("可哀想［＃「可哀想」に傍点］と彼は言った"),
         "bouten",
     );
 }
 
 #[test]
 fn unknown_annotation_is_balanced() {
-    assert_balanced(
-        &render_to_string("前［＃ほげふが］後"),
-        "unknown annotation",
-    );
+    assert_balanced(&to_html("前［＃ほげふが］後"), "unknown annotation");
 }
 
 #[test]
 fn page_break_standalone_div_is_balanced() {
-    assert_balanced(
-        &render_to_string("前\n\n［＃改ページ］\n\n後"),
-        "page break",
-    );
+    assert_balanced(&to_html("前\n\n［＃改ページ］\n\n後"), "page break");
 }
 
 #[test]
@@ -64,7 +58,7 @@ fn paired_indent_container_wraps_children_cleanly() {
     // Paired-container: `<div class="aozora-md-container-indent-1" …>` must
     // wrap the body `<p>` and close properly on exit.
     assert_balanced(
-        &render_to_string("［＃ここから字下げ］\n本文\n［＃ここで字下げ終わり］"),
+        &to_html("［＃ここから字下げ］\n本文\n［＃ここで字下げ終わり］"),
         "paired indent",
     );
 }
@@ -72,7 +66,7 @@ fn paired_indent_container_wraps_children_cleanly() {
 #[test]
 fn nested_containers_are_balanced() {
     assert_balanced(
-        &render_to_string(
+        &to_html(
             "［＃ここから字下げ］\n\n［＃罫囲み］\n本文\n［＃罫囲み終わり］\n\n［＃ここで字下げ終わり］",
         ),
         "nested containers",
@@ -82,7 +76,7 @@ fn nested_containers_are_balanced() {
 #[test]
 fn mixed_inline_ruby_bouten_annotation_balanced() {
     assert_balanced(
-        &render_to_string("｜青梅《おうめ》の地で、可哀想［＃「可哀想」に傍点］に［＃ほげ］た"),
+        &to_html("｜青梅《おうめ》の地で、可哀想［＃「可哀想」に傍点］に［＃ほげ］た"),
         "mixed inline",
     );
 }
@@ -91,22 +85,19 @@ fn mixed_inline_ruby_bouten_annotation_balanced() {
 fn html_escape_payload_stays_balanced() {
     // The OWASP escape canary — `<` etc. inside Aozora payloads must
     // be escaped, so the validator never sees a literal `<script>`.
-    assert_balanced(
-        &render_to_string("｜x《<script>alert(1)</script>》"),
-        "xss attempt",
-    );
+    assert_balanced(&to_html("｜x《<script>alert(1)</script>》"), "xss attempt");
 }
 
 #[test]
 fn angle_quote_balanced() {
-    assert_balanced(&render_to_string("≪強調≫"), "angle quote");
+    assert_balanced(&to_html("≪強調≫"), "angle quote");
 }
 
 #[test]
 fn stacked_ruby_openers_balanced() {
     // `《《…》》` is no longer one construct: it reads as two ruby openers
     // and raises a diagnostic. The HTML still has to come out balanced.
-    assert_balanced(&render_to_string("《《強調》》"), "stacked ruby openers");
+    assert_balanced(&to_html("《《強調》》"), "stacked ruby openers");
 }
 
 // ---------------------------------------------------------------------------
