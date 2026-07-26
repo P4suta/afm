@@ -580,27 +580,21 @@ pub fn check_fence_fidelity(src: &str, out: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-// The mask hides trigger *characters*; the canonicaliser's line-structure
-// rules run inside a fence regardless, and no mask reaches them. Four shapes
-// are therefore carved out, none of them evidence either way about masking:
-// CRLF becomes LF, a run of three or more newlines collapses to two, a PUA
-// codepoint either aborts masking (U+E000) or is substituted by the lexer
-// (U+E001..U+E004), and a decorative rule row gains a blank line ahead of it.
-// The first three are carved out wholesale rather than per fence — a newline
-// run reaches across the opening fence line, so a local test would miss it.
+// Unconditional: whatever a fence encloses — CRLF, a run of blank lines, a
+// decorative rule row, a PUA codepoint — is the author's byte and comes back
+// as written. The carve-outs this once had were all line structure, which a
+// character mask cannot reach and lifting the region out whole does.
 fn fence_interiors(src: &str) -> Vec<&str> {
-    if src.contains('\r')
-        || src.contains("\n\n\n")
-        || src.chars().any(|c| ('\u{E000}'..='\u{E004}').contains(&c))
-    {
-        return Vec::new();
-    }
     let mut interiors = Vec::new();
     let mut open: Option<(u8, usize, usize)> = None;
     let mut pos = 0;
     for line in src.split_inclusive('\n') {
         let end = pos + line.len();
         match open {
+            // A raw-HTML block swallows the lines after it for a span only a
+            // block parser can measure, so a fence read past one would be
+            // prose. Stop reading rather than guess where the block ends.
+            None if line.trim_start().starts_with('<') => return interiors,
             None => open = fence_open(line).map(|(marker, width)| (marker, width, end)),
             Some((marker, width, start)) if fence_close(line, marker, width) => {
                 if start < pos {
@@ -614,32 +608,28 @@ fn fence_interiors(src: &str) -> Vec<&str> {
         }
         pos = end;
     }
-    interiors.retain(|interior| !interior.lines().any(is_decorative_rule));
     interiors
 }
 
-// A row the sibling parser reads as a block-level rule wherever it appears —
-// `generators::aozora_fragment` draws these on purpose, as Tier-H bait.
-fn is_decorative_rule(line: &str) -> bool {
-    let trimmed = line.trim();
-    let Some(first) = trimmed.chars().next() else {
-        return false;
-    };
-    matches!(first, '-' | '=' | '_') && trimmed.chars().all(|c| c == first)
-}
-
-// Deliberately a second implementation of the library's fence rules rather
-// than a call into it: a checker sharing the code under test cannot fail when
+// Deliberately a second implementation of the fence rules rather than a call
+// into the library: a checker sharing the code under test cannot fail when
 // that code is wrong. Up to three spaces of indent, three or more markers,
-// tabs excluded — a mirror of `code_block_mask`, so a fence one recognises
-// and the other does not can never read as a violation.
+// tabs excluded. Column-anchored, so a fence behind a container prefix is
+// simply not read here — deciding one needs the block parser this is not, and
+// under-reading costs a case rather than inventing one.
 fn fence_open(line: &str) -> Option<(u8, usize)> {
-    let bytes = trim_fence_indent(line).as_bytes();
+    let stripped = trim_fence_indent(line);
+    let bytes = stripped.as_bytes();
     let &first = bytes.first()?;
     if first != b'`' && first != b'~' {
         return None;
     }
     let width = bytes.iter().take_while(|&&b| b == first).count();
+    // CommonMark §4.5: a backtick fence's info string may hold no backtick, so
+    // a line like ```` ```a`b ```` opens nothing and its "interior" is prose.
+    if first == b'`' && bytes[width..].contains(&b'`') {
+        return None;
+    }
     (width >= 3).then_some((first, width))
 }
 
@@ -1624,33 +1614,54 @@ mod tests {
     }
 
     #[test]
-    fn invariant_unit_check_fence_fidelity_skips_the_carved_out_sources() {
+    fn invariant_unit_check_fence_fidelity_reads_what_it_used_to_carve_out() {
         // CRLF, a 3+ newline run, a PUA codepoint and a decorative rule row
-        // each let the parser rewrite a fence body for reasons that are not
-        // masking. The last one is line structure no character mask reaches.
+        // were each excused while the fence interior was protected character
+        // by character. Every one of them is line structure, and every one of
+        // them is now the author's byte like any other.
         for src in [
             "```\r\n｜青梅《おうめ》\r\n```\r\n",
             "```\n｜青梅《おうめ》\n\n\nx\n```\n",
             "\u{E000}\n```\n｜青梅《おうめ》\n```\n",
             "```\n｜青梅《おうめ》\n------------\n```\n",
         ] {
-            check_fence_fidelity(src, "").unwrap();
+            let err = check_fence_fidelity(src, "").expect_err("must fire");
+            assert!(matches!(err, Violation::FenceRewritten { .. }), "{src:?}");
         }
     }
 
     #[test]
-    fn invariant_unit_check_fence_fidelity_still_reads_the_other_fences() {
-        // A carve-out is per fence, not per document, for everything but the
-        // three whose effect reaches across the opening fence line.
+    fn invariant_unit_check_fence_fidelity_reads_every_fence_in_the_document() {
         let src = "```\n------------\n```\n\n```\n｜青梅《おうめ》\n```\n";
         let err = check_fence_fidelity(src, "").expect_err("must fire");
         assert!(matches!(err, Violation::FenceRewritten { .. }));
     }
 
     #[test]
+    fn invariant_unit_check_fence_fidelity_reads_no_fence_inside_a_raw_html_block() {
+        // Read past a raw-HTML line and the scanner pairs a marker the block
+        // swallowed with a real one further down, calling the prose between
+        // them an interior — prose `serialize` is *supposed* to canonicalise,
+        // so a correct output would read as a violation.
+        let src = "<div>\n```\n</div>\n\n｜青梅《おうめ》\n\n```\n";
+        let out = "<div>\n```\n</div>\n\n青梅《おうめ》\n\n```\n";
+        check_fence_fidelity(src, out).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_reads_no_fence_from_a_backticked_info_string() {
+        // CommonMark §4.5: a backtick fence's info string may hold no
+        // backtick, so this line opens nothing and what follows is prose.
+        let src = "```a`b\n｜青梅《おうめ》\n```\n";
+        let out = "```a`b\n青梅《おうめ》\n```\n";
+        check_fence_fidelity(src, out).unwrap();
+    }
+
+    #[test]
     fn invariant_unit_check_fence_fidelity_ignores_a_container_nested_fence() {
-        // The mask is column-anchored, so a fence behind a blockquote marker
-        // is not one this predicate can hold `serialize` to.
+        // Not an excuse for `serialize`, which does hold it byte for byte: a
+        // column-anchored scanner cannot tell a fence behind a blockquote
+        // marker from a lazy continuation, so it reads neither.
         let src = "> ```\n> ｜青梅《おうめ》\n> ```\n";
         check_fence_fidelity(src, "> ```\n> 青梅《おうめ》\n> ```\n").unwrap();
     }

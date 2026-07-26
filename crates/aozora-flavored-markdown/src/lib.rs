@@ -35,6 +35,7 @@ pub mod ir;
 mod source_line_anchors;
 #[cfg(feature = "theme")]
 pub mod theme;
+mod verbatim_regions;
 
 /// PUA codepoints this crate substitutes into the source before comrak parses.
 ///
@@ -51,7 +52,7 @@ pub mod sentinels {
     pub const BLOCK_OPEN: char = constructs::BLOCK_OPEN_SENTINEL;
     /// Paired-container close line (e.g. `［＃ここで字下げ終わり］`).
     pub const BLOCK_CLOSE: char = constructs::BLOCK_CLOSE_SENTINEL;
-    /// A 青空文庫 trigger hidden inside a fenced code block.
+    /// A 青空文庫 trigger, or a whole region, hidden from the lexer.
     pub const MASK: char = code_block_mask::MASK_CHAR;
 
     /// Read by the leak checks instead of re-listing codepoints, so a
@@ -548,8 +549,13 @@ fn collect_rendered_blocks<'a>(
 /// Canonicalising, not merely inverse: notation written in a longer form
 /// comes back in the shortest spelling that reads the same (below, the
 /// ruby's explicit base marker is dropped because the base is unambiguous
-/// without it). Plain CommonMark passes through verbatim, and the output is
-/// a fixed point.
+/// without it), and the output is a fixed point.
+///
+/// Only prose is canonicalised: code (fenced, indented, a span), raw HTML and
+/// a rule row come back as written, at any container depth. Plain CommonMark
+/// therefore passes through verbatim, up to what CommonMark does not itself
+/// distinguish and the parser normalises document-wide — CRLF becomes LF, and
+/// a run of blank lines collapses to one.
 ///
 /// # Examples
 ///
@@ -568,16 +574,38 @@ pub fn serialize(input: &str) -> String {
     if !source_within_span_budget(input) {
         return String::new();
     }
-    // Masked through the lexer exactly as in `drive_pipeline`, and for the
-    // same reason: a fence interior the lexer can see is canonicalised like
-    // prose, which rewrites bytes that must reach the output as written.
-    let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
-    aozora::parse(masked.into_owned())
-        .map(|document| {
-            let canonical = document.snapshot().to_source();
-            code_block_mask::unmask(&canonical, &originals).into_owned()
-        })
-        .unwrap_or_default()
+    let Some(mut current) = canonicalise_pass(input) else {
+        return String::new();
+    };
+    for _ in 1..MAX_CANONICAL_PASSES {
+        let Some(next) = canonicalise_pass(&current) else {
+            return String::new();
+        };
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+    input.to_owned()
+}
+
+// A pass reads block structure to decide what to protect and can insert a
+// blank line that changes that structure for the next one, so settling is
+// checked rather than assumed — every shape seen settles in two. Handing the
+// source back is the one answer that stays a fixed point whatever the passes
+// were doing, which is why the budget can be small.
+const MAX_CANONICAL_PASSES: usize = 4;
+
+// One pass: lift out what comrak claims, canonicalise the prose between,
+// splice the originals back; `None` when the source does not lex at all.
+// Lifted whole rather than masked character by character as in
+// `drive_pipeline`, which has a byte span to keep aligned and this has not —
+// so here a region leaves the lexer's sight entirely (`verbatim_regions`).
+fn canonicalise_pass(source: &str) -> Option<String> {
+    let (protected, originals) = verbatim_regions::protect(source);
+    let document = aozora::parse(protected).ok()?;
+    let canonical = document.snapshot().to_source();
+    Some(verbatim_regions::restore(&canonical, &originals))
 }
 
 #[cfg(test)]

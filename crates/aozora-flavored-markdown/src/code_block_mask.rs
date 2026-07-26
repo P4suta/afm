@@ -5,14 +5,16 @@
 //! where every byte must reach `<pre><code>` literally. The parser is
 //! CommonMark-blind by design (ADR-0010), so teaching it about code-block
 //! context lives here: mask each trigger inside a fence with [`MASK_CHAR`],
-//! record the original in source order, and restore once the mask is back
-//! out — neither `comrak::format_html` nor the canonicaliser disturbs it.
+//! record the original in source order, restore once the mask is back out —
+//! `comrak::format_html` never disturbs it. One character for one, because
+//! `render` keeps a construct's byte span slicing the caller's text;
+//! `crate::serialize` owes no caller an offset and lifts whole regions out
+//! instead (`crate::verbatim_regions`), reaching what this cannot.
 //!
-//! **Indented code blocks (CommonMark §4.4) are deliberately not masked.**
-//! Their boundaries depend on paragraph context a pre-pass would need a
-//! mini-parser to reproduce, and real 青空文庫 sources use fenced syntax. A
-//! notation inside one becomes a sentinel that `crate::ast_splice` writes
-//! back as it does for an inline code span, so both spellings read the same.
+//! **Indented code blocks (CommonMark §4.4) are deliberately not masked**:
+//! their boundaries depend on paragraph context. A notation inside one
+//! becomes a sentinel that `crate::ast_splice` writes back as it does for an
+//! inline code span, so both spellings read the same.
 //!
 //! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
 //! returning a borrowed `Cow` and no originals. The sibling parser
