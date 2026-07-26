@@ -53,8 +53,12 @@ const CONSTRUCTORS: &[Constructor] = &[
 /// is on, which is what makes the knob load-bearing rather than decorative;
 /// `default_on` is then readable straight off the same probe, so the shipped
 /// dialect is a column of this table rather than folklore.
+///
+/// `wire` is the name the same knob answers to as JSON — the second door onto
+/// this space, opened when `Options` became `Deserialize`.
 struct Knob {
     name: &'static str,
+    wire: &'static str,
     set: fn(Options, bool) -> Options,
     probe: &'static str,
     marker: &'static str,
@@ -64,6 +68,7 @@ struct Knob {
 const KNOBS: &[Knob] = &[
     Knob {
         name: "with_aozora",
+        wire: "aozora",
         set: |o, on| o.with_aozora(on),
         probe: "｜青梅《おうめ》",
         marker: "<ruby>",
@@ -71,6 +76,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_hardbreaks",
+        wire: "hardbreaks",
         set: |o, on| o.with_hardbreaks(on),
         probe: "a\nb",
         marker: "<br />",
@@ -78,6 +84,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_smart_punctuation",
+        wire: "smartPunctuation",
         set: |o, on| o.with_smart_punctuation(on),
         probe: "\"quoted\"",
         marker: "\u{201c}",
@@ -91,6 +98,7 @@ const KNOBS: &[Knob] = &[
         // (neither whitespace nor punctuation), so vanilla CommonMark denies
         // it right-flanking status and emits the asterisks literally.
         name: "with_cjk_friendly_emphasis",
+        wire: "cjkFriendlyEmphasis",
         set: |o, on| o.with_cjk_friendly_emphasis(on),
         probe: "これは**「強調」**です",
         marker: "<strong>",
@@ -98,6 +106,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_source_line_anchors",
+        wire: "sourceLineAnchors",
         set: |o, on| o.with_source_line_anchors(on),
         probe: "para",
         marker: "data-aozora-md-source-line",
@@ -105,6 +114,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_tables",
+        wire: "tables",
         set: |o, on| o.with_tables(on),
         probe: "| a |\n| - |\n| b |\n",
         marker: "<table>",
@@ -112,6 +122,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_strikethrough",
+        wire: "strikethrough",
         set: |o, on| o.with_strikethrough(on),
         probe: "~~x~~",
         marker: "<del>",
@@ -119,6 +130,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_autolinks",
+        wire: "autolinks",
         set: |o, on| o.with_autolinks(on),
         probe: "see https://example.com/ ok",
         marker: "<a href=",
@@ -126,6 +138,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_task_lists",
+        wire: "taskLists",
         set: |o, on| o.with_task_lists(on),
         probe: "- [ ] todo\n",
         marker: "checkbox",
@@ -207,8 +220,9 @@ fn no_retired_options_method_has_come_back() {
 // the space, swept
 // ---------------------------------------------------------------------------
 
-/// Every configuration one call chain can reach: each constructor bare, and
-/// each constructor with each knob forced both ways.
+/// Every configuration a consumer can reach: each constructor bare, each
+/// constructor with each knob forced both ways, and — since `Options` became
+/// `Deserialize` — every configuration the wire form reaches as well.
 fn reachable_options() -> Vec<(String, Options)> {
     let mut out = Vec::new();
     for (ctor, build) in CONSTRUCTORS {
@@ -222,6 +236,12 @@ fn reachable_options() -> Vec<(String, Options)> {
             }
         }
     }
+    // "Reachable" is a claim about consumers, not about builders. A browser
+    // host reaches this space by sending JSON, so the payload sweep below
+    // has to travel that door too or the word narrows to mean "reachable by
+    // the API this file happens to enumerate".
+    #[cfg(feature = "serde")]
+    out.extend(wire_reachable_options());
     out
 }
 
@@ -367,6 +387,257 @@ fn commonmark_is_the_dialect_the_spec_runners_measure_against() {
         rebuilt,
         Options::gfm(),
         "`gfm()` must be `commonmark()` plus exactly the four GFM extensions"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the second door: the same space, reached as JSON
+// ---------------------------------------------------------------------------
+//
+// `Options` is `Deserialize`, so a browser host configures a render by
+// sending an object rather than by calling a builder. That is a second
+// surface, and it was opened without a reader: everything above enumerates
+// `pub fn` names off the source, and a serde field name is not one.
+//
+// The gap that leaves is not hypothetical. The wasm bridge used to carry a
+// hand-written shadow struct with two of the nine knobs on it, so seven were
+// unreachable from JS — and nothing failed. The shadow deserialised fine,
+// `tsc` type-checked against the two-property `.d.ts` the shadow generated,
+// `just playground-build` was green, and this file never saw the wasm crate
+// at all. Silence in every gate, for a public surface missing 78% of itself.
+//
+// So the rules below close the loop rather than adding an example: struct
+// field → wire name → builder → TypeScript property, each link pinned to the
+// next, so a knob cannot exist at one end and be missing at the other.
+
+/// The fields `pub struct Options` declares in a *released* build, read off
+/// the source.
+///
+/// The `#[cfg(test)]` pair is skipped deliberately: those fields are absent
+/// from the shape a consumer links, so they are absent from its wire form
+/// too. That the crate's own test build cannot reach them either — the
+/// `#[serde(skip)]` that keeps `render.unsafe` off every spelling of the wire
+/// — is pinned by a unit test in `src/lib.rs`, because that is the only build
+/// in which the fields exist at all.
+fn declared_option_fields() -> BTreeSet<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let src = fs::read_to_string(&path).expect("src/lib.rs must be readable");
+    let mut names = BTreeSet::new();
+    let mut inside = false;
+    let mut behind_cfg_test = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed == "pub struct Options {" {
+            inside = true;
+        } else if inside && trimmed == "}" {
+            break;
+        } else if inside && trimmed == "#[cfg(test)]" {
+            behind_cfg_test = true;
+        } else if inside && let Some((name, _)) = trimmed.split_once(": bool,") {
+            if !behind_cfg_test {
+                names.insert(name.to_owned());
+            }
+            behind_cfg_test = false;
+        }
+    }
+    assert!(
+        !names.is_empty(),
+        "no `pub struct Options` fields found in {}; the reader must be retargeted, not deleted",
+        path.display()
+    );
+    names
+}
+
+/// serde's `rename_all = "camelCase"`, applied here rather than taken on
+/// trust — the point of the rule below is to compare two independent
+/// spellings of the same knob set.
+fn camel_case(snake: &str) -> String {
+    let mut out = String::new();
+    let mut capitalise = false;
+    for ch in snake.chars() {
+        if ch == '_' {
+            capitalise = true;
+        } else if capitalise {
+            out.extend(ch.to_uppercase());
+            capitalise = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_wire_form_names_exactly_the_fields_the_struct_declares() {
+    let expected: BTreeSet<String> = declared_option_fields()
+        .iter()
+        .map(|f| camel_case(f))
+        .collect();
+    let wired: BTreeSet<String> = KNOBS.iter().map(|k| k.wire.to_owned()).collect();
+    assert_eq!(
+        expected, wired,
+        "a field the wire form does not name is a knob a browser host cannot set, and a wire \
+         name no field backs is one it can set to nothing. Both read as working from JS"
+    );
+}
+
+#[cfg(feature = "serde")]
+fn decode(json: &str) -> Options {
+    serde_json::from_str(json).unwrap_or_else(|e| panic!("`{json}` must decode as Options: {e}"))
+}
+
+/// The configurations only the wire reaches: an object naming one knob — the
+/// partial object `#[serde(default)]` exists for — and the two that name all
+/// nine at once.
+#[cfg(feature = "serde")]
+fn wire_reachable_options() -> Vec<(String, Options)> {
+    let mut out = Vec::new();
+    for on in [false, true] {
+        for knob in KNOBS {
+            let json = format!("{{\"{}\": {on}}}", knob.wire);
+            let opts = decode(&json);
+            out.push((json, opts));
+        }
+        let fields: Vec<String> = KNOBS
+            .iter()
+            .map(|knob| format!("\"{}\": {on}", knob.wire))
+            .collect();
+        let json = format!("{{{}}}", fields.join(", "));
+        let opts = decode(&json);
+        out.push((json, opts));
+    }
+    out
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn every_knob_is_settable_over_the_wire() {
+    // The load-bearing half, and the one the shadow struct failed: a knob
+    // present on the type but absent from the wire is not a smaller API, it
+    // is an API that accepts the setting and discards it.
+    for knob in KNOBS {
+        for on in [false, true] {
+            let json = format!("{{\"{}\": {on}}}", knob.wire);
+            assert_eq!(
+                decode(&json),
+                (knob.set)(Options::default(), on),
+                "`{json}` must be `Options::default().{}({on})`",
+                knob.name
+            );
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn an_object_naming_every_knob_is_the_builder_chain_that_sets_them() {
+    // Exhaustive rather than sampled — 2^9 is 512, and enumerating it costs
+    // less than a proptest block. Two things ride on it that the one-knob
+    // rule above cannot see: that no two wire names write the same field
+    // (which would still pass singly, each shadowing the other's default),
+    // and that an object naming all nine determines the value outright — so
+    // the constructor it is compared against is immaterial.
+    for bits in 0..(1u32 << KNOBS.len()) {
+        let on = |index: usize| bits & (1u32 << index) != 0;
+        let fields: Vec<String> = KNOBS
+            .iter()
+            .enumerate()
+            .map(|(index, knob)| format!("\"{}\": {}", knob.wire, on(index)))
+            .collect();
+        let json = format!("{{{}}}", fields.join(", "));
+        let decoded = decode(&json);
+        for (ctor, build) in CONSTRUCTORS {
+            let mut built = build();
+            for (index, knob) in KNOBS.iter().enumerate() {
+                built = (knob.set)(built, on(index));
+            }
+            assert_eq!(
+                decoded, built,
+                "`{json}` must equal the same chain built from `{ctor}()`"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn a_key_this_crate_does_not_know_is_ignored_rather_than_refused() {
+    assert_eq!(
+        decode("{}"),
+        Options::default(),
+        "an object naming nothing must be the shipped dialect, or `#[serde(default)]` is not \
+         doing the job the `.d.ts`'s optional properties promise"
+    );
+    // Leniency is the shipped decision, and it has a sharp edge worth
+    // stating in a test rather than in a comment nobody runs: the wasm
+    // bridge used to spell the first knob `aozoraEnabled`, and a host still
+    // sending that name is not told it has stopped working — it silently
+    // gets the default. Refusing an unknown key instead is
+    // `deny_unknown_fields`, which is a decision about the wire format and
+    // not one a test makes; this pins what the format does today so that
+    // decision is a visible edit rather than a drift.
+    assert_eq!(
+        decode(r#"{"aozoraEnabled": false}"#),
+        Options::default(),
+        "an unknown key must not change the configuration"
+    );
+}
+
+/// The property names an emitted TypeScript interface declares, each with
+/// whether it is optional.
+#[cfg(feature = "tsify")]
+fn interface_properties(decl: &str) -> BTreeSet<(String, bool)> {
+    let body = decl
+        .split_once("export interface")
+        .expect("the declaration must be an interface")
+        .1;
+    let body = body
+        .split_once('{')
+        .expect("an interface has a body")
+        .1
+        .rsplit_once('}')
+        .expect("an interface body closes")
+        .0;
+    body.split(';')
+        .filter_map(|entry| {
+            let name = entry.trim().split_once(':')?.0.trim();
+            Some(
+                name.strip_suffix('?')
+                    .map_or_else(|| (name.to_owned(), false), |base| (base.to_owned(), true)),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "tsify")]
+#[test]
+fn the_typescript_interface_offers_every_wire_knob_and_marks_it_optional() {
+    // The last link, and the one no other gate can hold. `tsify` and `serde`
+    // read the same attributes down different code paths, so the TypeScript
+    // a host is typed against and the JSON serde will actually accept are
+    // two derivations that agree by convention rather than by construction.
+    // `tsc` cannot notice: a missing property is simply a narrower type, and
+    // narrower type-checks.
+    //
+    // Optionality is half the claim. It is `#[serde(default)]` that makes a
+    // partial object legal and the same attribute that makes `tsify` write
+    // `?`, so dropping it would silently retype every knob as required —
+    // and the resulting `.d.ts` would demand nine fields for a call that
+    // still worked with none.
+    let declared = interface_properties(<Options as tsify::Tsify>::DECL);
+    assert!(
+        !declared.is_empty(),
+        "no properties parsed out of the `Options` declaration; the reader must be retargeted, \
+         not deleted"
+    );
+    let expected: BTreeSet<(String, bool)> = KNOBS
+        .iter()
+        .map(|knob| (knob.wire.to_owned(), true))
+        .collect();
+    assert_eq!(
+        declared, expected,
+        "the TypeScript a browser host is typed against and the wire form serde accepts must be \
+         one knob set, each property optional"
     );
 }
 

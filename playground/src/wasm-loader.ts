@@ -33,8 +33,13 @@ export function slugsJson(): string {
 // context, but a browser module has no such module scope and `Document`
 // there is the DOM's. The alias is TypeScript's problem to solve, so it
 // is solved in TypeScript.
+//
+// `Options` is aliased for the same reason: it is the renderer's option set
+// named from inside the Rust crate that owns it, and a browser module has no
+// such context. Every field is optional, so `{ sourceLineAnchors: true }` is
+// a complete argument.
 import type {
-  RenderOptions,
+  Options as RenderOptions,
   RenderResult,
 } from 'aozora-flavored-markdown-wasm';
 
