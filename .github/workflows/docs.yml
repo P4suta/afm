@@ -7,8 +7,9 @@
 #
 # Docs builds use the native runner toolchain, not the dev Docker image:
 # the Pages deploy actions expect artefacts on the runner filesystem.
-# `dtolnay/rust-toolchain@stable` tracks the moving `stable` branch on
-# purpose (newest stable rustc); dependabot.yml ignores it.
+# `toolchain: stable` is what asks for the newest stable rustc; the action
+# itself is commit-pinned like every other (zizmor.yml `unpinned-uses`), so
+# "newest" is a statement about the compiler, never about the action's code.
 
 name: docs
 
@@ -17,10 +18,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Read-only by default; `deploy` re-declares the two write scopes it needs, so
+# the long `build` job (rustdoc + wasm + a bun install) never holds a token
+# that can publish to Pages.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deploy at a time; queue the rest so we never partially overwrite
 # the Pages bucket.
@@ -34,8 +36,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+        with:
+          toolchain: stable
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
@@ -90,6 +96,9 @@ jobs:
     name: deploy
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write      # publish the uploaded artifact to the Pages bucket
+      id-token: write   # OIDC token deploy-pages exchanges for the deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

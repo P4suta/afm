@@ -27,8 +27,9 @@ updates:
     # `actions/checkout` v6 → v7 against a generator that emits v6), so the
     # file is excluded here. Every hand-written workflow stays in scope.
     #
-    # This is NOT an exemption from the repo's SHA-pinning rule. The action
-    # refs in release.yml are pinned by `[dist.github-action-commits]` in
+    # This is NOT an exemption from the pinning rule in `zizmor.yml`, which
+    # audits release.yml like every other workflow. The action refs in it are
+    # pinned instead by `[dist.github-action-commits]` in
     # `dist-workspace.toml`, which overrides each ref with an immutable commit
     # before the template renders — so the generated file carries commit pins,
     # not floating major tags, and `dist plan` still agrees with it.
@@ -45,9 +46,13 @@ updates:
       actions-sha-bumps:
         patterns: ["*"]
     ignore:
-      # `dtolnay/rust-toolchain`'s ref tag IS the toolchain version (@1.96.0
-      # installs 1.96.0); auto-bumping it would advance the MSRV. CI pins
-      # @stable and passes the version via `with:` (ci.yml msrv job).
+      # `dtolnay/rust-toolchain`'s meaningful refs are branches (`stable`,
+      # `1.96.0`, …), not tags: it reads the toolchain off the ref when no
+      # `toolchain:` input is given, which is why an auto-bump there could
+      # advance the MSRV. Every call site now pins a branch tip by commit AND
+      # passes `toolchain:` explicitly, so the pin no longer encodes a compiler
+      # version — but a branch tip is still not something Dependabot tracks, so
+      # it stays hand-refreshed. `zizmor.yml` holds the pinning rule itself.
       - dependency-name: "dtolnay/rust-toolchain"
 
   - package-ecosystem: docker

@@ -102,6 +102,22 @@ RUN cargo binstall --no-confirm --locked --root /usr/local git-cliff
 # busts the cache for the heavier tool tiers above.
 RUN cargo binstall --no-confirm --locked --root /usr/local cargo-shear
 
+# zizmor — GitHub Actions static analysis (`just zizmor`). Ships a prebuilt
+# release archive, so no cargo layer is spent on it. This is the tool that
+# holds the repo's action-pinning policy; the policy itself is `zizmor.yml`.
+ARG ZIZMOR_VERSION=1.28.0
+RUN curl -fsSL \
+    "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
+    | tar -xz -C /usr/local/bin zizmor
+
+# actionlint — workflow schema + expression lint (`just actionlint`). Declared
+# in mise.toml for the host inner loop since the beginning; installed here so
+# it is a gate rather than a suggestion.
+ARG ACTIONLINT_VERSION=1.7.12
+RUN curl -fsSL \
+    "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz -C /usr/local/bin actionlint
+
 # just (task runner) installed separately; upstream provides an install script
 RUN curl -fsSL https://just.systems/install.sh \
     | bash -s -- --to /usr/local/bin --tag 1.51.0
