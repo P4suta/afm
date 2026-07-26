@@ -19,6 +19,16 @@ pub(crate) struct Entry {
 /// into a fresh temp dir. The dir is removed when the returned
 /// [`TempDir`] is dropped.
 pub(crate) fn fixture(book_toml: &str, sources: &[(&str, &str)]) -> TempDir {
+    let bytes: Vec<(&str, &[u8])> = sources
+        .iter()
+        .map(|(name, body)| (*name, body.as_bytes()))
+        .collect();
+    fixture_bytes(book_toml, &bytes)
+}
+
+/// [`fixture`] over raw bytes, for the chapters that are not UTF-8: a `.sjis`
+/// source, or one that is not decodable at all.
+pub(crate) fn fixture_bytes(book_toml: &str, sources: &[(&str, &[u8])]) -> TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
     fs::write(dir.path().join("book.toml"), book_toml).expect("write book.toml");
     let manuscript = dir.path().join("manuscript");

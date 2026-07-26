@@ -167,9 +167,11 @@ version = "0.1.0"
 dependencies = [
  "aozora",
  "aozora-flavored-markdown",
+ "aozora-flavored-markdown-test-support",
  "chrono",
  "insta",
  "miette",
+ "proptest",
  "quick-xml",
  "serde",
  "tempfile",
@@ -183,9 +185,12 @@ dependencies = [
 name = "aozora-flavored-markdown-epub-cli"
 version = "0.1.0"
 dependencies = [
+ "aozora-flavored-markdown",
  "aozora-flavored-markdown-epub",
  "clap",
  "miette",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

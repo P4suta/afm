@@ -7,7 +7,7 @@ use std::str;
 use aozora_flavored_markdown::{Options, render};
 
 use crate::discover::{Manuscript, SourceFile};
-use crate::{Error, Result};
+use crate::{ChapterReport, Error, Result};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpineItem {
@@ -22,11 +22,15 @@ pub(crate) struct SpineItem {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderOutput {
     pub items: Vec<SpineItem>,
+    // What each chapter's render observed. Only the chapters that saw
+    // something are in here, so the happy path carries nothing.
+    pub chapters: Vec<ChapterReport>,
 }
 
 pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
     let opts = Options::default();
     let mut items = Vec::with_capacity(manuscript.sources.len());
+    let mut chapters = Vec::new();
     for (idx, source) in manuscript.sources.iter().enumerate() {
         let text = decode_source(source)?;
         let rendered = render(&text, &opts);
@@ -42,8 +46,18 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
             title,
             xhtml,
         });
+        // The decoded text moves into the report rather than being cloned:
+        // it is what the spans were measured against, and nothing after
+        // this point reads it.
+        if !rendered.diagnostics.is_empty() {
+            chapters.push(ChapterReport {
+                path: source.path.clone(),
+                text,
+                diagnostics: rendered.diagnostics,
+            });
+        }
     }
-    Ok(RenderOutput { items })
+    Ok(RenderOutput { items, chapters })
 }
 
 fn decode_source(source: &SourceFile) -> Result<String> {
@@ -53,11 +67,14 @@ fn decode_source(source: &SourceFile) -> Result<String> {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     if matches!(ext.as_deref(), Some("sjis" | "shift_jis" | "shift-jis")) {
-        aozora::decode_sjis(&source.bytes).map_err(Error::from)
+        aozora::decode_sjis(&source.bytes).map_err(|e| Error::sjis(source.path.clone(), e))
     } else {
         str::from_utf8(&source.bytes)
             .map(str::to_owned)
-            .map_err(Error::from)
+            .map_err(|e| Error::Utf8 {
+                path: source.path.clone(),
+                source: e,
+            })
     }
 }
 

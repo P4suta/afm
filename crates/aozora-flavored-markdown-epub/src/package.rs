@@ -56,10 +56,8 @@ pub(crate) fn write(out: &Path, bundle: &Bundle) -> Result<()> {
     for item in &bundle.spine {
         write_deflated(&mut zip, &item.path, &item.contents, out)?;
     }
-    zip.finish().map_err(|source| Error::Package {
-        path: out.to_path_buf(),
-        source,
-    })?;
+    zip.finish()
+        .map_err(|source| Error::package(out.to_path_buf(), source))?;
     Ok(())
 }
 
@@ -72,10 +70,7 @@ fn write_stored<W: Write + Seek>(
     let opts: SimpleFileOptions =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file(name, opts)
-        .map_err(|source| Error::Package {
-            path: out_path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
     zip.write_all(bytes).map_err(|source| Error::PackageIo {
         path: out_path.to_path_buf(),
         source,
@@ -92,10 +87,7 @@ fn write_deflated<W: Write + Seek>(
     let opts: SimpleFileOptions =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip.start_file(name, opts)
-        .map_err(|source| Error::Package {
-            path: out_path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
     zip.write_all(bytes).map_err(|source| Error::PackageIo {
         path: out_path.to_path_buf(),
         source,

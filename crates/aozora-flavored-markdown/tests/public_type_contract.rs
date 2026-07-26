@@ -536,7 +536,11 @@ struct Decl {
 /// Found by walking the tree rather than by naming files, so a type moved
 /// into a new module stays in scope.
 fn public_type_decls() -> Vec<Decl> {
-    sources()
+    public_type_decls_in(&sources())
+}
+
+fn public_type_decls_in(corpus: &[(PathBuf, String)]) -> Vec<Decl> {
+    corpus
         .iter()
         .flat_map(|(path, src)| decls_in(src, path))
         .collect()
@@ -544,9 +548,55 @@ fn public_type_decls() -> Vec<Decl> {
 
 /// Every `.rs` file under this crate's own `src/`, in path order.
 fn sources() -> Vec<(PathBuf, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    sources_under(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+}
+
+/// The crates a `Cargo.toml` out in the world can name, and therefore the
+/// ones whose `pub` items are somebody else's compile error.
+///
+/// The two rules below used to read `sources()` — this crate's `src/` alone —
+/// which is not the shape either of them claims. Both are stated as rules over
+/// *a published library's surface*, and the workspace has two published
+/// libraries. The sibling shipped exactly what each rule forbids while both
+/// were green: `BuildOptions` was a `pub struct` with three public fields and
+/// no `#[non_exhaustive]`, and `Error` named `toml::de::Error`, `zip::ZipError`
+/// and `aozora::DecodeError` in public fields. Neither is reachable from here
+/// by any means except reading the sibling's source, which is what these do.
+///
+/// The two CLIs are out because a binary has no consumer; `-wasm`'s surface is
+/// the emitted `.d.ts`, which `typescript_surface.rs` reads instead; and
+/// `-test-support` is `publish = false`.
+const PUBLISHED_LIBRARIES: &[&str] = &["aozora-flavored-markdown", "aozora-flavored-markdown-epub"];
+
+/// Every `.rs` file under the `src/` of every published library, crate order
+/// then path order.
+fn library_sources() -> Vec<(PathBuf, String)> {
+    let crates = {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.pop();
+        dir
+    };
+    let corpus: Vec<(PathBuf, String)> = PUBLISHED_LIBRARIES
+        .iter()
+        .flat_map(|krate| sources_under(&crates.join(krate).join("src")))
+        .collect();
+    // Anti-vacuity: a renamed crate directory would otherwise leave this
+    // reading one library, or none, and every rule below would pass.
+    for krate in PUBLISHED_LIBRARIES {
+        assert!(
+            corpus
+                .iter()
+                .any(|(path, _)| path.components().any(|c| c.as_os_str() == *krate)),
+            "no source read from `{krate}`; retarget PUBLISHED_LIBRARIES rather than letting \
+             these rules cover one crate again"
+        );
+    }
+    corpus
+}
+
+fn sources_under(root: &Path) -> Vec<(PathBuf, String)> {
     let mut paths = Vec::new();
-    collect_rust_sources(&root, &mut paths);
+    collect_rust_sources(root, &mut paths);
     assert!(
         !paths.is_empty(),
         "no source found under {}",
@@ -628,7 +678,14 @@ fn has_public_field(lines: &[&str], decl: usize) -> bool {
 
 #[test]
 fn every_public_type_a_consumer_can_construct_is_sealed() {
-    for decl in public_type_decls() {
+    // Over [`PUBLISHED_LIBRARIES`], not this crate: `BuildOptions` shipped
+    // unsealed with three public fields, and the only thing standing between
+    // a fourth input and a breaking release of the EPUB crate was that nobody
+    // had wanted one yet. `OPEN_BY_DESIGN` is matched by bare name, so a
+    // sibling declaring its own `Span` would inherit the exemption — the
+    // three names in it are geometric, and a second type wearing one is the
+    // problem to notice.
+    for decl in public_type_decls_in(&library_sources()) {
         if OPEN_BY_DESIGN.contains(&decl.name.as_str()) {
             continue;
         }
@@ -661,6 +718,54 @@ fn the_types_the_rule_had_missed_are_sealed() {
              alignment would otherwise force a breaking release"
         );
     }
+}
+
+#[test]
+fn the_sealing_rule_rejects_the_build_options_the_epub_crate_used_to_ship() {
+    // The corpus rule above now reads the sibling, and the sibling is fixed,
+    // so nothing in the tree can show what it catches. This is the surface it
+    // was widened for, verbatim: three public fields, `#[derive]` directly
+    // above and no `#[non_exhaustive]` anywhere in the attribute block — which
+    // is the one shape `attributes_above` has to get right, since it reads the
+    // comment block too and a `#[derive(Debug, Clone)]` line sits between the
+    // doc line and the declaration.
+    let file = "\
+/// Inputs for one [`build`].
+#[derive(Debug, Clone)]
+pub struct BuildOptions<'a> {
+    /// Directory or single file containing Aozora Flavored Markdown sources.
+    pub input: &'a Path,
+    /// Path to `book.toml` metadata.
+    pub metadata: &'a Path,
+    /// Output `.epub` path.
+    pub output: &'a Path,
+}
+";
+    let decls = decls_in(file, Path::new("lib.rs"));
+    let decl = decls
+        .iter()
+        .find(|d| d.name == "BuildOptions")
+        .expect("the fixture declares the struct");
+    assert!(
+        decl.has_public_field,
+        "three `pub` fields must read as constructible, or the rule skips the type entirely"
+    );
+    assert!(
+        !decl.sealed,
+        "the shipped `BuildOptions` must read as unsealed; if this passes the rule cannot fail \
+         on it, and `just ci` would have stayed green through a fourth input field"
+    );
+
+    // The replacement must read as sealed through the same attribute block,
+    // or the rule forbids the fix.
+    let fixed = file.replace(
+        "#[derive(Debug, Clone)]\n",
+        "#[derive(Debug, Clone)]\n#[non_exhaustive]\n",
+    );
+    assert!(
+        decls_in(&fixed, Path::new("lib.rs"))[0].sealed,
+        "a `#[non_exhaustive]` under the derive must read as sealed"
+    );
 }
 
 #[test]
@@ -1375,10 +1480,27 @@ fn every_public_module_is_documented_surface_or_hidden() {
 // the boundary — no public signature names a foreign type
 // ---------------------------------------------------------------------------
 
-/// The two crates whose types must not reach a signature a consumer can see.
-/// Both are pre-1.0 and neither is re-exported, so naming one in public makes
-/// its next minor bump a breaking release here.
-const FOREIGN_CRATES: [&str; 2] = ["comrak", "aozora"];
+/// The crates whose types must not reach a signature a consumer can see.
+///
+/// None of them is re-exported by the library that depends on it, so naming
+/// one in public hands that crate this workspace's `SemVer`: the next `zip 9`,
+/// `toml 2` or `aozora 0.6` becomes a breaking release of a crate that changed
+/// nothing. Spelled as Rust paths (`quick_xml`, not `quick-xml`) because that
+/// is how a signature spells them.
+///
+/// `miette` is deliberately absent. `impl miette::Diagnostic for Diagnostic`
+/// is the whole content of the `miette` feature — a trait a consumer opted
+/// into, not a type leaking out — and a rule that could not tell the two apart
+/// would have to be switched off for the one case that matters.
+const FOREIGN_CRATES: &[&str] = &[
+    "comrak",
+    "aozora",
+    "toml",
+    "zip",
+    "quick_xml",
+    "uuid",
+    "chrono",
+];
 
 /// The names a foreign type can go by in one file: the qualified prefixes,
 /// plus whatever that file imported from those crates. The import is the only
@@ -1404,14 +1526,23 @@ fn foreign_names(src: &str) -> Vec<String> {
         if !pending.contains(';') {
             continue;
         }
-        // Type imports only: a lowercase tail is a module segment, and a
-        // free function imported from either crate is caught by the prefix
-        // where it is called.
-        names.extend(
-            idents(&pending)
-                .into_iter()
-                .filter(|ident| ident.starts_with(char::is_uppercase)),
-        );
+        // A type import gives a bare name; a *module* import gives a new
+        // prefix. `use toml::de;` is what put `de::Error` on the EPUB crate's
+        // surface — the field named neither `toml` nor a type this reader had
+        // heard of, so the crate prefix and the uppercase sweep both missed
+        // it. Every lowercase segment of a foreign `use` therefore becomes a
+        // prefix of its own, and the list stays per-file, so `de::` can only
+        // mean the module this file imported.
+        for ident in idents(&pending) {
+            if ident == "use" || FOREIGN_CRATES.contains(&ident.as_str()) {
+                continue;
+            }
+            if ident.starts_with(char::is_uppercase) {
+                names.push(ident);
+            } else {
+                names.push(format!("{ident}::"));
+            }
+        }
         pending.clear();
     }
     names
@@ -1466,6 +1597,35 @@ fn declaration_text(lines: &[&str], start: usize) -> String {
         .map_or_else(|| text.clone(), |body| text[..body].to_owned())
 }
 
+/// The body lines of a public enum, as `(line index, code)`.
+///
+/// A variant and its fields are surface: `Error::Sjis`'s payload is what a
+/// consumer's `match` arm binds, and its type is what their `?` propagates.
+/// No line of one starts with `pub`, though, so [`opens_public_surface`] never
+/// reached them, and [`declaration_text`] stops at the `{` that opens the
+/// body. That blind spot is the whole of where the EPUB crate's foreign types
+/// sat — three `#[source]` fields and one `#[from]`, every one of them inside
+/// an enum body, while this file's rule ran green over the struct fields two
+/// modules away.
+///
+/// Attribute lines and comments are dropped: `#[error("…")]` is a format
+/// string and a doc link is prose, neither of which is a signature.
+fn public_enum_body(lines: &[&str], decl: usize) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (offset, line) in lines[decl + 1..].iter().enumerate() {
+        if *line == "}" {
+            break;
+        }
+        let code = line.split_once("//").map_or(*line, |(before, _)| before);
+        let trimmed = code.trim();
+        if trimmed.is_empty() || trimmed.starts_with("#[") {
+            continue;
+        }
+        out.push((decl + 1 + offset, trimmed.to_owned()));
+    }
+    out
+}
+
 fn names_a_foreign_type(decl: &str, foreign: &[String]) -> Option<String> {
     let words = idents(decl);
     foreign
@@ -1480,13 +1640,32 @@ fn names_a_foreign_type(decl: &str, foreign: &[String]) -> Option<String> {
 }
 
 #[test]
-fn no_public_declaration_names_a_comrak_or_aozora_type() {
-    let publics: Vec<String> = public_type_decls().into_iter().map(|d| d.name).collect();
+fn no_public_declaration_names_a_type_from_an_unexported_dependency() {
+    let corpus = library_sources();
+    let publics: Vec<String> = public_type_decls_in(&corpus)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
     let mut checked = 0usize;
-    for (path, src) in sources() {
-        let foreign = foreign_names(&src);
+    let mut enum_bodies = 0usize;
+    for (path, src) in &corpus {
+        let foreign = foreign_names(src);
         let lines: Vec<&str> = src.lines().collect();
         for start in 0..lines.len() {
+            if matches!(declared_type(lines[start]), Some((true, _))) {
+                for (idx, code) in public_enum_body(&lines, start) {
+                    enum_bodies += 1;
+                    checked += 1;
+                    assert!(
+                        names_a_foreign_type(&code, &foreign).is_none(),
+                        "{}:{}: `{code}` puts a type from an unexported dependency inside a \
+                         public enum; a `match` arm out in the world binds it, so that crate's \
+                         next major is a breaking release of this one (ADR-0021)",
+                        path.display(),
+                        idx + 1,
+                    );
+                }
+            }
             if !opens_public_surface(lines[start], &publics) {
                 continue;
             }
@@ -1494,8 +1673,8 @@ fn no_public_declaration_names_a_comrak_or_aozora_type() {
             let decl = declaration_text(&lines, start);
             assert!(
                 names_a_foreign_type(&decl, &foreign).is_none(),
-                "{}:{}: `{}` names a type from an unexported pre-1.0 dependency; a minor \
-                 bump of it would be a breaking release of this crate (ADR-0021)",
+                "{}:{}: `{}` names a type from an unexported dependency; a major bump of it \
+                 would be a breaking release of this crate (ADR-0021)",
                 path.display(),
                 start + 1,
                 decl.trim()
@@ -1505,6 +1684,11 @@ fn no_public_declaration_names_a_comrak_or_aozora_type() {
     assert!(
         checked > 40,
         "only {checked} public declarations found; the reader must be retargeted, not deleted"
+    );
+    assert!(
+        enum_bodies > 20,
+        "only {enum_bodies} public enum body lines read; the half of this rule that the EPUB \
+         crate's `Error` broke must not go back to reading nothing"
     );
 }
 
@@ -1545,5 +1729,78 @@ impl StreamingIrBuilder {
         3,
         "the rule must catch the `From` impl, the comrak escape hatch and the bare \
          `AstNode` parameter; caught lines {caught:?}"
+    );
+}
+
+#[test]
+fn the_foreign_type_rule_rejects_the_error_enum_the_epub_crate_used_to_ship() {
+    // The sibling's own three, verbatim from before this change, and they are
+    // a different shape from the three above: every one sits *inside* an enum
+    // body, which is why they shipped while the rule ran green. `de::Error`
+    // is the sharp one — the field names neither `toml` nor a type anything
+    // had imported by name, so only the module prefix `use toml::de;` created
+    // can see it.
+    let file = "\
+use toml::de;
+use zip::result::ZipError;
+
+pub enum Error {
+    #[error(\"failed to parse book metadata at {path}\")]
+    MetadataParse {
+        path: PathBuf,
+        #[source]
+        source: de::Error,
+    },
+
+    #[error(\"EPUB packaging failed for {path}\")]
+    Package {
+        path: PathBuf,
+        #[source]
+        source: ZipError,
+    },
+
+    #[error(\"Shift_JIS source could not be decoded\")]
+    Sjis(#[from] aozora::DecodeError),
+}
+";
+    let foreign = foreign_names(file);
+    let lines: Vec<&str> = file.lines().collect();
+    let decl = lines
+        .iter()
+        .position(|line| matches!(declared_type(line), Some((true, _))))
+        .expect("the fixture declares a public enum");
+    let caught: Vec<String> = public_enum_body(&lines, decl)
+        .into_iter()
+        .filter(|(_, code)| names_a_foreign_type(code, &foreign).is_some())
+        .map(|(_, code)| code)
+        .collect();
+    assert_eq!(
+        caught,
+        [
+            "source: de::Error,",
+            "source: ZipError,",
+            "Sjis(#[from] aozora::DecodeError),"
+        ],
+        "the rule must catch all three of the sibling's foreign fields — the module-qualified \
+         one, the imported one and the `#[from]` — or it can pass by finding nothing"
+    );
+    // And the replacement surface must read clean, or the rule would forbid
+    // the fix as readily as the defect.
+    let fixed = "\
+pub enum Error {
+    #[error(\"failed to parse book metadata at {path}\")]
+    MetadataParse {
+        path: PathBuf,
+        #[source]
+        source: Cause,
+    },
+}
+";
+    let fixed_lines: Vec<&str> = fixed.lines().collect();
+    assert!(
+        public_enum_body(&fixed_lines, 0)
+            .iter()
+            .all(|(_, code)| names_a_foreign_type(code, &foreign_names(fixed)).is_none()),
+        "an opaque `Cause` must read as clean surface"
     );
 }

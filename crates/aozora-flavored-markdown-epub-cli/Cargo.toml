@@ -27,8 +27,16 @@ path = "src/main.rs"
 
 [dependencies]
 aozora-flavored-markdown-epub = { version = "0.1.0", path = "../aozora-flavored-markdown-epub" }
+# `miette`: the renderer's `Diagnostic` implements miette's trait, so a
+# chapter diagnostic is reported as itself rather than through a shadow type.
+# `serde`: `--format json` serialises `Severity` / `DiagnosticSource` / `Span`
+# into the `aozora-md.diagnostics.v1` envelope (ADR-0012).
+aozora-flavored-markdown = { workspace = true, features = ["miette", "serde"] }
 clap      = { workspace = true }
+# `fancy` is the graphical handler that renders a report on the terminal.
 miette    = { workspace = true, features = ["fancy"] }
+serde      = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile  = { workspace = true }
