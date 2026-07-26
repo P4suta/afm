@@ -1,6 +1,6 @@
 # 0014. comrak vendoring upgrade & follow policy
 
-- Status: accepted
+- Status: superseded by ADR-0024
 - Date: 2026-06-20
 - Deciders: @P4suta
 - Tags: parser, fork, supply-chain, maintenance
@@ -69,5 +69,5 @@ honest.
 
 - ADR-0001 (fork comrak and vendor it in-tree)
 - ADR-0015 (crates.io publication & semver policy)
-- SECURITY.md (vendored comrak advisory tracking)
-- `upstream/comrak/UPSTREAM_DIFF.md`, `just upstream-sync`, `just audit-comrak`
+- [ADR-0024](0024-depend-on-crates-io-comrak.md) — supersedes this ADR; the
+  trigger and semver-impact rules below are carried over verbatim.

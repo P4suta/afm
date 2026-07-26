@@ -7,7 +7,7 @@ default_job = "check"
 [jobs.check]
 command = ["cargo", "check", "--workspace", "--all-targets", "--color", "always"]
 need_stdout = false
-watch = ["crates", "upstream/comrak/src", "spec"]
+watch = ["crates", "spec"]
 on_change_strategy = "kill_then_restart"
 
 # [workspace.lints] is the single source of truth, so the flag surface is minimal.

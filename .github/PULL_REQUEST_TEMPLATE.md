@@ -9,20 +9,16 @@
 - [ ] Refactor (no behaviour change)
 - [ ] Documentation / book / ADR
 - [ ] CI / developer tooling
-- [ ] Upstream comrak touch-up (requires an approving ADR — see ADR-0001)
-- [ ] Bumping the pinned `aozora-*` workspace version
+- [ ] Bumping a pinned dependency version (`aozora`, `comrak`, …)
 
 ## Checklist
 
 - [ ] `just ci` passes locally (lint + build + test + spec-* + coverage
-      + upstream-diff + book-build).
+      + playground-build).
 - [ ] Added or updated tests that exercise the change.
 - [ ] Updated `CHANGELOG.md` under `[Unreleased]` (or stated why it
       doesn't need a changelog entry).
 - [ ] Commit messages follow Conventional Commits (lefthook enforces).
-- [ ] If this touches `upstream/comrak/`: linked the approving ADR and
-      confirmed `just upstream-diff` still passes (0-line diff budget,
-      ADR-0001).
 - [ ] If this adds a new 青空文庫 notation: filed it in the sibling
       [`P4suta/aozora`](https://github.com/P4suta/aozora) repo first
       (ADR-0010); aozora-md-side follow-up is usually a one-line mapping in

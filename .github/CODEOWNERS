@@ -2,7 +2,6 @@
 * @P4suta
 
 # Surfaces that always need maintainer review.
-/upstream/comrak/     @P4suta
 /docs/adr/            @P4suta
 /crates/aozora-flavored-markdown/ @P4suta
 /.github/workflows/   @P4suta

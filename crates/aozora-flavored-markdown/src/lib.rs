@@ -10,9 +10,9 @@
 //! The pipeline substitutes one PUA sentinel per 青空文庫 construct
 //! (`constructs`), lets a *verbatim* comrak parse the result as vanilla
 //! CommonMark + GFM, then splices each sentinel back into the AST as a
-//! rendered fragment (`ast_splice`) before formatting. Nothing Aozora-aware
-//! lives in vendored comrak (ADR-0001 budget = 0), and the boundary with the
-//! sibling `aozora` parser is its public API only (ADR-0021).
+//! rendered fragment (`ast_splice`) before formatting. comrak is an unpatched
+//! crates.io dependency (ADR-0024), and the boundary with the sibling `aozora`
+//! parser is its public API only (ADR-0021).
 
 #![forbid(unsafe_code)]
 

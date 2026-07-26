@@ -1,7 +1,7 @@
 # Contributing to aozora-flavored-markdown
 
-This repo is the **Markdown ↔ Aozora composition layer**: it composes a
-vendored verbatim comrak with the sibling
+This repo is the **Markdown ↔ Aozora composition layer**: it composes an
+unmodified comrak with the sibling
 [`P4suta/aozora`](https://github.com/P4suta/aozora) parser so CommonMark +
 GFM and 青空文庫記法 coexist in one document.
 
@@ -15,9 +15,9 @@ automatically.
 1. **Docker-only execution** (ADR-0002). Never invoke `cargo` or `bun` on
    the host — every step goes through `just <target>`, which shells into
    the dev container.
-2. **Vendored comrak is hands-off** (ADR-0001). `upstream/comrak/` has a
-   **0-line diff budget**; composition happens in `ast_splice`, never
-   inside the fork.
+2. **comrak is a plain dependency, never patched** (ADR-0024). Composition
+   happens in `ast_splice`; a change that would need comrak itself to
+   behave differently is an upstream issue, not a local edit.
 3. **No warning suppressions.** `#[allow(...)]`, `continue-on-error`, and
    similar escape hatches are rejected by `just strict-code`. Fix the real
    issue.

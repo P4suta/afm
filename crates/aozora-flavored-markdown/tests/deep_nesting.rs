@@ -1,8 +1,8 @@
 //! Regression tests for deeply-nested input (stack-overflow / `DoS`).
 //!
 //! comrak builds an arbitrarily deep AST from a *small* input — nested
-//! blockquotes carry no depth cap (`handle_blockquote` in the vendored
-//! tree), unlike list nesting which it caps at 100 — and aozora-flavored-markdown walks that
+//! blockquotes carry no depth cap, unlike list nesting which it caps at
+//! 100 — and aozora-flavored-markdown walks that
 //! AST to splice Aozora spans and to project the IR. Before the splice
 //! walk (`ast_splice`), the inline descent (`constructs`), and the
 //! IR builder were made iterative / depth-bounded, a deeply nested

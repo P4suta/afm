@@ -178,6 +178,22 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Removed
 
+- **`upstream/comrak/`** — the vendored comrak fork (139 files, 2.2 MB) is
+  gone; `comrak = "0.52.0"` now resolves from crates.io like every other
+  dependency ([ADR-0024](docs/adr/0024-depend-on-crates-io-comrak.md),
+  superseding ADR-0001 and ADR-0014). `cargo publish` used to strip the
+  `path`, so consumers compiled against a graph local builds and CI never
+  touched; there is one graph now, and `Cargo.lock` carries the `source` +
+  `checksum` cargo verifies on every build. `cargo audit` / `cargo deny` /
+  `dependency-review` / Dependabot see comrak directly for the first time.
+  Going with it: `just upstream-diff`, `just upstream-sync`, `just
+  audit-comrak` and their xtask implementations, the `upstream-diff` CI job
+  and `audit-comrak` matrix leg, the lefthook hook, `.github/codeql/`, and
+  the workspace `exclude`. **Finding:** the "verbatim" tree was not
+  verbatim — a variable rename in `src/parser/inlines.rs` and a comment in
+  `src/tests/sourcepos.rs` had drifted from the published crate, past a
+  0-line diff budget whose gate never computed a diff. Both are
+  behaviour-preserving; the measurement is recorded in ADR-0024.
 - **`crates/aozora-flavored-markdown-book/`** — the mdbook site (10 files,
   791 lines) restated what the README and docs.rs already say. Getting
   started lives in the README, the API on docs.rs; mdbook drops out of CI,

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # aozora-flavored-markdown development / CI container. Every developer and CI job runs inside this
-# image; the host toolchain is never invoked. Layered so upstream-sync /
-# dependency bumps rebuild a minimal surface.
+# image; the host toolchain is never invoked. Layered so a dependency bump
+# rebuilds a minimal surface.
 #
 # The base image is pinned by immutable digest; Dependabot bumps tag +
 # digest together weekly. Refresh by hand with
