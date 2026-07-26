@@ -6,12 +6,18 @@
 //! this crate's API from the parser's `SemVer`, as the IR enums and
 //! `sentinels` do. Upstream maps in via [`From`].
 
+use core::ops::Range;
+
 use serde::Serialize;
 
 /// Serialises to `"error"` / `"warning"` / `"note"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// A level added upstream arrives here as a new variant; `#[non_exhaustive]`
+// keeps that additive for external `match`es, the same bargain the IR enums
+// take (ADR-0013).
+#[non_exhaustive]
 pub enum Severity {
     /// The parse should be treated as suspect.
     Error,
@@ -22,9 +28,11 @@ pub enum Severity {
 }
 
 /// Serialises to `"source"` / `"internal"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// As `Severity`: an origin added upstream must not break external `match`es.
+#[non_exhaustive]
 pub enum DiagnosticSource {
     /// Traces back to the user-provided source text.
     Source,
@@ -33,9 +41,14 @@ pub enum DiagnosticSource {
 }
 
 /// Byte-offset range into the source text, end-exclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// Deliberately NOT `#[non_exhaustive]`, unlike every other public struct
+// here: a span is geometrically closed at start + end, so sealing it would
+// only cost every consumer literal construction and functional record update
+// for a field set that cannot grow. `lsp_types::Position`,
+// `miette::SourceSpan` and `proc_macro2::LineColumn` all make the same call.
 pub struct Span {
     /// Inclusive start byte offset.
     pub start: u32,
@@ -43,8 +56,35 @@ pub struct Span {
     pub end: u32,
 }
 
+impl Span {
+    /// No ordering is imposed on the pair; a reversed one reads as empty.
+    #[must_use]
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    /// Saturating, so a reversed span measures 0 rather than wrapping.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// True of the `0..0` a document-scoped diagnostic carries.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.end <= self.start
+    }
+}
+
+impl From<Span> for Range<usize> {
+    /// Slices the source the span was measured against: `&source[span.into()]`.
+    fn from(span: Span) -> Self {
+        span.start as usize..span.end as usize
+    }
+}
+
 /// A non-fatal observation about a render.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -74,7 +114,7 @@ impl Diagnostic {
                 "source is {bytes} bytes, over the {} byte (u32 span) limit; nothing was rendered",
                 u32::MAX
             ),
-            span: Span { start: 0, end: 0 },
+            span: Span::new(0, 0),
         }
     }
 
@@ -92,7 +132,7 @@ impl Diagnostic {
                 "{count} 青空文庫 construct(s) could not be located in the source \
                  and were left out of the output"
             ),
-            span: Span { start: 0, end: 0 },
+            span: Span::new(0, 0),
         }
     }
 }
@@ -105,10 +145,7 @@ impl From<&aozora::Diagnostic> for Diagnostic {
             source: d.source().into(),
             code: d.code(),
             message: d.to_string(),
-            span: Span {
-                start: span.start,
-                end: span.end,
-            },
+            span: Span::new(span.start, span.end),
         }
     }
 }

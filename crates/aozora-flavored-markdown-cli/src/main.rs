@@ -250,10 +250,12 @@ impl miette::Diagnostic for CliDiagnostic {
 
     fn severity(&self) -> Option<miette::Severity> {
         // miette has no `Note`; its three levels are Advice / Warning / Error.
+        // `Severity` is `#[non_exhaustive]`, so a level added later routes to
+        // the most conservative rendering rather than failing the build.
         Some(match self.severity {
-            Severity::Error => miette::Severity::Error,
             Severity::Warning => miette::Severity::Warning,
             Severity::Note => miette::Severity::Advice,
+            _ => miette::Severity::Error,
         })
     }
 

@@ -658,18 +658,12 @@ fn table_align(a: TableAlignment) -> IrTableAlign {
 fn sourcepos_to_range(s: &Sourcepos) -> Option<Range> {
     // comrak source positions are 1-based line / column. Map the
     // pair through `Position` directly — no pseudo-byte arithmetic.
-    let start = Position {
-        line: saturating_u32(s.start.line),
-        column: saturating_u32(s.start.column),
-    };
-    let end = Position {
-        line: saturating_u32(s.end.line),
-        column: saturating_u32(s.end.column),
-    };
+    let start = Position::new(saturating_u32(s.start.line), saturating_u32(s.start.column));
+    let end = Position::new(saturating_u32(s.end.line), saturating_u32(s.end.column));
     // `Position` derives `Ord` lexicographically (line first, then
     // column), so the comparison works for malformed inputs where
     // `end` precedes `start`.
-    (end >= start).then_some(Range { start, end })
+    (end >= start).then_some(Range::new(start, end))
 }
 
 struct TableMeta {
