@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4b336a7e95333c4e6f8c82ba7b6e742c07745b393f270f8a03bb0a498e5f661c # shrinks to src = "```\n｜青梅《おうめ》\n［＃改ページ］\n```\n"
+cc ddfe9dd7dfb29ec5503cd956a33e4577bcc5a1c51bc9afe72ba8dfba16c627d4 # shrinks to (src, _) = ("```\n｜青梅《おうめ》\n［＃改ページ］\n```\n\n```\n\n```\n\n", "")

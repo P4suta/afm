@@ -402,7 +402,7 @@ fn format_root<'a>(
         html
     };
     if let Some(originals) = mask_originals {
-        code_block_mask::unmask_html(&html, originals).into_owned()
+        code_block_mask::unmask(&html, originals).into_owned()
     } else {
         html
     }
@@ -526,7 +526,7 @@ fn collect_rendered_blocks<'a>(
         let block_html = if mask_cursor.is_empty() {
             rendered
         } else {
-            code_block_mask::unmask_html_from(&rendered, &mut mask_cursor).into_owned()
+            code_block_mask::unmask_from(&rendered, &mut mask_cursor).into_owned()
         };
         let ir_blocks = if idx < blocks_ir.len() {
             mem::take(&mut blocks_ir[idx])
@@ -568,8 +568,15 @@ pub fn serialize(input: &str) -> String {
     if !source_within_span_budget(input) {
         return String::new();
     }
-    aozora::parse(input.to_owned())
-        .map(|document| document.snapshot().to_source())
+    // Masked through the lexer exactly as in `drive_pipeline`, and for the
+    // same reason: a fence interior the lexer can see is canonicalised like
+    // prose, which rewrites bytes that must reach the output as written.
+    let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
+    aozora::parse(masked.into_owned())
+        .map(|document| {
+            let canonical = document.snapshot().to_source();
+            code_block_mask::unmask(&canonical, &originals).into_owned()
+        })
         .unwrap_or_default()
 }
 
@@ -587,6 +594,27 @@ mod tests {
     #[test]
     fn plain_text_serialize_returns_input_unchanged() {
         assert_eq!(serialize("plain text"), "plain text");
+    }
+
+    #[test]
+    fn fenced_notation_serializes_verbatim() {
+        // Unmasked, the lexer canonicalises a fence body like prose and drops
+        // the ruby's explicit base marker.
+        let src = "```\n｜青梅《おうめ》\n```";
+        assert_eq!(serialize(src), src);
+    }
+
+    #[test]
+    fn serialize_restores_masks_in_source_order_across_fences() {
+        // Two fences, different triggers, canonicalised prose between them:
+        // a cursor that replayed or skipped would put a character back in the
+        // wrong fence rather than lose one, which byte equality catches and a
+        // per-fence containment check would not.
+        let src = "```\n｜一《いち》\n```\n\n｜二《に》\n\n```\n［＃改ページ］\n```\n";
+        assert_eq!(
+            serialize(src),
+            "```\n｜一《いち》\n```\n\n二《に》\n\n```\n［＃改ページ］\n```\n"
+        );
     }
 
     #[test]

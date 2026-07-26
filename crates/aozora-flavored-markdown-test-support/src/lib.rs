@@ -1,10 +1,10 @@
 //! Test predicates and invariant helpers for the aozora-flavored-markdown
 //! integration test suite.
 //!
-//! Each `check_*` predicate codifies one lettered tier — an output shape the
-//! renderer must never produce — and returns `Result<(), Violation>` so unit
-//! tests, property tests, the corpus sweep, and fuzz harnesses compose them
-//! on equal footing. [`assert_invariants`] runs them all.
+//! Each `check_*` predicate codifies one invariant — a lettered HTML tier, or
+//! a numbered one the serializer owes — and returns `Result<(), Violation>` so
+//! unit tests, property tests, the corpus sweep, and fuzz harnesses compose
+//! them on equal footing. [`assert_invariants`] runs the always-on HTML ones.
 //!
 //! A separate crate (an `aozora-flavored-markdown` dev-dependency) so the
 //! predicates and their `proptest` dependency stay out of the production
@@ -177,6 +177,8 @@ pub enum Violation {
         violation: &'static str,
         snippet: String,
     },
+    /// I5 — `serialize` rewrote the interior of a fenced code block.
+    FenceRewritten { interior: String, snippet: String },
 }
 
 impl fmt::Display for Violation {
@@ -239,6 +241,10 @@ impl fmt::Display for Violation {
             Self::MarkupIncomplete { violation, snippet } => {
                 write!(f, "Tier K: ruby markup incomplete ({violation}): {snippet}")
             }
+            Self::FenceRewritten { interior, snippet } => write!(
+                f,
+                "I5: fenced code interior {interior:?} did not survive serialize: {snippet}",
+            ),
         }
     }
 }
@@ -552,6 +558,103 @@ pub fn check_escape_invariants(html: &str) -> Result<(), Violation> {
         }
     }
     Ok(())
+}
+
+/// I5 — `serialize` reproduces every fenced code interior byte for byte.
+///
+/// # Errors
+///
+/// [`Violation::FenceRewritten`] on the first one the lexer rewrote instead.
+pub fn check_fence_fidelity(src: &str, out: &str) -> Result<(), Violation> {
+    for interior in fence_interiors(src) {
+        if !out.contains(interior) {
+            // Anchored on whichever marker survived, so the excerpt lands on
+            // the offending fence rather than on the head of the document.
+            let anchor = if out.contains("```") { "```" } else { "~~~" };
+            return Err(Violation::FenceRewritten {
+                interior: interior.to_owned(),
+                snippet: first_occurrence_context(out, anchor, 80),
+            });
+        }
+    }
+    Ok(())
+}
+
+// The mask hides trigger *characters*; the canonicaliser's line-structure
+// rules run inside a fence regardless, and no mask reaches them. Four shapes
+// are therefore carved out, none of them evidence either way about masking:
+// CRLF becomes LF, a run of three or more newlines collapses to two, a PUA
+// codepoint either aborts masking (U+E000) or is substituted by the lexer
+// (U+E001..U+E004), and a decorative rule row gains a blank line ahead of it.
+// The first three are carved out wholesale rather than per fence — a newline
+// run reaches across the opening fence line, so a local test would miss it.
+fn fence_interiors(src: &str) -> Vec<&str> {
+    if src.contains('\r')
+        || src.contains("\n\n\n")
+        || src.chars().any(|c| ('\u{E000}'..='\u{E004}').contains(&c))
+    {
+        return Vec::new();
+    }
+    let mut interiors = Vec::new();
+    let mut open: Option<(u8, usize, usize)> = None;
+    let mut pos = 0;
+    for line in src.split_inclusive('\n') {
+        let end = pos + line.len();
+        match open {
+            None => open = fence_open(line).map(|(marker, width)| (marker, width, end)),
+            Some((marker, width, start)) if fence_close(line, marker, width) => {
+                if start < pos {
+                    interiors.push(&src[start..pos]);
+                }
+                open = None;
+            }
+            // An unterminated fence is dropped rather than run to EOF: its
+            // tail is where the trailing-newline trim lands.
+            Some(_) => {}
+        }
+        pos = end;
+    }
+    interiors.retain(|interior| !interior.lines().any(is_decorative_rule));
+    interiors
+}
+
+// A row the sibling parser reads as a block-level rule wherever it appears —
+// `generators::aozora_fragment` draws these on purpose, as Tier-H bait.
+fn is_decorative_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    matches!(first, '-' | '=' | '_') && trimmed.chars().all(|c| c == first)
+}
+
+// Deliberately a second implementation of the library's fence rules rather
+// than a call into it: a checker sharing the code under test cannot fail when
+// that code is wrong. Up to three spaces of indent, three or more markers,
+// tabs excluded — a mirror of `code_block_mask`, so a fence one recognises
+// and the other does not can never read as a violation.
+fn fence_open(line: &str) -> Option<(u8, usize)> {
+    let bytes = trim_fence_indent(line).as_bytes();
+    let &first = bytes.first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let width = bytes.iter().take_while(|&&b| b == first).count();
+    (width >= 3).then_some((first, width))
+}
+
+fn fence_close(line: &str, marker: u8, width: usize) -> bool {
+    let bytes = trim_fence_indent(line).as_bytes();
+    let run = bytes.iter().take_while(|&&b| b == marker).count();
+    run >= width
+        && bytes[run..]
+            .iter()
+            .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+fn trim_fence_indent(line: &str) -> &str {
+    let consumed = line.bytes().take(3).take_while(|&b| b == b' ').count();
+    &line[consumed..]
 }
 
 /// Every always-on invariant, with a panic message shaped so a libFuzzer
@@ -1490,6 +1593,66 @@ mod tests {
         let html = "<ruby>x<rp>(</rp><rt>y</rt></ruby>";
         let err = check_markup_completeness(html).expect_err("must fire");
         assert!(matches!(err, Violation::MarkupIncomplete { .. }));
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_passes_when_interior_survives() {
+        let src = "```\n｜青梅《おうめ》\n```\n";
+        check_fence_fidelity(src, src).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_fires_on_a_canonicalised_interior() {
+        // Exactly what an unmasked `serialize` used to return.
+        let src = "```\n｜青梅《おうめ》\n```\n";
+        let err = check_fence_fidelity(src, "```\n青梅《おうめ》\n```\n").expect_err("must fire");
+        assert!(matches!(err, Violation::FenceRewritten { .. }));
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_ignores_prose_outside_the_fence() {
+        // The one rewrite `serialize` is *supposed* to make.
+        let src = "｜青梅《おうめ》\n\n```\n｜奥多摩《おくたま》\n```\n";
+        let out = "青梅《おうめ》\n\n```\n｜奥多摩《おくたま》\n```\n";
+        check_fence_fidelity(src, out).unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_skips_an_unterminated_fence() {
+        let src = "```\n｜青梅《おうめ》\n";
+        check_fence_fidelity(src, "```\n青梅《おうめ》\n").unwrap();
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_skips_the_carved_out_sources() {
+        // CRLF, a 3+ newline run, a PUA codepoint and a decorative rule row
+        // each let the parser rewrite a fence body for reasons that are not
+        // masking. The last one is line structure no character mask reaches.
+        for src in [
+            "```\r\n｜青梅《おうめ》\r\n```\r\n",
+            "```\n｜青梅《おうめ》\n\n\nx\n```\n",
+            "\u{E000}\n```\n｜青梅《おうめ》\n```\n",
+            "```\n｜青梅《おうめ》\n------------\n```\n",
+        ] {
+            check_fence_fidelity(src, "").unwrap();
+        }
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_still_reads_the_other_fences() {
+        // A carve-out is per fence, not per document, for everything but the
+        // three whose effect reaches across the opening fence line.
+        let src = "```\n------------\n```\n\n```\n｜青梅《おうめ》\n```\n";
+        let err = check_fence_fidelity(src, "").expect_err("must fire");
+        assert!(matches!(err, Violation::FenceRewritten { .. }));
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_ignores_a_container_nested_fence() {
+        // The mask is column-anchored, so a fence behind a blockquote marker
+        // is not one this predicate can hold `serialize` to.
+        let src = "> ```\n> ｜青梅《おうめ》\n> ```\n";
+        check_fence_fidelity(src, "> ```\n> 青梅《おうめ》\n> ```\n").unwrap();
     }
 
     #[test]
