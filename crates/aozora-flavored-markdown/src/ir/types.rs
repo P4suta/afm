@@ -14,14 +14,18 @@ use serde::Serialize;
 #[doc(inline)]
 pub use crate::diagnostics::Span;
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// ADR-0013 sealed the IR enums; the containers around them are sealed for the
+// same reason — document-level metadata (a source digest, a schema tag) is
+// exactly the kind of field a later release adds.
+#[non_exhaustive]
 pub struct IrDocument {
     pub blocks: Vec<IrBlock>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(
     tag = "kind",
@@ -111,33 +115,42 @@ pub enum IrBlock {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+// See `IrDocument`: a row gains fields (a header flag, a span) without the
+// variants around it changing.
+#[non_exhaustive]
 pub struct IrTableRow {
     pub cells: Vec<Vec<IrInline>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+// As `IrTableRow`: GFM task-list state is the obvious next field here.
+#[non_exhaustive]
 pub struct IrListItem {
     pub children: Vec<IrBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// The IR enum ADR-0013 missed. `Default` here is the column's *absence* of an
+// alignment marker, which is also the variant a fresh column starts from.
+#[non_exhaustive]
 pub enum IrTableAlign {
     Left,
     Center,
     Right,
+    #[default]
     Default,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(
     tag = "kind",
@@ -228,22 +241,41 @@ pub enum IrInline {
 /// bridge maps them to editor positions without UTF-8 byte arithmetic —
 /// which the previous pseudo-byte representation silently broke for
 /// multi-byte CJK.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// Left open for literal construction for the reason `Span` is — see its
+// definition in `crate::diagnostics`.
 pub struct Range {
     pub start: Position,
     pub end: Position,
 }
 
+impl Range {
+    /// No ordering is imposed on the pair; `sourcepos_to_range` checks it.
+    #[must_use]
+    pub const fn new(start: Position, end: Position) -> Self {
+        Self { start, end }
+    }
+}
+
 /// `column` is grapheme-blind, matching comrak, so it suits editor surfaces
 /// but not byte slicing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
+// Left open for literal construction; see `Range`.
 pub struct Position {
     pub line: u32,
     pub column: u32,
+}
+
+impl Position {
+    /// Both coordinates are 1-based, as comrak reports them.
+    #[must_use]
+    pub const fn new(line: u32, column: u32) -> Self {
+        Self { line, column }
+    }
 }
 
 #[cfg(test)]

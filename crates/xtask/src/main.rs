@@ -493,7 +493,15 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // (ADR-0024): `upstream_diff`, `upstream_sync` and `copy_dir_recursive`, plus
 // their sub-command docs, took their prose with them. Bookkeeping after a cut,
 // not a decision.
-const MAX_DOC_LINES: u64 = 1_587;
+//
+// Raised by 6 for six new public items, one line each, none of them a
+// restatement of a signature: `Span::new` / `Span::len` / `Span::is_empty`,
+// `From<Span> for Range<usize>`, `Position::new` and `Range::new`. Each line
+// says the one thing the type does not — that the pair is unordered, that
+// `len` saturates on a reversed span, that the empty span is the shape a
+// document-scoped diagnostic carries, that the `From` is for slicing the
+// source, and that the coordinates are 1-based.
+const MAX_DOC_LINES: u64 = 1_593;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured

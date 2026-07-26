@@ -228,7 +228,7 @@ impl Options {
 }
 
 /// Output of [`render`].
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Rendered {
     /// HTML output, with every Aozora sentinel substituted.
@@ -241,7 +241,7 @@ pub struct Rendered {
 ///
 /// The IR lets the wasm bridge's JS renderer pick its own output target (DOM
 /// fragment, `CodeMirror` `RangeSet`, semantic tokens, …) from one call.
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedIr {
     pub ir: ir::IrDocument,
@@ -410,7 +410,7 @@ fn format_root<'a>(
 }
 
 /// One block of [`render_blocks_to_ir`]'s output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedBlock {
     /// Usually one block; empty for comrak constructs the IR does not model
