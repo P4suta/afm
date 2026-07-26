@@ -35,7 +35,9 @@ use std::str;
 
 use aozora::decode_sjis;
 use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, serialize};
-use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_sentinel_leak};
+use aozora_flavored_markdown_test_support::{
+    assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
+};
 
 #[test]
 fn parse_render_regressions_replay_cleanly() {
@@ -79,14 +81,18 @@ fn serialize_round_trip_regressions_replay_cleanly() {
     replay_each(
         "serialize_round_trip",
         |src| {
-            // I3 invariant: `serialize` is idempotent on its own
-            // output. `serialize(serialize(x)) == serialize(x)`.
+            // Mirrors the target: I3 (`serialize(serialize(x)) ==
+            // serialize(x)`) plus I5, which is the half a fixed point cannot
+            // see — a consistently wrong rewrite satisfies I3.
             let first = serialize(src);
             let second = serialize(&first);
             assert!(
                 first == second,
                 "I3 fixed-point broken for src={src:?}\n  first  = {first:?}\n  second = {second:?}"
             );
+            if let Err(e) = check_fence_fidelity(src, &first) {
+                panic!("I5 (fence fidelity) violated for src={src:?}: {e:?}");
+            }
         },
         ReplayInput::Utf8,
     );

@@ -521,7 +521,7 @@ mod tests {
         splice_into_ast(root, &comrak_arena, &constructs);
         let mut html = String::new();
         comrak::format_html(root, &opts, &mut html).expect("formatting to a String never fails");
-        code_block_mask::unmask_html(&html, &originals).into_owned()
+        code_block_mask::unmask(&html, &originals).into_owned()
     }
 
     #[test]

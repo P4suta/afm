@@ -5,16 +5,14 @@
 //! where every byte must reach `<pre><code>` literally. The parser is
 //! CommonMark-blind by design (ADR-0010), so teaching it about code-block
 //! context lives here: mask each trigger inside a fence with [`MASK_CHAR`],
-//! record the original in source order, and restore after
-//! `comrak::format_html` (whose escape pass touches only `<>&"`, leaving the
-//! mask alone).
+//! record the original in source order, and restore once the mask is back
+//! out — neither `comrak::format_html` nor the canonicaliser disturbs it.
 //!
 //! **Indented code blocks (CommonMark §4.4) are deliberately not masked.**
 //! Their boundaries depend on paragraph context a pre-pass would need a
 //! mini-parser to reproduce, and real 青空文庫 sources use fenced syntax. A
-//! notation inside one becomes a sentinel, and `crate::ast_splice` writes it
-//! back the way it does for an inline code span, so both spellings read the
-//! same even though only one is masked here.
+//! notation inside one becomes a sentinel that `crate::ast_splice` writes
+//! back as it does for an inline code span, so both spellings read the same.
 //!
 //! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
 //! returning a borrowed `Cow` and no originals. The sibling parser
@@ -31,9 +29,8 @@ pub(crate) const MASK_CHAR: char = '\u{E000}';
 /// Mirrors the sibling tokeniser; if the upstream list grows, so must this.
 const AOZORA_TRIGGERS: &[char] = &['｜', '《', '》', '［', '］', '※', '〔', '〕', '「', '」'];
 
-/// Returns the replaced characters in source order, for [`unmask_html`].
-/// Borrows without allocating when the source has no fence at all, or
-/// already contains [`MASK_CHAR`].
+/// Returns the replaced characters in source order, for [`unmask`]. Borrows
+/// without allocating when the source has no fence at all.
 #[must_use]
 pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>) {
     if source.contains(MASK_CHAR) || !source.contains(['`', '~']) {
@@ -80,22 +77,22 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
 }
 
 #[must_use]
-pub(crate) fn unmask_html<'a>(html: &'a str, originals: &[char]) -> Cow<'a, str> {
+pub(crate) fn unmask<'a>(text: &'a str, originals: &[char]) -> Cow<'a, str> {
     let mut cursor = originals;
-    unmask_html_from(html, &mut cursor)
+    unmask_from(text, &mut cursor)
 }
 
-/// Restores in source-scan order — the order the masks appear in the HTML —
+/// Restores in source-scan order — the order the masks appear in `text` —
 /// advancing `originals` past what it consumed, so a caller formatting one
 /// block at a time resumes instead of replaying. Extra masks flow through.
 #[must_use]
-pub(crate) fn unmask_html_from<'a>(html: &'a str, originals: &mut &[char]) -> Cow<'a, str> {
-    if originals.is_empty() || !html.contains(MASK_CHAR) {
-        return Cow::Borrowed(html);
+pub(crate) fn unmask_from<'a>(text: &'a str, originals: &mut &[char]) -> Cow<'a, str> {
+    if originals.is_empty() || !text.contains(MASK_CHAR) {
+        return Cow::Borrowed(text);
     }
-    let mut out = String::with_capacity(html.len());
+    let mut out = String::with_capacity(text.len());
     let mut idx = 0;
-    for ch in html.chars() {
+    for ch in text.chars() {
         if ch == MASK_CHAR && idx < originals.len() {
             out.push(originals[idx]);
             idx += 1;
@@ -107,7 +104,6 @@ pub(crate) fn unmask_html_from<'a>(html: &'a str, originals: &mut &[char]) -> Co
     Cow::Owned(out)
 }
 
-/// Line-state of the masking scan.
 #[derive(Debug, Clone, Copy)]
 enum Phase {
     Outside,
@@ -136,8 +132,7 @@ fn parse_fence_open(line: &str) -> Option<FenceOpen> {
     })
 }
 
-/// Same marker as `open`, at least as wide, up to 3 spaces of indent, and
-/// nothing but whitespace after the run.
+/// Same marker as `open`, at least as wide, and nothing but whitespace after.
 fn is_fence_close(line: &str, open: FenceOpen) -> bool {
     let stripped = trim_leading_indent(line, 3);
     let bytes = stripped.as_bytes();
@@ -151,9 +146,8 @@ fn is_fence_close(line: &str, open: FenceOpen) -> bool {
 }
 
 /// Tabs are deliberately not expanded. CommonMark counts them in the indent
-/// budget, but this is a pre-pass rather than a conformance check, so a line
-/// leading with a tab simply fails fence detection — a strict subset of
-/// valid fences, and one that covers every real-world source seen.
+/// budget, but this is a pre-pass rather than a conformance check, so a
+/// tab-led line simply fails fence detection — a strict subset, enough here.
 fn trim_leading_indent(line: &str, max: usize) -> &str {
     let bytes = line.as_bytes();
     let cap = min(bytes.len(), max);
@@ -249,7 +243,7 @@ mod tests {
             "<pre><code>{}\n</code></pre>\n",
             &masked[4..masked.len() - 4]
         );
-        let restored = unmask_html(&pseudo_html, &originals);
+        let restored = unmask(&pseudo_html, &originals);
         assert!(restored.contains('｜'), "got: {restored}");
         assert!(restored.contains('《'));
         assert!(restored.contains('》'));
@@ -257,7 +251,7 @@ mod tests {
 
     #[test]
     fn unmask_with_empty_originals_is_a_noop() {
-        assert_eq!(unmask_html("hello", &[]).as_ref(), "hello");
+        assert_eq!(unmask("hello", &[]).as_ref(), "hello");
     }
 
     #[test]
@@ -266,7 +260,7 @@ mod tests {
         // recorded. The extras flow through verbatim — benign.
         let originals = vec!['｜'];
         let masked = format!("{MASK_CHAR}{MASK_CHAR}");
-        let restored = unmask_html(&masked, &originals);
+        let restored = unmask(&masked, &originals);
         assert_eq!(restored.chars().filter(|&c| c == '｜').count(), 1);
         assert_eq!(restored.chars().filter(|&c| c == MASK_CHAR).count(), 1);
     }
@@ -380,7 +374,7 @@ mod proptests {
         #[test]
         fn mask_then_unmask_is_identity(src in aozora_or_commonmark()) {
             let (masked, originals) = mask_code_block_triggers(&src);
-            let restored = unmask_html(&masked, &originals);
+            let restored = unmask(&masked, &originals);
             prop_assert_eq!(&*restored, &src);
         }
 
