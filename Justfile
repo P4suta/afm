@@ -534,6 +534,32 @@ strict-code:
         failed=1
     fi
 
+    # ---- second HTML escape table ------------------------------------------
+    # One escape table, in `aozora_flavored_markdown::escape_html`. A copy is
+    # not a style problem: the EPUB envelope kept its own for months, the two
+    # agreed character for character, and nothing in the workspace could have
+    # noticed if a fix had landed on one side only — an escaper is audited for
+    # what it MISSES, and a test suite that renders one of two tables green is
+    # exactly the shape that hides it. This is the only gate that can state
+    # "one implementation", so it is the gate; a behaviour test cannot fail on
+    # duplication while both copies still agree.
+    #
+    # A table is a source character mapped to its entity, in either idiom:
+    # `'&' => "&amp;"` and `.replace('&', "&amp;")`. Scoped to `src/`, so a
+    # test may still write the mapping down as an oracle — a checker that
+    # called the code under test could not fail when that code is wrong.
+    escape_owner='crates/aozora-flavored-markdown/src/lib.rs'
+    escape_files=(crates/*/src/**/*.rs)
+    escape_from="('\\\\?[&<>\"']'|\"[&<>']\")"
+    escape_to='"&(amp|lt|gt|quot|apos|#39|#x27);"'
+    escape_hits=$(grep -nE "$escape_from[[:space:]]*(=>|,)[^\"]*$escape_to" "${escape_files[@]}" 2>/dev/null \
+        | grep -v "^$escape_owner:" || true)
+    if [[ -n "$escape_hits" ]]; then
+        echo '==> forbidden: a second HTML escape table (call escape_html instead)' >&2
+        echo "$escape_hits" >&2
+        failed=1
+    fi
+
     if [[ $failed -ne 0 ]]; then
         echo "" >&2
         echo "strict-code check failed. Refactor the offending sites; do not silence." >&2
