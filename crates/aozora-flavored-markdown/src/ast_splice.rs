@@ -41,6 +41,7 @@ use crate::constructs::{
     BlockSentinelKind, ConstructCursor, Constructs, HeadingHint, INLINE_SENTINEL, ParaScan,
     block_sentinel_of, inline_is_dropped, is_sentinel_char, paragraph_sole_block_sentinel,
 };
+use crate::push_html_escaped;
 
 /// After this returns the AST carries no sentinel character, so
 /// `comrak::format_html` emits fully resolved HTML in one verbatim pass.
@@ -487,19 +488,6 @@ fn classify(value: &NodeValue) -> DispatchAction {
             DispatchAction::Skip
         }
         _ => DispatchAction::Recurse,
-    }
-}
-
-fn push_html_escaped(out: &mut String, s: &str) {
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
     }
 }
 

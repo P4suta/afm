@@ -399,6 +399,33 @@ pub fn to_html(input: &str) -> String {
     render(input, &Options::default()).html
 }
 
+/// Escape `&`, `<`, `>`, `"` and `'`, so one call is right in HTML text and
+/// in a quoted attribute alike. `'` is numeric — HTML 4 has no `&apos;`.
+#[must_use]
+pub fn escape_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    push_html_escaped(&mut out, input);
+    out
+}
+
+// The table itself, appending so a caller already building a buffer pays for
+// no second one. This is the workspace's only copy: the EPUB envelope, the
+// one other place text reaches markup by interpolation rather than through a
+// serialiser, escapes through `escape_html` above instead of keeping a second
+// table that could gain a character on its own.
+pub(crate) fn push_html_escaped(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
 /// Render aozora-flavored-markdown source to a structured IR + HTML + diagnostics.
 ///
 /// Notation that changes the document's *shape* rather than its content is

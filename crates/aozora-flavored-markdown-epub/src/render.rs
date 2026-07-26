@@ -4,7 +4,7 @@
 
 use std::str;
 
-use aozora_flavored_markdown::{Options, render};
+use aozora_flavored_markdown::{Options, escape_html, render};
 
 use crate::discover::{Encoding, Manuscript, SourceFile, encoding_of};
 use crate::{ChapterReport, Error, Result};
@@ -77,8 +77,10 @@ fn decode_source(source: &SourceFile) -> Result<String> {
 }
 
 fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
-    let title = escape_attr(title);
-    let lang = escape_attr(lang);
+    // The renderer owns the escape table; a copy here could gain a character
+    // on its own and leave one of the two sides open.
+    let title = escape_html(title);
+    let lang = escape_html(lang);
     // The body opts into the bundled theme via `aozora-md-root`. The
     // writing mode (horizontal vs. vertical) is decided by which theme
     // `aozora-md.css` carries, selected per book in `compose`, so the
@@ -100,14 +102,6 @@ fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
     )
 }
 
-fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 #[cfg(test)]
 mod tests {
     // The stylesheets this crate bundles come from the renderer's `theme`
@@ -122,7 +116,12 @@ mod tests {
     use std::path::PathBuf;
 
     use aozora_flavored_markdown::theme;
-    use aozora_flavored_markdown_test_support::check_well_formed;
+    use aozora_flavored_markdown_test_support::{check_well_formed, config};
+    use proptest::prelude::*;
+    use quick_xml::XmlVersion;
+    use quick_xml::escape::resolve_predefined_entity;
+    use quick_xml::events::{BytesRef, Event};
+    use quick_xml::reader::Reader;
 
     use super::*;
 
@@ -138,13 +137,109 @@ mod tests {
         "図 <b>",
     ];
 
+    // The alphabet the two slots are quantified over: the five characters the
+    // escape table owns, the entity syntax itself (so an escaper that skips
+    // what already looks like an entity gives itself away), and ordinary
+    // text. Two classes are deliberately absent, and each absence is a bug
+    // this crate still has rather than a property of the escaper:
+    //
+    //  * `\t`, `\n`, `\r`. Attribute-value normalisation (XML 1.0 §3.3.3)
+    //    turns each into a space before a parser hands the value over, and
+    //    end-of-line normalisation (§2.11) rewrites CR in text content to LF.
+    //    Markup significance is all `escape_html` covers, so a `book.toml`
+    //    `language = "ja\n"` and a chapter file named `序\r.md` both reach
+    //    the reader altered. Only numeric references (`&#9;` `&#10;` `&#13;`)
+    //    survive normalisation, and nothing emits them.
+    //  * C0 controls and the non-characters. XML 1.0 §2.2 forbids them
+    //    outright, so a file stem holding one yields a chapter that is not
+    //    well-formed XML at all. `quick_xml` does not enforce that
+    //    constraint (its own docs say so of `resolve_char_ref`) and neither
+    //    does anything else here — but epubcheck and a reading system do.
+    const ENVELOPE_ATOMS: &[&str] = &[
+        "&", "<", ">", "\"", "'", "amp;", "#39;", "lt", "a", "第", " ", "-",
+    ];
+
+    // The hostile pool stays reachable by selection rather than being
+    // replaced: the shapes someone thought to write down keep running on
+    // every draw budget, and the generated ones extend past them.
+    fn envelope_text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            prop::sample::select(HOSTILE_TITLES).prop_map(str::to_owned),
+            prop::collection::vec(prop::sample::select(ENVELOPE_ATOMS), 0..8)
+                .prop_map(|parts| parts.concat()),
+        ]
+    }
+
+    // What a conforming XML parser hands back for the two interpolated slots.
+    // `quick_xml` is the oracle rather than `check_well_formed` because
+    // balance is only half of what the envelope owes: a title that arrives as
+    // `&amp;amp;` leaves every tag matched and is still corrupt, and a
+    // language tag that lost its escaping is only visible as *imbalance* when
+    // the payload happens to open a tag.
+    fn read_back(xhtml: &str) -> (String, String) {
+        let mut reader = Reader::from_str(xhtml);
+        let decoder = reader.decoder();
+        let (mut title, mut lang) = (String::new(), String::new());
+        let mut in_title = false;
+        loop {
+            match reader.read_event().expect("the envelope must parse as XML") {
+                Event::Eof => break,
+                Event::Start(tag) => {
+                    in_title = tag.name().as_ref() == b"title";
+                    if tag.name().as_ref() == b"html" {
+                        for attr in tag.attributes() {
+                            let attr = attr.expect("every attribute must parse");
+                            if attr.key.as_ref() == b"lang" {
+                                lang = attr
+                                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                                    .expect("the language tag must decode")
+                                    .into_owned();
+                            }
+                        }
+                    }
+                }
+                Event::End(_) => in_title = false,
+                Event::Text(text) if in_title => title.push_str(
+                    &text
+                        .xml10_content()
+                        .expect("the title text must decode as XML 1.0"),
+                ),
+                Event::GeneralRef(reference) if in_title => {
+                    title.push_str(&resolve(&reference));
+                }
+                _ => {}
+            }
+        }
+        (title, lang)
+    }
+
+    // `&amp;` and its four siblings arrive as events of their own, so a title
+    // is reassembled from text and references rather than read whole.
+    fn resolve(reference: &BytesRef<'_>) -> String {
+        if let Some(ch) = reference
+            .resolve_char_ref()
+            .expect("a numeric reference must resolve")
+        {
+            return ch.into();
+        }
+        let name = reference.decode().expect("a reference name must decode");
+        resolve_predefined_entity(&name)
+            .expect("the envelope emits no entity outside the predefined five")
+            .to_owned()
+    }
+
     // Every other XHTML in the package goes through `quick_xml`, which escapes
     // on the caller's behalf. This wrapper is the one document built by string
     // interpolation, so the title and the language tag are the two places
-    // user-controlled text reaches markup with only `escape_attr` in front of
+    // user-controlled text reaches markup with only `escape_html` in front of
     // it — and an unescaped `<` there closes `<title>` early and unbalances
     // the whole document. The body is a real render rather than a literal, so
     // the check covers the seam between the envelope and the HTML too.
+    //
+    // Balance is the whole of what it sees, and less than it looks: a `"`
+    // that escapes its attribute moves no tag boundary at all, because the
+    // same table escapes the `<` that would have opened one. Drop the `"` arm
+    // and this test still passes. The property below is the other half.
     #[test]
     fn the_xhtml_envelope_stays_balanced_whatever_the_title_and_language_hold() {
         for title in HOSTILE_TITLES {
@@ -162,6 +257,28 @@ mod tests {
                     "an unescaped tag reached the envelope: {xhtml}"
                 );
             }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config::default())]
+
+        // Balance is what the pool above states; fidelity is what only a real
+        // parser can. Both slots are quantified because they sit in different
+        // XML contexts — element content and a quoted attribute value — and
+        // the crate now trusts one escape table to be right in both. A table
+        // that stopped escaping `"` keeps `<title>` intact and blows the
+        // attribute open; one that double-encoded would keep every document
+        // balanced and hand the reader the wrong book title.
+        #[test]
+        fn the_envelope_hands_back_the_title_and_language_it_was_given(
+            title in envelope_text(),
+            lang in envelope_text(),
+        ) {
+            let xhtml = wrap_xhtml(&title, "<p>本文</p>", &lang);
+            let (read_title, read_lang) = read_back(&xhtml);
+            prop_assert_eq!(read_title, title);
+            prop_assert_eq!(read_lang, lang);
         }
     }
 
