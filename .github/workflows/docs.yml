@@ -46,7 +46,7 @@ jobs:
           # Fail the deploy build on any rustdoc warning so a doc
           # regression can't ship even if ci.yml's `doc` gate is weakened.
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --workspace --no-deps --document-private-items
+        run: cargo doc --locked --workspace --no-deps --document-private-items
 
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
@@ -61,10 +61,11 @@ jobs:
           version: 'v0.15.0'
 
       - name: Build aozora-flavored-markdown-wasm package
-        run: wasm-pack build crates/aozora-flavored-markdown-wasm --target bundler --release --out-dir pkg --out-name aozora_flavored_markdown_wasm
+        # `-- --locked` reaches the `cargo build` wasm-pack shells out to.
+        run: wasm-pack build crates/aozora-flavored-markdown-wasm --target bundler --release --out-dir pkg --out-name aozora_flavored_markdown_wasm -- --locked
 
       - name: Install playground deps
-        run: cd playground && bun install
+        run: cd playground && bun install --frozen-lockfile
 
       - name: Build playground
         run: cd playground && bun run build

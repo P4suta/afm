@@ -77,7 +77,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: msrv
-      - run: cargo check --workspace --all-targets
+      # `--locked` for the same reason every Justfile recipe carries it: this
+      # job resolves on a bare runner, outside the dev image, so without it a
+      # newer-than-Cargo.lock dependency could be what actually proves the MSRV.
+      - run: cargo check --locked --workspace --all-targets
 
   commitlint:
     runs-on: ubuntu-latest
