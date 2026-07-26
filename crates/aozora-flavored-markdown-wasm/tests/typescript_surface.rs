@@ -32,7 +32,7 @@ use aozora_flavored_markdown::ir::{
     Block, Document, Inline, ListItem, Position, Range, Span, TableAlign, TableRow,
 };
 use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Options, Severity, render_to_ir};
-use aozora_flavored_markdown_wasm::{BlockResult, BlocksResult, RenderOptions, RenderResult};
+use aozora_flavored_markdown_wasm::{BlockResult, BlocksResult, RenderResult};
 use serde_json::Value;
 use tsify::Tsify;
 
@@ -49,7 +49,7 @@ use tsify::Tsify;
 fn tsify_declarations() -> Vec<&'static str> {
     vec![
         <RenderResult as Tsify>::DECL,
-        <RenderOptions as Tsify>::DECL,
+        <Options as Tsify>::DECL,
         <BlockResult as Tsify>::DECL,
         <BlocksResult as Tsify>::DECL,
         <Document as Tsify>::DECL,

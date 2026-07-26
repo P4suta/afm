@@ -42,71 +42,24 @@ pub struct RenderResult {
     diagnostics: Vec<Diagnostic>,
 }
 
-/// Missing fields fall back to `Options::default()`.
-#[derive(Debug, Clone, Copy, Default, serde::Deserialize, Tsify)]
-#[tsify(from_wasm_abi)]
-#[serde(rename_all = "camelCase")]
-pub struct RenderOptions {
-    aozora_enabled: Option<bool>,
-    source_line_anchors: Option<bool>,
-}
-
-fn build_options(opts: RenderOptions) -> Options {
-    let mut base = Options::default();
-    if let Some(v) = opts.aozora_enabled {
-        base = base.with_aozora(v);
-    }
-    if let Some(v) = opts.source_line_anchors {
-        base = base.with_source_line_anchors(v);
-    }
-    base
-}
-
-/// The parser core's span offsets are `u32`, so a longer source trips an
-/// assert that would abort the whole Wasm instance under `panic = "abort"`.
-const MAX_SOURCE_BYTES: usize = u32::MAX as usize;
-
-/// Takes the length rather than the string, so the boundary is testable
-/// without allocating a 4 GiB buffer.
-///
-/// # Errors
-///
-/// When `byte_len > u32::MAX`.
-const fn source_len_within_span_limit(byte_len: usize) -> Result<(), &'static str> {
-    if byte_len > MAX_SOURCE_BYTES {
-        return Err("source exceeds 4 GiB (u32::MAX) span limit");
-    }
-    Ok(())
-}
-
-/// Checking `source.len()` is exact even though the pipeline masks
-/// code-block triggers first: masking is a 1:1 substitution between
-/// equal-width UTF-8 characters.
-///
-/// # Errors
-///
-/// When `source.len()` exceeds [`u32::MAX`].
-fn guard_source_len(source: &str) -> Result<(), JsValue> {
-    source_len_within_span_limit(source.len()).map_err(JsValue::from_str)
-}
-
 /// Render aozora-flavored-markdown source to IR + HTML + diagnostics.
 ///
-/// # Errors
-///
-/// When `source` exceeds the parser core's ~4 GiB span limit. A malformed
-/// `options` surfaces as a wasm-bindgen `TypeError` instead, since `tsify`
-/// owns the ABI decode.
+/// Omitting `options` is `Options::default()`, the Aozora dialect; a partial
+/// object fills the rest from it.
+// Infallible, because every way this could fail is one the core already
+// answers: a source past the span budget comes back as an empty render
+// carrying a `source_too_large` diagnostic, which the envelope below forwards
+// like any other. A malformed `options` never reaches here at all — `tsify`
+// owns the ABI decode and throws a `TypeError` from it.
+#[must_use]
 #[wasm_bindgen(js_name = render)]
-pub fn render(source: &str, options: Option<RenderOptions>) -> Result<RenderResult, JsValue> {
-    guard_source_len(source)?;
-    let resolved = build_options(options.unwrap_or_default());
-    let rendered = render_to_ir(source, &resolved);
-    Ok(RenderResult {
+pub fn render(source: &str, options: Option<Options>) -> RenderResult {
+    let rendered = render_to_ir(source, &options.unwrap_or_default());
+    RenderResult {
         ir: rendered.ir,
         html: rendered.html,
         diagnostics: rendered.diagnostics,
-    })
+    }
 }
 
 /// Aozora-only inline mode for the obsidian inline post-processor.
@@ -115,12 +68,9 @@ pub fn render(source: &str, options: Option<RenderOptions>) -> Result<RenderResu
 /// in the sibling repo (ADR-0010) and this crate composes — never extends —
 /// its public API (ADR-0021). The separate name lets callers target the mode
 /// without committing to the `render` shape.
-///
-/// # Errors
-///
-/// As [`render`].
+#[must_use]
 #[wasm_bindgen(js_name = renderAozoraOnly)]
-pub fn render_aozora_only(text: &str) -> Result<RenderResult, JsValue> {
+pub fn render_aozora_only(text: &str) -> RenderResult {
     render(text, None)
 }
 
@@ -152,22 +102,17 @@ pub struct BlocksResult {
 /// One entry per top-level comrak block, so the obsidian bridge can check
 /// its `AbortSignal` between them (ADR-0009 chunked cancellation).
 ///
-/// # Errors
-///
-/// As [`render`].
+/// `options` as in [`render`], including the oversize degradation — which
+/// arrives here as an empty `blocks` beside the diagnostic.
+#[must_use]
 #[wasm_bindgen(js_name = renderBlocks)]
-pub fn render_blocks(
-    source: &str,
-    options: Option<RenderOptions>,
-) -> Result<BlocksResult, JsValue> {
-    guard_source_len(source)?;
-    let resolved = build_options(options.unwrap_or_default());
+pub fn render_blocks(source: &str, options: Option<Options>) -> BlocksResult {
     let RenderedBlocks {
         blocks,
         diagnostics,
         ..
-    } = render_blocks_core(source, &resolved);
-    Ok(BlocksResult {
+    } = render_blocks_core(source, &options.unwrap_or_default());
+    BlocksResult {
         blocks: blocks
             .into_iter()
             .map(|b| BlockResult {
@@ -177,7 +122,7 @@ pub fn render_blocks(
             })
             .collect(),
         diagnostics,
-    })
+    }
 }
 
 // =====================================================================
@@ -339,33 +284,5 @@ impl AozoraDocument {
             "data": entries,
         })
         .to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{guard_source_len, source_len_within_span_limit};
-
-    /// `u32::MAX` is the inclusive upper bound, matching the parser core's
-    /// own assert. Every render entry point calls the guard so an oversize
-    /// source surfaces as `Err` instead of tearing down the Wasm instance.
-    #[test]
-    fn source_len_guard_matches_u32_span_boundary() {
-        source_len_within_span_limit(0).expect("empty source is in range");
-        source_len_within_span_limit(4096).expect("4 KiB source is in range");
-        source_len_within_span_limit(u32::MAX as usize)
-            .expect("u32::MAX bytes is the inclusive upper bound");
-        let err = source_len_within_span_limit(u32::MAX as usize + 1)
-            .expect_err("u32::MAX + 1 bytes must be rejected");
-        assert!(err.contains("u32::MAX"), "error mentions the limit: {err}");
-    }
-
-    /// `.expect()` rather than `assert!(….is_ok())` to satisfy clippy's
-    /// `assertions_on_result_states`.
-    #[test]
-    fn guard_accepts_typical_source() {
-        guard_source_len("").expect("empty source must be accepted");
-        guard_source_len("｜漢字《かんじ》 and **markdown**")
-            .expect("typical mixed source must be accepted");
     }
 }

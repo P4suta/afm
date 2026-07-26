@@ -94,6 +94,18 @@ use crate::constructs::Constructs;
 /// at all, so no configuration reachable from outside this crate can turn a
 /// render into an XSS sink.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+// One direction only, unlike the IR and the diagnostic envelope: a host reads
+// a knob set out of its own settings and never writes one back, so
+// `Serialize` would be surface with no caller.
+//
+// `default` earns its place twice. It is what lets a caller send only the
+// knob it means to change, and `tsify` reads the same attribute to mark every
+// field optional in the emitted `.d.ts` — so the shape a browser host is
+// typed against is the shape serde will actually accept.
+#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase"))]
+#[cfg_attr(feature = "tsify", tsify(from_wasm_abi))]
 #[non_exhaustive]
 pub struct Options {
     aozora: bool,
@@ -108,10 +120,14 @@ pub struct Options {
     // Raw HTML, and the GFM filter that only bites when raw HTML is passing
     // through, exist for the conformance runners alone. The fields are not
     // compiled into a released build, so there is nothing for a public setter
-    // to reach even by accident.
+    // to reach even by accident — and `skip` keeps the test build's own
+    // deserialiser off them too, so no spelling of the wire form reaches
+    // `render.unsafe` either.
     #[cfg(test)]
+    #[cfg_attr(feature = "serde", serde(skip))]
     raw_html: bool,
     #[cfg(test)]
+    #[cfg_attr(feature = "serde", serde(skip))]
     tagfilter: bool,
 }
 
@@ -928,6 +944,38 @@ mod tests {
             Options::default().aozora,
             "default must run the aozora pass"
         );
+    }
+
+    // The wire form is the other way in, and `raw_html` / `tagfilter` are
+    // `#[cfg(test)]` — so this build is the only one in which they exist,
+    // and therefore the only place a deserialiser that reached them could
+    // ever be caught. The integration sweep over the options surface links
+    // the released shape, where both fields are simply absent: it would pass
+    // for the wrong reason, whatever the attributes said. `#[serde(skip)]`
+    // is what holds the line here, and nothing else in the workspace sees it.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn no_wire_spelling_reaches_raw_html_or_the_tagfilter() {
+        for wire in [
+            r#"{"rawHtml": true}"#,
+            r#"{"raw_html": true}"#,
+            r#"{"unsafe": true}"#,
+            r#"{"tagfilter": true}"#,
+            r#"{"tagFilter": true}"#,
+            r#"{"render": {"unsafe": true}}"#,
+            r#"{"aozora": true, "rawHtml": true, "tagfilter": true}"#,
+        ] {
+            let opts: Options = serde_json::from_str(wire).unwrap();
+            let comrak = opts.comrak();
+            assert!(
+                !comrak.render.r#unsafe,
+                "{wire} turned raw-HTML passthrough on"
+            );
+            assert!(
+                !comrak.extension.tagfilter,
+                "{wire} turned the GFM tagfilter on"
+            );
+        }
     }
 
     // -------------------------------------------------------------------
