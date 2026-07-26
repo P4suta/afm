@@ -157,7 +157,11 @@ comrak = { version = "0.52.0", default-features = false }
 # Error handling
 thiserror = "2.0.18"
 anyhow    = "1.0"
-miette    = { version = "7.6.0", features = ["fancy"] }
+# Feature-minimal on purpose: inheritance unions features, so a member can
+# only ever widen this entry. The library implements the `Diagnostic` trait
+# and needs nothing else; `derive` and the graphical `fancy` renderer are
+# opted into by the members that report with them.
+miette    = { version = "7.6.0", default-features = false }
 
 # Parsing helpers
 regex                 = "1.12"

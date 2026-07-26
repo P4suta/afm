@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 /// The features that exist today, as `crate/feature`. Named so this cannot
 /// pass by parsing nothing — the failure mode of every hand-written reader.
 const KNOWN_FEATURES: &[&str] = &[
+    "aozora-flavored-markdown/miette",
     "aozora-flavored-markdown/theme",
     "aozora-flavored-markdown/tsify",
     "aozora-flavored-markdown-wasm/default",
@@ -215,6 +216,198 @@ tsify = [\n\"dep:tsify\",\n\"dep:wasm-bindgen\",\n] # bindings
         "`html = []` enabled nothing"
     );
     assert_eq!(features[3].enables, ["dep:tsify", "dep:wasm-bindgen"]);
+}
+
+// ---------------------------------------------------------------------------
+// what a feature drags in — the renderer must stay out of the libraries
+// ---------------------------------------------------------------------------
+//
+// A feature is a published promise, and so is its cost. The `miette` feature
+// promises `impl miette::Diagnostic` and nothing else: the trait is a handful
+// of methods, while miette's `fancy` renderer pulls `owo-colors`,
+// `supports-color`, `supports-hyperlinks`, `terminal_size`, `textwrap` and a
+// backtrace crate. Cargo features are additive and unify across a build, so a
+// library that enables `fancy` spends every consumer's dependency budget on a
+// terminal renderer that consumer may never call — and cannot opt out of.
+//
+// Nothing else in the workspace can see this. `cargo-shear` and `cargo-udeps`
+// find unused dependencies, not over-featured ones; `cargo-deny` reads
+// licences and advisories; clippy and rustc never see a manifest. The gate
+// that was missing is a reader of the dependency tables, and the trap it
+// closes is specific: workspace inheritance *unions* features, so a member
+// can only ever widen `[workspace.dependencies]`. While that entry carried
+// `features = ["fancy"]`, no member could take the trait alone — the library
+// would have inherited the renderer whatever it wrote.
+
+/// The raw value of one dependency entry — `miette` under `[dependencies]`
+/// gives `{ workspace = true, features = ["fancy"] }`.
+///
+/// Single-line entries only, which is every one this workspace writes. A
+/// wrapped one yields the first line and would read as naming no feature, so
+/// each caller below asserts on an entry it names rather than on the sweep
+/// alone.
+fn dependency_entry(manifest: &str, table: &str, name: &str) -> Option<String> {
+    let mut in_table = false;
+    for line in manifest.lines() {
+        let code = line.split_once('#').map_or(line, |(before, _)| before);
+        let trimmed = code.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_table = trimmed == table;
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if in_table && key.trim().trim_matches('"') == name {
+            return Some(value.trim().to_owned());
+        }
+    }
+    None
+}
+
+fn manifest_text(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
+}
+
+/// Whether a dependency entry turns miette's graphical renderer on.
+fn enables_the_renderer(entry: &str) -> bool {
+    entry.contains("\"fancy\"")
+}
+
+/// The crates that may.
+///
+/// A binary chooses a renderer because a binary is what prints; the two CLIs
+/// install miette's graphical handler on startup, so `fancy` is theirs by
+/// right.
+///
+/// `aozora-flavored-markdown-epub` is on this list and does not belong on it:
+/// it is a published library with no binary of its own, it uses miette only
+/// for `#[derive(Diagnostic)]` on its error type, and its `fancy` is a
+/// leftover of the workspace entry that used to force it on everyone. Named
+/// here rather than left invisible — dropping it is a change to the dependency
+/// graph, which is not this rule's to make.
+const MAY_ENABLE_THE_RENDERER: &[&str] = &[
+    "aozora-flavored-markdown-cli",
+    "aozora-flavored-markdown-epub-cli",
+    "aozora-flavored-markdown-epub",
+];
+
+#[test]
+fn the_workspace_miette_entry_stays_narrow_enough_for_a_library_to_inherit() {
+    let entry = dependency_entry(
+        &manifest_text(&workspace_root().join("Cargo.toml")),
+        "[workspace.dependencies]",
+        "miette",
+    )
+    .expect("the workspace must declare `miette`; retarget this rule rather than deleting it");
+    assert!(
+        entry.contains("default-features = false"),
+        "the inherited `miette` entry must be feature-minimal: inheritance unions features, so \
+         whatever this entry turns on, no member can turn back off. Found: {entry}"
+    );
+    assert!(
+        !entry.contains('['),
+        "the inherited `miette` entry names a feature, which every member then carries whether \
+         it reports with miette or merely implements the trait. Move it down to the members \
+         that render. Found: {entry}"
+    );
+}
+
+#[test]
+fn the_library_takes_the_trait_and_the_cli_takes_the_renderer() {
+    let crates = workspace_root().join("crates");
+    let library = dependency_entry(
+        &manifest_text(&crates.join("aozora-flavored-markdown/Cargo.toml")),
+        "[dependencies]",
+        "miette",
+    )
+    .expect("the library must declare `miette` behind its feature; retarget rather than delete");
+    assert!(
+        library.contains("optional = true"),
+        "`miette` must stay optional, or the non-default feature that gates it is a fiction: \
+         {library}"
+    );
+    assert!(
+        !library.contains('['),
+        "the library must name no miette feature — it implements the trait and renders nothing. \
+         Found: {library}"
+    );
+
+    // The CLI is what turns the feature on, and it is also what keeps the
+    // library's own `#[cfg(feature = "miette")]` unit tests inside the
+    // workspace build `just test` runs — feature resolution is per package
+    // across the whole build, so the CLI's choice is what compiles them.
+    // Dropping it here would take those tests out of every gate at once,
+    // without failing one.
+    let cli = dependency_entry(
+        &manifest_text(&crates.join("aozora-flavored-markdown-cli/Cargo.toml")),
+        "[dependencies]",
+        "aozora-flavored-markdown",
+    )
+    .expect("the CLI must depend on the library; retarget rather than delete");
+    assert!(
+        cli.contains("\"miette\""),
+        "the CLI must enable the library's `miette` feature: it reports through miette, and a \
+         non-default feature no member enables is compiled by no gate. Found: {cli}"
+    );
+}
+
+#[test]
+fn only_a_crate_that_prints_turns_miettes_graphical_renderer_on() {
+    let enabling: Vec<String> = member_manifests()
+        .into_iter()
+        .filter(|(_, manifest)| {
+            dependency_entry(&manifest_text(manifest), "[dependencies]", "miette")
+                .is_some_and(|entry| enables_the_renderer(&entry))
+        })
+        .map(|(krate, _)| krate)
+        .collect();
+    assert!(
+        !enabling.is_empty(),
+        "no member names `fancy` at all; the reader must be retargeted, not deleted — this is \
+         also what the workspace entry looked like when it forced the renderer on everyone"
+    );
+    let unexpected: Vec<&String> = enabling
+        .iter()
+        .filter(|krate| !MAY_ENABLE_THE_RENDERER.contains(&krate.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "{unexpected:?} enable miette's `fancy` renderer. Features unify across a build, so a \
+         library that does spends its consumers' dependency budget on a terminal renderer they \
+         cannot opt out of"
+    );
+}
+
+#[test]
+fn the_dependency_reader_scopes_a_table_the_way_cargo_does() {
+    // The reader itself, on the two shapes it must not confuse: a key of the
+    // same name in another table, and the `[features]` entry that shares the
+    // dependency's name because it gates it.
+    let manifest = "\
+[dependencies]
+miette = { workspace = true, optional = true }
+
+[dev-dependencies]
+miette = { workspace = true, features = [\"fancy\"] }
+
+[features]
+miette = [\"dep:miette\"]
+";
+    assert_eq!(
+        dependency_entry(manifest, "[dependencies]", "miette").as_deref(),
+        Some("{ workspace = true, optional = true }"),
+        "a table must be read to its own end"
+    );
+    assert!(
+        !enables_the_renderer(&dependency_entry(manifest, "[dependencies]", "miette").unwrap()),
+        "the `fancy` two tables down is not this entry's"
+    );
+    assert_eq!(
+        dependency_entry(manifest, "[dependencies]", "serde"),
+        None,
+        "an absent dependency must read as absent, not as the next entry"
+    );
 }
 
 #[test]

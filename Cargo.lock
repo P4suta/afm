@@ -136,6 +136,7 @@ dependencies = [
  "criterion",
  "dhat",
  "insta",
+ "miette",
  "pretty_assertions",
  "proptest",
  "serde",
@@ -157,7 +158,6 @@ dependencies = [
  "miette",
  "serde",
  "serde_json",
- "thiserror",
  "tracing-subscriber",
 ]
 

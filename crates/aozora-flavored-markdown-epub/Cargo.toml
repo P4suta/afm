@@ -22,7 +22,7 @@ workspace = true
 # track the class contract by hand (ADR-0020).
 aozora-flavored-markdown = { workspace = true, features = ["theme"] }
 aozora                   = { workspace = true }
-miette          = { workspace = true }
+miette          = { workspace = true, features = ["derive", "fancy"] }
 thiserror       = { workspace = true }
 serde           = { workspace = true }
 toml            = { workspace = true }

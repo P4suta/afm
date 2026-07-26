@@ -1387,7 +1387,7 @@ mod tests {
                 table
                     .diagnostics()
                     .iter()
-                    .any(|d| d.code == "aozora-md::constructs_unresolved"),
+                    .any(|d| d.code() == "aozora-md::constructs_unresolved"),
                 "{why} must be reported: {table:?}"
             );
         }

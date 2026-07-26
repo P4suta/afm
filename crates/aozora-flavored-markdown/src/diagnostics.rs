@@ -7,7 +7,12 @@
 //! `sentinels` do. Upstream maps in through a crate-private constructor —
 //! a public `From` would put the parser's type back in this one's surface.
 
+use core::error::Error as StdError;
+use core::fmt;
+#[cfg(feature = "miette")]
+use core::iter;
 use core::ops::Range;
+use std::borrow::Cow;
 
 use serde::Serialize;
 
@@ -84,22 +89,112 @@ impl From<Span> for Range<usize> {
     }
 }
 
-/// A non-fatal observation about a render.
+/// A non-fatal observation about a render; `Display` is the message alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Diagnostic {
+    // Private, and read through the accessors below. These names are still the
+    // wire format — the `aozora-md.diagnostics.v1` envelope and the `.d.ts`
+    // both come off this derive — so what moves here is the representation,
+    // not the format: every `code` this crate builds is a `&'static str`, and
+    // one read back off the wire has to own its bytes.
+    severity: Severity,
+    source: DiagnosticSource,
+    code: Cow<'static, str>,
+    message: String,
+    span: Span,
+}
+
+// Three accessors below share a name with a method of a trait this type
+// implements: `Error::source`, and miette's `code` / `severity`. Those exist to
+// be *rendered* — they answer in `Option<Box<dyn Display>>` and in miette's own
+// severity scale — and an inherent method wins name resolution, so a call site
+// gets the typed answer and has nothing to disambiguate. Renaming them would
+// put the accessors out of step with the field names, which are the
+// `aozora-md.diagnostics.v1` wire names (ADR-0012), and with the sibling
+// parser's `Diagnostic`, which resolves the same collision the same way.
+// `expect` rather than `allow`: this fails the build if a trait impl leaves.
+#[expect(
+    clippy::same_name_method,
+    reason = "the inherent accessors return this crate's own types; the same-named trait methods exist for miette's renderer and are never called by name"
+)]
+impl Diagnostic {
     /// How strictly a host should treat this.
-    pub severity: Severity,
+    #[must_use]
+    pub const fn severity(&self) -> Severity {
+        self.severity
+    }
+
     /// Whether it blames the user's text or this library.
-    pub source: DiagnosticSource,
+    #[must_use]
+    pub const fn source(&self) -> DiagnosticSource {
+        self.source
+    }
+
     /// Stable identifier: `aozora::lex::…` upstream, `aozora-md::…` here.
-    pub code: &'static str,
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
     /// **Not** part of the stability contract.
-    pub message: String,
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// Byte range in the source text this crate was handed.
-    pub span: Span,
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+// Nothing here wraps a lower-level failure, so the cause chain stays empty.
+// The origin axis a reader might look for on `Error::source` is
+// `Diagnostic::source`, which answers a different question.
+impl StdError for Diagnostic {}
+
+/// The code and severity become miette's report header; the span becomes a
+/// caret only once a host attaches the text with `Report::with_source_code`,
+/// since a diagnostic carries a byte range and never a copy of the source.
+#[cfg(feature = "miette")]
+impl miette::Diagnostic for Diagnostic {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        Some(Box::new(&self.code))
+    }
+
+    fn severity(&self) -> Option<miette::Severity> {
+        // miette's three levels are Advice / Warning / Error — there is no
+        // `Note`, so the quietest one takes it.
+        Some(match self.severity {
+            Severity::Error => miette::Severity::Error,
+            Severity::Warning => miette::Severity::Warning,
+            Severity::Note => miette::Severity::Advice,
+        })
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        // An `Internal` diagnostic blames this library rather than a range of
+        // the caller's text, and the `0..0` a document-scoped one carries
+        // points at nothing — both render as header plus message.
+        if self.source != DiagnosticSource::Source || self.span.is_empty() {
+            return None;
+        }
+        Some(Box::new(iter::once(miette::LabeledSpan::new(
+            None,
+            self.span.start as usize,
+            self.span.len() as usize,
+        ))))
+    }
 }
 
 impl Diagnostic {
@@ -110,7 +205,7 @@ impl Diagnostic {
         Self {
             severity: Severity::Error,
             source: DiagnosticSource::Source,
-            code: "aozora-md::source_too_large",
+            code: Cow::Borrowed("aozora-md::source_too_large"),
             message: format!(
                 "source is {bytes} bytes, over the {} byte (u32 span) limit; nothing was rendered",
                 u32::MAX
@@ -128,7 +223,7 @@ impl Diagnostic {
         Self {
             severity: Severity::Warning,
             source: DiagnosticSource::Source,
-            code: "aozora-md::constructs_unresolved",
+            code: Cow::Borrowed("aozora-md::constructs_unresolved"),
             message: format!(
                 "{count} 青空文庫 construct(s) could not be located in the source \
                  and were left out of the output"
@@ -145,7 +240,7 @@ impl Diagnostic {
         Self {
             severity: Severity::from_upstream(d.severity()),
             source: DiagnosticSource::from_upstream(d.source()),
-            code: d.code(),
+            code: Cow::Borrowed(d.code()),
             message: d.to_string(),
             span: Span::new(span.start, span.end),
         }
@@ -175,6 +270,110 @@ impl DiagnosticSource {
     }
 }
 
+// The mapping below used to be the CLI's, in a `CliDiagnostic` under
+// `main.rs` — a file the coverage floor excludes and that no test could reach
+// except through miette's rendered text. Two of its branches were observed by
+// nothing: the quietest level, and the decision not to claim a caret. Both
+// are library code now, so both are checked here.
+#[cfg(all(test, feature = "miette"))]
+mod miette_impl {
+    use miette::{Diagnostic as MietteDiagnostic, LabeledSpan, Severity as ReportLevel};
+
+    use super::{Cow, Diagnostic, DiagnosticSource, Severity, Span};
+
+    // The two real constructors are both document-scoped, so the
+    // origin/level/span square is reached by literal — which inside the
+    // defining crate is what `#[non_exhaustive]` still allows.
+    fn probe(severity: Severity, source: DiagnosticSource, span: Span) -> Diagnostic {
+        Diagnostic {
+            severity,
+            source,
+            code: Cow::Borrowed("aozora-md::probe"),
+            message: "probe".to_owned(),
+            span,
+        }
+    }
+
+    #[test]
+    fn the_three_levels_land_on_three_distinct_miette_levels_in_the_same_order() {
+        let mapped: Vec<Option<ReportLevel>> = [Severity::Error, Severity::Warning, Severity::Note]
+            .into_iter()
+            .map(|level| {
+                MietteDiagnostic::severity(&probe(level, DiagnosticSource::Source, Span::new(0, 0)))
+            })
+            .collect();
+        assert_eq!(
+            mapped,
+            vec![
+                Some(ReportLevel::Error),
+                Some(ReportLevel::Warning),
+                Some(ReportLevel::Advice),
+            ],
+            "miette has no `Note`, so the quietest level takes `Advice` — and no two of ours may \
+             share one, or a note prints as a failure. The impl this replaced reached anything it \
+             had not named through a `_` arm, which mapped it to `Error`"
+        );
+    }
+
+    #[test]
+    fn the_report_header_carries_the_stable_code_verbatim() {
+        let d = probe(Severity::Error, DiagnosticSource::Source, Span::new(0, 0));
+        let header = MietteDiagnostic::code(&d).map(|code| code.to_string());
+        assert_eq!(
+            header.as_deref(),
+            Some(d.code()),
+            "the header must carry the code the wire carries, not a rendering of the `Cow` \
+             that holds it"
+        );
+    }
+
+    #[test]
+    fn a_source_span_becomes_one_caret_over_the_bytes_it_names() {
+        let d = probe(
+            Severity::Warning,
+            DiagnosticSource::Source,
+            Span::new(4, 11),
+        );
+        let labels: Vec<LabeledSpan> = MietteDiagnostic::labels(&d).into_iter().flatten().collect();
+        assert_eq!(
+            labels.len(),
+            1,
+            "an in-range source span must produce exactly one caret: {labels:?}"
+        );
+        assert_eq!(
+            (labels[0].offset(), labels[0].len()),
+            (4, 7),
+            "the caret must cover the byte range the diagnostic names, end-exclusive"
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_with_nothing_to_point_at_claims_no_caret() {
+        // A caret is a claim about the caller's text. `Internal` blames this
+        // library instead, the `0..0` a document-scoped diagnostic carries
+        // points at nothing, and a reversed pair measures nothing — each
+        // would otherwise put a marker on byte 0 of a file that is not at
+        // fault, and `source_too_large` would make a host copy the source it
+        // just refused to read in order to render one.
+        let cases = [
+            probe(
+                Severity::Error,
+                DiagnosticSource::Internal,
+                Span::new(4, 11),
+            ),
+            probe(Severity::Error, DiagnosticSource::Source, Span::new(11, 4)),
+            Diagnostic::source_too_large(5_000_000_000),
+            Diagnostic::constructs_unresolved(3),
+        ];
+        for d in &cases {
+            assert!(
+                MietteDiagnostic::labels(d).is_none(),
+                "must claim no caret: {d:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,16 +381,12 @@ mod tests {
     #[test]
     fn source_too_large_is_an_error_carrying_the_byte_counts() {
         let d = Diagnostic::source_too_large(5_000_000_000);
-        assert_eq!(d.severity, Severity::Error);
-        assert_eq!(d.source, DiagnosticSource::Source);
-        assert_eq!(d.code, "aozora-md::source_too_large");
-        assert_eq!(d.span, Span { start: 0, end: 0 });
-        assert!(d.message.contains("5000000000"), "got: {}", d.message);
-        assert!(
-            d.message.contains(&u32::MAX.to_string()),
-            "got: {}",
-            d.message
-        );
+        assert_eq!(d.severity(), Severity::Error);
+        assert_eq!(d.source(), DiagnosticSource::Source);
+        assert_eq!(d.code(), "aozora-md::source_too_large");
+        assert_eq!(d.span(), Span { start: 0, end: 0 });
+        assert!(d.message().contains("5000000000"), "got: {d}");
+        assert!(d.message().contains(&u32::MAX.to_string()), "got: {d}");
     }
 
     #[test]

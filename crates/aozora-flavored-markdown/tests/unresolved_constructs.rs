@@ -46,11 +46,11 @@ fn html_of(src: &str) -> String {
     render(src, &Options::default()).html
 }
 
-fn codes(src: &str) -> Vec<&'static str> {
+fn codes(src: &str) -> Vec<String> {
     render(src, &Options::default())
         .diagnostics
         .iter()
-        .map(|d| d.code)
+        .map(|d| d.code().to_owned())
         .collect()
 }
 
@@ -63,7 +63,7 @@ fn every_hard_source_still_renders_its_notation() {
             "{label} ({src:?}) lost its ruby: {html}"
         );
         assert!(
-            !codes(src).contains(&UNRESOLVED),
+            !codes(src).iter().any(|code| code == UNRESOLVED),
             "{label} lost nothing, so it must stay quiet: {:?}",
             codes(src)
         );
@@ -128,7 +128,7 @@ fn both_ir_front_doors_describe_what_the_html_one_does() {
     // the other projects — and neither reports a loss.
     for (label, src) in HARD_SOURCES {
         let whole = render_to_ir(src, &Options::default());
-        assert!(!whole.diagnostics.iter().any(|d| d.code == UNRESOLVED));
+        assert!(!whole.diagnostics.iter().any(|d| d.code() == UNRESOLVED));
         assert_eq!(whole.html, html_of(src), "{label}");
 
         let RenderedBlocks {
@@ -136,7 +136,7 @@ fn both_ir_front_doors_describe_what_the_html_one_does() {
             diagnostics,
             ..
         } = render_blocks(src, &Options::default());
-        assert!(!diagnostics.iter().any(|d| d.code == UNRESOLVED));
+        assert!(!diagnostics.iter().any(|d| d.code() == UNRESOLVED));
         let streamed: String = blocks.iter().map(|block| block.html.as_str()).collect();
         assert_eq!(streamed, html_of(src), "{label}");
         assert!(

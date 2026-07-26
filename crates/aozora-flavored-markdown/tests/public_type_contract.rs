@@ -26,7 +26,8 @@
 //! so such a signature makes their minor bumps this crate's breaking changes
 //! — which is exactly what `diagnostics.rs` claims the boundary prevents.
 
-use core::fmt::Debug;
+use core::error::Error as StdError;
+use core::fmt::{Debug, Display};
 use core::hash::Hash;
 use core::iter::once;
 use core::ops::Range as ByteRange;
@@ -74,6 +75,60 @@ fn behaves_as_a_hashable_value<T: Debug + Clone + PartialEq + Eq + Hash>(value: 
 fn behaves_as_a_value<T: Debug + Clone + PartialEq + Eq>(value: &T) {
     let clone = value.clone();
     assert_eq!(&clone, value, "a clone must equal its source: {value:?}");
+}
+
+/// The half the derive table above does not cover.
+///
+/// A `Diagnostic` is the one value this crate hands back in an *error*
+/// position, so a host has to be able to print it and to put it in a
+/// `Box<dyn Error>` chain without an adapter of its own. Nothing here asked
+/// until now, and the CLI paid for it: `CliDiagnostic`, a shadow struct whose
+/// entire content was `#[error("{message}")]` plus a hand-written
+/// `impl miette::Diagnostic`, existed because the type it copied could not be
+/// printed.
+fn behaves_as_a_reportable_error<T: Debug + Clone + Display + StdError + Send + Sync + 'static>(
+    value: &T,
+    message: &str,
+) {
+    assert_eq!(
+        value.to_string(),
+        message,
+        "`Display` must be the message alone — it is what a host prints under the header: \
+         {value:?}"
+    );
+    let reported: &dyn StdError = value;
+    assert!(
+        reported.source().is_none(),
+        "nothing here wraps a lower-level failure, so the cause chain must stay empty: {value:?}"
+    );
+    // The owned trait object is the point of `impl Error`, and the bounds are
+    // not decoration: `anyhow::Error`, `Box<dyn Error + Send + Sync>` and
+    // `miette::Report::new` all demand `Send + Sync + 'static`, which is
+    // exactly what a `code` borrowed from the caller's text would cost. The
+    // wire round-trip this type is heading for makes that a live temptation.
+    let owned: Box<dyn StdError + Send + Sync> = Box::new(value.clone());
+    assert_eq!(
+        owned.to_string(),
+        message,
+        "boxing must not change what the host prints: {value:?}"
+    );
+}
+
+/// Every diagnostic the malformed pool produces.
+///
+/// Reached through the API rather than constructed: `Diagnostic` is sealed
+/// and has no public constructor, so a consumer only ever meets one a render
+/// handed back.
+fn diagnostics_from_the_malformed_pool() -> Vec<Diagnostic> {
+    let diagnostics: Vec<Diagnostic> = MALFORMED
+        .iter()
+        .flat_map(|src| render(src, &Options::default()).diagnostics)
+        .collect();
+    assert!(
+        !diagnostics.is_empty(),
+        "no malformed sample produced a diagnostic; the sample pool is stale"
+    );
+    diagnostics
 }
 
 /// Guards the walk below against passing because it never reached a type.
@@ -214,24 +269,37 @@ fn options_is_a_hashable_value_whichever_path_built_it() {
 
 #[test]
 fn a_diagnostic_and_its_two_enums_compare_and_hash() {
-    // Reached through the API rather than constructed: `Diagnostic` is sealed,
-    // so a consumer only ever meets one a render handed back.
-    let diagnostics: Vec<Diagnostic> = MALFORMED
-        .iter()
-        .flat_map(|src| render(src, &Options::default()).diagnostics)
-        .collect();
-    assert!(
-        !diagnostics.is_empty(),
-        "no malformed sample produced a diagnostic; the sample pool is stale"
-    );
-    for diagnostic in &diagnostics {
+    for diagnostic in &diagnostics_from_the_malformed_pool() {
         behaves_as_a_hashable_value(diagnostic);
-        behaves_as_a_hashable_value(&diagnostic.severity);
-        behaves_as_a_hashable_value(&diagnostic.source);
-        behaves_as_a_hashable_value(&diagnostic.span);
+        behaves_as_a_hashable_value(&diagnostic.severity());
+        behaves_as_a_hashable_value(&diagnostic.source());
+        behaves_as_a_hashable_value(&diagnostic.span());
     }
     behaves_as_a_hashable_value(&Severity::Error);
     behaves_as_a_hashable_value(&DiagnosticSource::Internal);
+}
+
+#[test]
+fn a_diagnostic_prints_and_chains_as_an_error_without_a_shadow_type() {
+    for diagnostic in &diagnostics_from_the_malformed_pool() {
+        behaves_as_a_reportable_error(diagnostic, diagnostic.message());
+        assert!(
+            !diagnostic.to_string().contains(diagnostic.code()),
+            "`Display` must not repeat the code: a reporter prints the code in the header, so \
+             a message carrying it too prints it twice ({diagnostic:?})"
+        );
+        // `Error::source` and `Diagnostic::source` are two questions wearing
+        // one name — the cause chain, and which side the diagnostic blames.
+        // The inherent method wins unqualified resolution, so this is what a
+        // consumer writing `d.source()` gets. That is the whole content of
+        // the `#[expect(clippy::same_name_method)]` the crate carries, and
+        // nothing but a call site can say which way it actually resolved.
+        let origin: DiagnosticSource = diagnostic.source();
+        assert!(
+            StdError::source(diagnostic).is_none(),
+            "the cause chain must stay empty; `{origin:?}` answers the other question"
+        );
+    }
 }
 
 /// Shapes the lexer reports on. Any one of them producing a diagnostic is
@@ -608,6 +676,143 @@ fn the_geometric_types_are_left_unsealed_on_purpose() {
             "{name} is geometrically closed — sealing it costs every consumer literal \
              construction and functional record update for a field set that cannot grow"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the private-field half — a reader per wire key
+// ---------------------------------------------------------------------------
+//
+// Making a field private takes it out of reach of every other rule in this
+// file. `every_public_type_a_consumer_can_construct_is_sealed` *skips* a
+// struct with no public field — correctly, since one cannot be constructed
+// from outside — and the foreign-type and laziness readers only look at
+// declarations a consumer can name. So `Diagnostic`'s five field names, which
+// are the `aozora-md.diagnostics.v1` wire names (ADR-0012) and the field names
+// of the emitted `.d.ts`, now live where nothing but serde's derive reads
+// them: rename one and every gate in the workspace stays green while the
+// envelope changes shape.
+//
+// These two are what `pub` used to give for free. Whatever goes on the wire
+// comes back through a reader of the same name, and answers the same value.
+
+/// The fields a struct declaration lists, private ones included, each paired
+/// with whether a consumer can name it. Comment and attribute lines are
+/// skipped; a field is `name: Type,` at one indent level.
+fn fields_of(lines: &[&str], decl: usize) -> Vec<(String, bool)> {
+    lines[decl + 1..]
+        .iter()
+        .take_while(|line| **line != "}")
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with('#') {
+                return None;
+            }
+            let head = trimmed.split_once(':')?.0;
+            let public = head.starts_with("pub ");
+            let name = head.strip_prefix("pub ").unwrap_or(head).trim();
+            (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| (name.to_owned(), public))
+        })
+        .collect()
+}
+
+/// Whether the attribute block above a declaration puts it on the wire. Only
+/// a `#[derive(…)]` counts: the `#[cfg_attr(feature = "tsify", …)]` beside it
+/// names `Tsify`, which follows serde rather than deciding anything.
+fn derives_serialize(lines: &[&str], decl: usize) -> bool {
+    attributes_above(lines, decl)
+        .iter()
+        .any(|line| line.starts_with("#[derive(") && line.contains("Serialize"))
+}
+
+/// Whether the file declares a public reader of that name, `const` or not.
+fn declares_reader(src: &str, field: &str) -> bool {
+    [
+        format!("pub fn {field}(&self)"),
+        format!("pub const fn {field}(&self)"),
+    ]
+    .iter()
+    .any(|signature| src.contains(signature))
+}
+
+#[test]
+fn every_wire_field_a_consumer_cannot_name_has_a_reader_of_the_same_name() {
+    let mut checked: Vec<(String, usize)> = Vec::new();
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let Some((is_enum, name)) = declared_type(line) else {
+                continue;
+            };
+            if is_enum || !derives_serialize(&lines, idx) {
+                continue;
+            }
+            let fields = fields_of(&lines, idx);
+            if fields.is_empty() || fields.iter().any(|(_, public)| *public) {
+                continue;
+            }
+            for (field, _) in &fields {
+                assert!(
+                    declares_reader(&src, field),
+                    "{}: `{name}.{field}` is serialised but private, and nothing reads it back. \
+                     A consumer who can see a key in the JSON must be able to reach it from the \
+                     type, by the same name",
+                    path.display()
+                );
+            }
+            checked.push((name, fields.len()));
+        }
+    }
+    assert_eq!(
+        checked,
+        vec![("Diagnostic".to_owned(), 5)],
+        "the wire types with private fields changed; retarget this rule deliberately rather \
+         than letting it pass by finding nothing"
+    );
+}
+
+/// The JSON one public value serialises to.
+fn wire<T: serde::Serialize>(value: T) -> serde_json::Value {
+    serde_json::to_value(value).expect("a public value must serialise")
+}
+
+#[test]
+fn the_wire_keys_of_a_diagnostic_are_exactly_what_its_readers_answer() {
+    for diagnostic in &diagnostics_from_the_malformed_pool() {
+        let json = wire(diagnostic);
+        let object = json
+            .as_object()
+            .unwrap_or_else(|| panic!("a diagnostic serialises as an object, got {json}"));
+        let keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["code", "message", "severity", "source", "span"]
+                .into_iter()
+                .collect::<BTreeSet<&str>>(),
+            "the `aozora-md.diagnostics.v1` key set changed (ADR-0012): {json}"
+        );
+        // Same name, same value. A reader that drifted from the field it
+        // reads would still serialise, and the CLI's envelope — built out of
+        // the readers — would then disagree with the wasm bridge's, built out
+        // of this derive, under one schema name.
+        assert_eq!(object["code"], wire(diagnostic.code()), "code: {json}");
+        assert_eq!(
+            object["message"],
+            wire(diagnostic.message()),
+            "message: {json}"
+        );
+        assert_eq!(
+            object["severity"],
+            wire(diagnostic.severity()),
+            "severity: {json}"
+        );
+        assert_eq!(
+            object["source"],
+            wire(diagnostic.source()),
+            "source: {json}"
+        );
+        assert_eq!(object["span"], wire(diagnostic.span()), "span: {json}");
     }
 }
 
