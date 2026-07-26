@@ -37,6 +37,11 @@ thiserror = { workspace = true }
 # never pull wasm-bindgen.
 tsify   = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
+# The `miette` feature's one dependency: `impl miette::Diagnostic for
+# Diagnostic`, so a host reports what a render saw through miette instead of
+# re-deriving a shadow type. Trait only — the graphical `fancy` renderer is a
+# binary's choice, so the two CLIs opt into it and this crate never does.
+miette  = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Invariant predicates, plus the proptest input strategies and shared config
@@ -69,6 +74,10 @@ tsify = ["dep:tsify", "dep:wasm-bindgen"]
 # aozora-flavored-markdown-epub, which bundles a theme into the EPUB it
 # writes instead of vendoring its own copy (ADR-0020).
 theme = []
+# `impl miette::Diagnostic for Diagnostic`. Off by default: `Display` and
+# `Error` are unconditional, and a consumer that reports through anything
+# else should not pay for miette to get them.
+miette = ["dep:miette"]
 
 [package.metadata.cargo-shear]
 # `wasm-bindgen` is pulled by the `tsify` feature and used only by the code

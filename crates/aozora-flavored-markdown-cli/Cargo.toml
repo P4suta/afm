@@ -20,12 +20,15 @@ path = "src/main.rs"
 
 [dependencies]
 aozora          = { workspace = true }
-aozora-flavored-markdown    = { workspace = true }
+# `miette`: the library's own `Diagnostic` implements miette's trait, so this
+# binary reports what a render saw directly instead of copying it into a
+# shadow type it then has to keep in step.
+aozora-flavored-markdown    = { workspace = true, features = ["miette"] }
 clap      = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen   = { workspace = true }
-miette    = { workspace = true }
-thiserror = { workspace = true }
+# `fancy` is the graphical handler `install_diagnostic_hook` configures.
+miette    = { workspace = true, features = ["fancy"] }
 tracing-subscriber = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

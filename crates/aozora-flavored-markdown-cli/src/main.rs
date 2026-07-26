@@ -7,9 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::fmt::Display;
 use std::io::{self, IsTerminal, Read};
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process::ExitCode};
 
@@ -166,7 +164,7 @@ struct DiagnosticReport {
 
 #[derive(Debug, serde::Serialize)]
 struct DiagnosticJson {
-    code: &'static str,
+    code: String,
     severity: Severity,
     source: DiagnosticSource,
     /// **Not** part of the stability contract.
@@ -184,13 +182,13 @@ impl DiagnosticReport {
         let diagnostics = diagnostics
             .iter()
             .map(|d| {
-                let (line, column) = byte_offset_to_line_col(source, d.span.start);
+                let (line, column) = byte_offset_to_line_col(source, d.span().start);
                 DiagnosticJson {
-                    code: d.code,
-                    severity: d.severity,
-                    source: d.source,
-                    message: d.message.clone(),
-                    span: d.span,
+                    code: d.code().to_owned(),
+                    severity: d.severity(),
+                    source: d.source(),
+                    message: d.message().to_owned(),
+                    span: d.span(),
                     line,
                     column,
                 }
@@ -200,75 +198,6 @@ impl DiagnosticReport {
             schema: Self::SCHEMA,
             diagnostics,
         }
-    }
-}
-
-/// The orphan rule forbids `impl miette::Diagnostic` on the library's own
-/// type, so this carries what miette's graphical handler needs.
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-struct CliDiagnostic {
-    code: &'static str,
-    severity: Severity,
-    message: String,
-    /// `None` for an `internal` diagnostic or a degenerate span: those render
-    /// as header + message, which also avoids materialising a huge source for
-    /// something like `source_too_large`.
-    source_code: Option<miette::NamedSource<String>>,
-    /// `(start, len)` byte range of the caret, present iff `source_code` is.
-    label: Option<(usize, usize)>,
-}
-
-impl CliDiagnostic {
-    fn new(d: &Diagnostic, source: &str, name: &str) -> Self {
-        let (start, end) = (d.span.start as usize, d.span.end as usize);
-        // Only attach a snippet for in-bounds, non-degenerate user-source spans.
-        let snippet_ok =
-            matches!(d.source, DiagnosticSource::Source) && end > start && end <= source.len();
-        let (source_code, label) = if snippet_ok {
-            (
-                Some(miette::NamedSource::new(name, source.to_owned())),
-                Some((start, end - start)),
-            )
-        } else {
-            (None, None)
-        };
-        Self {
-            code: d.code,
-            severity: d.severity,
-            message: d.message.clone(),
-            source_code,
-            label,
-        }
-    }
-}
-
-impl miette::Diagnostic for CliDiagnostic {
-    fn code<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
-        Some(Box::new(self.code))
-    }
-
-    fn severity(&self) -> Option<miette::Severity> {
-        // miette has no `Note`; its three levels are Advice / Warning / Error.
-        // `Severity` is `#[non_exhaustive]`, so a level added later routes to
-        // the most conservative rendering rather than failing the build.
-        Some(match self.severity {
-            Severity::Warning => miette::Severity::Warning,
-            Severity::Note => miette::Severity::Advice,
-            _ => miette::Severity::Error,
-        })
-    }
-
-    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
-        self.source_code
-            .as_ref()
-            .map(|s| -> &dyn miette::SourceCode { s })
-    }
-
-    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
-        let (start, len) = self.label?;
-        let span = miette::LabeledSpan::new(None, start, len);
-        Some(Box::new(iter::once(span)))
     }
 }
 
@@ -491,6 +420,21 @@ struct Input<'a> {
     text: &'a str,
 }
 
+/// The library renders the header and the caret; the text that caret points
+/// into is the host's to supply, and is withheld for a span this input cannot
+/// be sliced by — which also keeps `source_too_large` from copying its source.
+fn report_of(d: &Diagnostic, input: Input<'_>) -> miette::Report {
+    let report = miette::Report::new(d.clone());
+    let (start, end) = (d.span().start as usize, d.span().end as usize);
+    let in_bounds =
+        matches!(d.source(), DiagnosticSource::Source) && end > start && end <= input.text.len();
+    if in_bounds {
+        report.with_source_code(miette::NamedSource::new(input.name, input.text.to_owned()))
+    } else {
+        report
+    }
+}
+
 /// Human format prints nothing on clean input; JSON always prints the
 /// envelope, empty array included, so tooling can rely on parseable output.
 fn emit_diagnostics(
@@ -502,7 +446,7 @@ fn emit_diagnostics(
     match format {
         DiagFormat::Human => {
             for d in diagnostics {
-                let report = miette::Report::new(CliDiagnostic::new(d, input.text, input.name));
+                let report = report_of(d, input);
                 // miette's renderer ends each report with a newline; `write_line`
                 // adds one too, so trim to avoid a blank line between diagnostics.
                 stream.write_line(format!("{report:?}").trim_end());

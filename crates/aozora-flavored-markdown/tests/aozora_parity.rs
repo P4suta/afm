@@ -583,7 +583,7 @@ fn every_construct_of_a_pure_aozora_document_is_accounted_for() {
         let lost: Vec<_> = rendered
             .diagnostics
             .iter()
-            .filter(|d| d.code == "aozora-md::constructs_unresolved")
+            .filter(|d| d.code() == "aozora-md::constructs_unresolved")
             .collect();
         assert!(
             lost.is_empty(),
