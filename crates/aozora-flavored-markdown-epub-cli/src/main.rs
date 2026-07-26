@@ -1,11 +1,15 @@
 //! `aozora-flavored-markdown-epub` CLI — thin clap wrapper over the
-//! `aozora_flavored_markdown_epub` library.
+//! `aozora_flavored_markdown_epub` library, plus the diagnostic reporting
+//! that library leaves to whoever owns the terminal.
 
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Severity, Span};
+use aozora_flavored_markdown_epub::{BuildOptions, BuildReport, ChapterReport, build};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,6 +21,14 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+
+    /// Exit 2 if any chapter raised a diagnostic. The EPUB is still written.
+    #[arg(long, global = true)]
+    strict: bool,
+
+    /// Diagnostic output format: human-readable reports, or stable JSON for tooling.
+    #[arg(long, global = true, value_enum, default_value_t = DiagFormat::Human)]
+    format: DiagFormat,
 }
 
 #[derive(Debug, Subcommand)]
@@ -35,26 +47,166 @@ enum Cmd {
     },
 }
 
-fn main() -> miette::Result<()> {
-    run(Cli::parse())
+#[derive(Copy, Clone, Debug, Default, ValueEnum)]
+enum DiagFormat {
+    /// Graphical diagnostics (severity, code, message, source snippet) for humans.
+    #[default]
+    Human,
+    /// A stable `aozora-md.diagnostics.v1` JSON envelope for tooling.
+    Json,
+}
+
+// The envelope ADR-0012 pins, with the `path` a book-shaped run needs —
+// additive within `v1`, which is what that ADR allows.
+#[derive(Debug, serde::Serialize)]
+struct DiagnosticReport {
+    schema: &'static str,
+    diagnostics: Vec<DiagnosticJson>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DiagnosticJson {
+    // The chapter file, as discovered.
+    path: String,
+    code: String,
+    severity: Severity,
+    source: DiagnosticSource,
+    // **Not** part of the stability contract.
+    message: String,
+    span: Span,
+    line: u32,
+    // 1-based, and a *character* column.
+    column: u32,
+}
+
+impl DiagnosticReport {
+    const SCHEMA: &'static str = "aozora-md.diagnostics.v1";
+
+    fn build(report: &BuildReport) -> Self {
+        let diagnostics = report
+            .chapters
+            .iter()
+            .flat_map(|chapter| {
+                chapter.diagnostics.iter().map(|d| {
+                    let (line, column) = byte_offset_to_line_col(&chapter.text, d.span().start);
+                    DiagnosticJson {
+                        path: chapter.path.display().to_string(),
+                        code: d.code().to_owned(),
+                        severity: d.severity(),
+                        source: d.source(),
+                        message: d.message().to_owned(),
+                        span: d.span(),
+                        line,
+                        column,
+                    }
+                })
+            })
+            .collect();
+        Self {
+            schema: Self::SCHEMA,
+            diagnostics,
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("{err:?}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// # Errors
 ///
 /// Propagates whatever the library raises while building.
-fn run(cli: Cli) -> miette::Result<()> {
+fn run(cli: Cli) -> miette::Result<ExitCode> {
     match cli.cmd {
         Cmd::Build {
             input,
             metadata,
             output,
-        } => aozora_flavored_markdown_epub::build(&aozora_flavored_markdown_epub::BuildOptions {
-            input: &input,
-            metadata: &metadata,
-            output: &output,
-        })?,
+        } => {
+            let report = build(&BuildOptions::new(&input, &metadata, &output))?;
+            emit_diagnostics(&report, cli.format);
+            // Packaging is the phase before this one, so the file is already
+            // on disk; a diagnostic is an observation, not a refusal. What
+            // `--strict` decides is the verdict on the run, not the output.
+            if cli.strict && !report.is_empty() {
+                // In JSON mode the envelope and the exit code carry the
+                // failure; a free-form line would corrupt a stdout stream.
+                if matches!(cli.format, DiagFormat::Human) {
+                    eprintln!(
+                        "{} 件の診断を報告しました (--strict)",
+                        report.diagnostic_count()
+                    );
+                }
+                return Ok(ExitCode::from(2));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
-    Ok(())
+}
+
+// A 1-based (line, character-column) pair.
+fn byte_offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
+    let offset = offset as usize;
+    let mut line = 1u32;
+    let mut column = 1u32;
+    for (idx, ch) in source.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+// The library renders the header and the caret; the chapter text the caret
+// points into is attached here, and withheld for a span it cannot be sliced
+// by.
+fn report_of(d: &Diagnostic, chapter: &ChapterReport) -> miette::Report {
+    let report = miette::Report::new(d.clone());
+    let (start, end) = (d.span().start as usize, d.span().end as usize);
+    let in_bounds =
+        matches!(d.source(), DiagnosticSource::Source) && end > start && end <= chapter.text.len();
+    if in_bounds {
+        report.with_source_code(miette::NamedSource::new(
+            chapter.path.display().to_string(),
+            chapter.text.clone(),
+        ))
+    } else {
+        report
+    }
+}
+
+// Human format prints nothing for a clean book; JSON always prints the
+// envelope, empty array included, so tooling can rely on parseable output.
+// The EPUB goes to a file rather than to stdout, so JSON can have stdout.
+fn emit_diagnostics(report: &BuildReport, format: DiagFormat) {
+    match format {
+        DiagFormat::Human => {
+            for chapter in &report.chapters {
+                for d in &chapter.diagnostics {
+                    // miette ends each report with a newline and `eprintln!`
+                    // adds one too, so trim to avoid a blank line between them.
+                    let rendered = format!("{:?}", report_of(d, chapter));
+                    eprintln!("{}", rendered.trim_end());
+                }
+            }
+        }
+        DiagFormat::Json => match serde_json::to_string(&DiagnosticReport::build(report)) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("診断を JSON 化できません: {e}"),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -145,7 +297,7 @@ mod tests {
         ])
         .expect("parses");
 
-        run(cli).unwrap();
+        let _code = run(cli).expect("build succeeds");
         assert!(output.exists(), "the .epub output must be written");
     }
 
@@ -167,6 +319,6 @@ mod tests {
         ])
         .expect("parses");
 
-        assert!(run(cli).is_err());
+        run(cli).unwrap_err();
     }
 }

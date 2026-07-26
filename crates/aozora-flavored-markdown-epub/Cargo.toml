@@ -22,7 +22,10 @@ workspace = true
 # track the class contract by hand (ADR-0020).
 aozora-flavored-markdown = { workspace = true, features = ["theme"] }
 aozora                   = { workspace = true }
-miette          = { workspace = true, features = ["derive", "fancy"] }
+# Trait + derive only. `fancy` is the graphical renderer, which is a binary's
+# choice to make: it belongs to whoever owns the terminal, so the CLI opts in
+# and a library consumer reporting through something else pays nothing.
+miette          = { workspace = true, features = ["derive"] }
 thiserror       = { workspace = true }
 serde           = { workspace = true }
 toml            = { workspace = true }
@@ -35,3 +38,9 @@ chrono          = { workspace = true }
 insta             = { workspace = true }
 tempfile          = { workspace = true }
 zip               = { workspace = true }
+# `property_build_report.rs` states diagnostic preservation over drawn books
+# rather than a fixed pool, so it needs the shared input strategies and the
+# one `ProptestConfig` the workspace tunes. Both crates are dev-only and
+# `publish = false` / test-scoped, so neither reaches a published build graph.
+aozora-flavored-markdown-test-support = { workspace = true }
+proptest                             = { workspace = true }

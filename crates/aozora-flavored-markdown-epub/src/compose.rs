@@ -511,7 +511,10 @@ mod tests {
         // Title contains an ampersand and angle brackets; quick-xml
         // must escape them once and only once.
         let meta = dummy_metadata("Tom & Jerry <draft>", "山田\"太郎\"", "ja");
-        let rendered = RenderOutput { items: vec![] };
+        let rendered = RenderOutput {
+            items: vec![],
+            chapters: vec![],
+        };
         let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -524,7 +527,10 @@ mod tests {
 
     fn opf_for_mode(mode: WritingMode) -> String {
         let meta = dummy_metadata_mode("T", "A", "ja", mode);
-        let rendered = RenderOutput { items: vec![] };
+        let rendered = RenderOutput {
+            items: vec![],
+            chapters: vec![],
+        };
         let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -573,6 +579,7 @@ mod tests {
                     xhtml: "<placeholder/>".to_owned(),
                 },
             ],
+            chapters: vec![],
         }
     }
 

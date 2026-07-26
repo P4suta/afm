@@ -279,18 +279,13 @@ fn enables_the_renderer(entry: &str) -> bool {
 ///
 /// A binary chooses a renderer because a binary is what prints; the two CLIs
 /// install miette's graphical handler on startup, so `fancy` is theirs by
-/// right.
-///
-/// `aozora-flavored-markdown-epub` is on this list and does not belong on it:
-/// it is a published library with no binary of its own, it uses miette only
-/// for `#[derive(Diagnostic)]` on its error type, and its `fancy` is a
-/// leftover of the workspace entry that used to force it on everyone. Named
-/// here rather than left invisible — dropping it is a change to the dependency
-/// graph, which is not this rule's to make.
+/// right. `aozora-flavored-markdown-epub` used to be listed here, which this
+/// rule recorded as a defect it could name but not fix: a published library
+/// with no binary of its own, using miette for `#[derive(Diagnostic)]` alone.
+/// Its entry is now `derive` only, so the list is the binaries again.
 const MAY_ENABLE_THE_RENDERER: &[&str] = &[
     "aozora-flavored-markdown-cli",
     "aozora-flavored-markdown-epub-cli",
-    "aozora-flavored-markdown-epub",
 ];
 
 #[test]
@@ -510,16 +505,18 @@ fn serde_is_a_choice_the_consumer_makes_and_tsify_makes_it_for_them() {
 
 #[test]
 fn the_crates_that_write_json_are_the_ones_that_enable_serde() {
-    // Named rather than merely counted: these are the two crates whose gates
-    // compile the derives at all. The CLI writes the
-    // `aozora-md.diagnostics.v1` envelope for `--format json`; the wasm
-    // bridge posts the IR through serde-wasm-bindgen. Dropping the feature
-    // from either would take `#[cfg(feature = "serde")]` code — including
-    // `ir::types`' own unit tests — out of `just test` without failing it.
+    // Named rather than merely counted: these are the three crates whose
+    // gates compile the derives at all. Both CLIs write the
+    // `aozora-md.diagnostics.v1` envelope for `--format json` — the EPUB one
+    // per chapter of the book it built; the wasm bridge posts the IR through
+    // serde-wasm-bindgen. Dropping the feature from any of them would take
+    // `#[cfg(feature = "serde")]` code — including `ir::types`' own unit
+    // tests — out of `just test` without failing it.
     assert_eq!(
         who_enables("serde"),
         [
             "aozora-flavored-markdown-cli",
+            "aozora-flavored-markdown-epub-cli",
             "aozora-flavored-markdown-wasm"
         ],
         "the members that put this crate's types on a wire changed"

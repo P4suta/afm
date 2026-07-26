@@ -48,11 +48,8 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
         path: opts.metadata.to_path_buf(),
         source,
     })?;
-    let metadata: Metadata =
-        toml::from_str(&metadata_text).map_err(|source| Error::MetadataParse {
-            path: opts.metadata.to_path_buf(),
-            source,
-        })?;
+    let metadata: Metadata = toml::from_str(&metadata_text)
+        .map_err(|source| Error::metadata_parse(opts.metadata.to_path_buf(), source))?;
 
     let mut sources = Vec::new();
     if opts.input.is_file() {
