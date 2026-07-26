@@ -26,6 +26,10 @@ comrak    = { workspace = true }
 # can round-trip the IR via serde-wasm-bindgen / serde_json without
 # extra adapters.
 serde     = { workspace = true }
+# `Error`, the one fallible entry point's error type (`canonicalize`). The
+# rendering entry points stay infallible, so nothing else in the crate has a
+# `Result` for this to describe.
+thiserror = { workspace = true }
 # Feature-gated TypeScript-binding derives. The `tsify` feature (enabled only
 # by aozora-flavored-markdown-wasm) makes the IR + diagnostic types derive
 # `tsify::Tsify`, so wasm-pack emits their `.d.ts` directly — no separate

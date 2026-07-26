@@ -623,6 +623,24 @@ fn collect_rendered_blocks<'a>(
     blocks
 }
 
+/// Why [`canonicalize`] has no answer.
+///
+/// Rendering has no counterpart and gains none: CommonMark is a total
+/// grammar, so [`render`] and its siblings stay infallible and report what
+/// they saw as [`Diagnostic`]s — a rustc warning's standing, not an error's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Refused ahead of the lexer, whose own `u32` span assert would abort
+    /// the process under this workspace's `panic = "abort"`.
+    #[error("source is {len} bytes; the parser addresses at most u32::MAX")]
+    SourceTooLarge { len: usize },
+    /// A pass handed the lexer text it would not take — reachable only
+    /// because lifting a verbatim region out can grow a source past the bound.
+    #[error("the source did not lex")]
+    ParseFailed,
+}
+
 /// Round-trip source through the parser back to canonical
 /// aozora-md-source text.
 ///
@@ -640,33 +658,42 @@ fn collect_rendered_blocks<'a>(
 /// # Examples
 ///
 /// ```
-/// use aozora_flavored_markdown::serialize;
+/// use aozora_flavored_markdown::canonicalize;
 ///
-/// let canonical = serialize("彼は｜青梅《おうめ》に行った。");
+/// let canonical = canonicalize("彼は｜青梅《おうめ》に行った。")?;
 /// assert_eq!(canonical, "彼は青梅《おうめ》に行った。");
-/// assert_eq!(serialize(&canonical), canonical);
+/// assert_eq!(canonicalize(&canonical)?, canonical);
+/// assert_eq!(canonicalize("")?, String::new());
+/// # Ok::<(), aozora_flavored_markdown::Error>(())
 /// ```
 ///
-/// Past `MAX_SOURCE_BYTES` this returns an empty `String`, so the round-trip
-/// is *not* identity there — but such input cannot be lexed at all.
-#[must_use]
-pub fn serialize(input: &str) -> String {
-    if !source_within_span_budget(input) {
-        return String::new();
+/// # Errors
+///
+/// [`Error::SourceTooLarge`] past `MAX_SOURCE_BYTES`, [`Error::ParseFailed`]
+/// when a pass hands the lexer text it will not take — never for empty input.
+pub fn canonicalize(input: &str) -> Result<String, Error> {
+    canonicalize_within(input, MAX_SOURCE_BYTES)
+}
+
+// The budget is a parameter so that the refusal above it is reachable from a
+// test: at `MAX_SOURCE_BYTES` only a 4 GiB source provokes one, and a test
+// that allocated such a source would be measuring the allocator rather than
+// this guard. Same reason `len_within_span_budget` is split out from the
+// guard the render entry points share, and the boundary is the same one —
+// a source of exactly the budget is still addressable.
+fn canonicalize_within(input: &str, budget: usize) -> Result<String, Error> {
+    if input.len() > budget {
+        return Err(Error::SourceTooLarge { len: input.len() });
     }
-    let Some(mut current) = canonicalise_pass(input) else {
-        return String::new();
-    };
+    let mut current = canonicalise_pass(input).ok_or(Error::ParseFailed)?;
     for _ in 1..MAX_CANONICAL_PASSES {
-        let Some(next) = canonicalise_pass(&current) else {
-            return String::new();
-        };
+        let next = canonicalise_pass(&current).ok_or(Error::ParseFailed)?;
         if next == current {
-            return current;
+            return Ok(current);
         }
         current = next;
     }
-    input.to_owned()
+    Ok(input.to_owned())
 }
 
 // A pass reads block structure to decide what to protect and can insert a
@@ -700,28 +727,28 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_serialize_returns_input_unchanged() {
-        assert_eq!(serialize("plain text"), "plain text");
+    fn plain_text_canonicalizes_to_the_input_unchanged() {
+        assert_eq!(canonicalize("plain text"), Ok("plain text".to_owned()));
     }
 
     #[test]
-    fn fenced_notation_serializes_verbatim() {
+    fn fenced_notation_canonicalizes_verbatim() {
         // Unmasked, the lexer canonicalises a fence body like prose and drops
         // the ruby's explicit base marker.
         let src = "```\n｜青梅《おうめ》\n```";
-        assert_eq!(serialize(src), src);
+        assert_eq!(canonicalize(src), Ok(src.to_owned()));
     }
 
     #[test]
-    fn serialize_restores_masks_in_source_order_across_fences() {
+    fn canonicalize_restores_masks_in_source_order_across_fences() {
         // Two fences, different triggers, canonicalised prose between them:
         // a cursor that replayed or skipped would put a character back in the
         // wrong fence rather than lose one, which byte equality catches and a
         // per-fence containment check would not.
         let src = "```\n｜一《いち》\n```\n\n｜二《に》\n\n```\n［＃改ページ］\n```\n";
         assert_eq!(
-            serialize(src),
-            "```\n｜一《いち》\n```\n\n二《に》\n\n```\n［＃改ページ］\n```\n"
+            canonicalize(src),
+            Ok("```\n｜一《いち》\n```\n\n二《に》\n\n```\n［＃改ページ］\n```\n".to_owned())
         );
     }
 
@@ -898,6 +925,29 @@ mod tests {
     }
 
     #[test]
+    fn a_source_past_the_budget_is_refused_and_named_by_its_length() {
+        // The refusal `canonicalize` makes at `MAX_SOURCE_BYTES`, provoked at
+        // a budget a test can reach. What it answered before was `""` — the
+        // same value an empty document canonicalises to — so neither a caller
+        // nor a gate could tell a refused source from a document with nothing
+        // in it, and the fixed point the fuzz target checks held vacuously.
+        const BUDGET: usize = 8;
+        for len in 0..=12usize {
+            let src = "a".repeat(len);
+            let expected = if len <= BUDGET {
+                Ok(src.clone())
+            } else {
+                Err(Error::SourceTooLarge { len })
+            };
+            assert_eq!(
+                canonicalize_within(&src, BUDGET),
+                expected,
+                "a {len}-byte source against a {BUDGET}-byte budget"
+            );
+        }
+    }
+
+    #[test]
     fn in_budget_input_still_renders_normally() {
         // Guard must be transparent for ordinary input.
         let r = render("# hi\n\nbody", &Options::default());
@@ -906,7 +956,7 @@ mod tests {
         assert!(!ir.ir.blocks.is_empty());
         let (blocks, _) = render_blocks_to_ir("a\n\nb", &Options::default());
         assert_eq!(blocks.len(), 2);
-        assert_eq!(serialize("plain"), "plain");
+        assert_eq!(canonicalize("plain"), Ok("plain".to_owned()));
     }
 
     /// Tier-A canary: every occurrence of `［＃` must be inside an

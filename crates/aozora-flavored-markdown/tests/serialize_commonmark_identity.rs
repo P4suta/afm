@@ -1,7 +1,7 @@
-//! `serialize` against every example in the CommonMark and GFM specs.
+//! `canonicalize` against every example in the CommonMark and GFM specs.
 //!
 //! The README claims this crate is a strict superset of CommonMark. That
-//! claim is false for any input `serialize` rewrites, and the sibling parser
+//! claim is false for any input `canonicalize` rewrites, and the sibling parser
 //! it delegates to is CommonMark-blind by design (ADR-0010) — it mutates the
 //! source before anything else runs, without ever asking what CommonMark made
 //! of the bytes. Which mutations reach a pure-CommonMark document was, until
@@ -9,7 +9,7 @@
 //!
 //! Two gates, because neither alone is sufficient:
 //!
-//! * [`serialize_is_the_identity_on_every_spec_example`] is the *exhaustive*
+//! * [`canonicalize_is_the_identity_on_every_spec_example`] is the *exhaustive*
 //!   half — all 652 + 672 examples, each also wrapped in a blockquote and in
 //!   a list item, so a mutation that only fires behind a container prefix is
 //!   in scope. It settles the "not investigated" question for the corpus.
@@ -28,7 +28,7 @@
 //! reserved codepoint in every block position CommonMark can put one, each of
 //! which the delegate corrupted before DEV-232.
 
-use aozora_flavored_markdown::{Options, render, sentinels, serialize};
+use aozora_flavored_markdown::{Options, canonicalize, render, sentinels};
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 
@@ -53,6 +53,12 @@ struct SpecExample {
     example: u32,
     section: String,
     markdown: String,
+}
+
+/// Every document here is a spec example, bounded and lexable, so an `Err`
+/// would be a bug in the guard rather than a divergence this file measures.
+fn canonical(src: &str) -> String {
+    canonicalize(src).expect("a spec example canonicalises")
 }
 
 fn load(fixture: &str) -> Vec<SpecExample> {
@@ -170,7 +176,7 @@ const BLOCK_CONTEXTS: &[&str] = &[
 const RULE_WIDTHS: &[usize] = &[1, 3, 9, 10, 35];
 
 #[test]
-fn serialize_is_the_identity_on_every_spec_example() {
+fn canonicalize_is_the_identity_on_every_spec_example() {
     let commonmark = load(COMMONMARK);
     let gfm = load(GFM);
     assert_eq!(commonmark.len(), 652, "re-run `just spec-refresh`");
@@ -184,7 +190,7 @@ fn serialize_is_the_identity_on_every_spec_example() {
                 ("in a blockquote", inside_a_blockquote(&example.markdown)),
                 ("in a list item", inside_a_list_item(&example.markdown)),
             ] {
-                let out = serialize(&doc);
+                let out = canonical(&doc);
                 let where_ = || {
                     format!(
                         "{corpus} example {} ({}), {shape}",
@@ -192,9 +198,9 @@ fn serialize_is_the_identity_on_every_spec_example() {
                     )
                 };
                 assert_eq!(
-                    serialize(&out),
+                    canonical(&out),
                     out,
-                    "I3: serialize did not settle for {}\n  src = {doc:?}",
+                    "I3: canonicalize did not settle for {}\n  src = {doc:?}",
                     where_()
                 );
                 if out == doc {
@@ -203,8 +209,8 @@ fn serialize_is_the_identity_on_every_spec_example() {
                 // The corpus carries no 青空文庫 notation, so anything that
                 // moved is the delegate rewriting CommonMark. Two things are
                 // demanded of it before it may be counted rather than failed:
-                // the difference is exactly the one normalisation `serialize`
-                // documents, and it costs the document nothing.
+                // the difference is exactly the one normalisation
+                // `canonicalize` documents, and it costs the document nothing.
                 assert_eq!(
                     out,
                     blank_runs_collapsed(&doc),
@@ -214,7 +220,7 @@ fn serialize_is_the_identity_on_every_spec_example() {
                 assert_eq!(
                     html(&doc),
                     html(&out),
-                    "{} changed meaning under serialize",
+                    "{} changed meaning under canonicalize",
                     where_()
                 );
                 divergences.push(where_());
@@ -224,7 +230,7 @@ fn serialize_is_the_identity_on_every_spec_example() {
     assert_eq!(
         divergences.len(),
         EXPECTED_DIVERGENCES,
-        "the set of spec examples `serialize` does not reproduce verbatim moved:\n  {}",
+        "the set of spec examples `canonicalize` does not reproduce verbatim moved:\n  {}",
         divergences.join("\n  "),
     );
 }
@@ -233,44 +239,44 @@ fn serialize_is_the_identity_on_every_spec_example() {
 fn every_source_mutating_step_of_the_sibling_parser_is_protected() {
     // The sibling parser (aozora 0.5.0) rewrites a source in five steps
     // before any other stage reads it, and documents all five. Each is
-    // pinned here — protected, or named as a normalisation `serialize`
+    // pinned here — protected, or named as a normalisation `canonicalize`
     // documents — so the family is closed against the parser's own list
     // rather than against what a corpus happened to contain.
 
     // 1. BOM strip. A leading BOM is an encoding artefact, not content, and
     //    comrak drops one too: the rendered HTML is unchanged. An interior
     //    U+FEFF is a zero-width space and stays.
-    assert_eq!(serialize("\u{FEFF}abc\n"), "abc\n");
+    assert_eq!(canonical("\u{FEFF}abc\n"), "abc\n");
     assert_eq!(html("\u{FEFF}abc\n"), html("abc\n"));
-    assert_eq!(serialize("a\u{FEFF}b\n"), "a\u{FEFF}b\n");
+    assert_eq!(canonical("a\u{FEFF}b\n"), "a\u{FEFF}b\n");
     // …with one surviving defect: comrak strips exactly one BOM and the
     // sibling strips every leading one, so a doubled BOM does change the
     // rendered document. Degenerate, zero corpus presence, and protecting it
     // needs "all but the first" machinery that still would not round-trip —
     // asserted rather than hidden so the day it matters it is already named.
-    assert_eq!(serialize("\u{FEFF}\u{FEFF}abc\n"), "abc\n");
+    assert_eq!(canonical("\u{FEFF}\u{FEFF}abc\n"), "abc\n");
     assert_ne!(
         html("\u{FEFF}\u{FEFF}abc\n"),
-        html(serialize("\u{FEFF}\u{FEFF}abc\n").as_str())
+        html(canonical("\u{FEFF}\u{FEFF}abc\n").as_str())
     );
 
     // 2. CR/LF normalisation. CommonMark does not distinguish the three line
-    //    endings, so this changes no document; `serialize`'s rustdoc names it.
-    assert_eq!(serialize("a\r\nb\r\n"), "a\nb\n");
-    assert_eq!(serialize("a\rb\n"), "a\nb\n");
+    //    endings, so this changes no document; `canonicalize`'s rustdoc says so.
+    assert_eq!(canonical("a\r\nb\r\n"), "a\nb\n");
+    assert_eq!(canonical("a\rb\n"), "a\nb\n");
 
     // 3. Accent decomposition inside `〔…〕`. This one is 青空文庫 notation,
     //    so canonicalising it is the crate's job rather than a defect — and
     //    it is scoped: the same digraph outside the brackets is untouched.
-    assert_eq!(serialize("〔e'tude〕\n"), "〔étude〕\n");
-    assert_eq!(serialize("e'tude\n"), "e'tude\n");
-    assert_eq!(serialize("〔abc〕\n"), "〔abc〕\n");
+    assert_eq!(canonical("〔e'tude〕\n"), "〔étude〕\n");
+    assert_eq!(canonical("e'tude\n"), "e'tude\n");
+    assert_eq!(canonical("〔abc〕\n"), "〔abc〕\n");
 
     // 4 and 5 are the two this crate must protect outright, because both
     //   rewrite bytes CommonMark has already claimed. They are exhaustive
     //   enough to want a matrix each; see the two tests below.
-    assert_eq!(serialize("- aaa\n==========\n"), "- aaa\n==========\n");
-    assert_eq!(serialize("a\u{E001}b\n"), "a\u{E001}b\n");
+    assert_eq!(canonical("- aaa\n==========\n"), "- aaa\n==========\n");
+    assert_eq!(canonical("a\u{E001}b\n"), "a\u{E001}b\n");
 }
 
 #[test]
@@ -297,7 +303,7 @@ fn a_rule_row_stays_in_the_block_that_owns_it() {
             let row = String::from(rule).repeat(width);
             for context in BLOCK_CONTEXTS {
                 let src = context.replace('@', &row);
-                assert_eq!(serialize(&src), src, "rule row rewritten in {context:?}");
+                assert_eq!(canonical(&src), src, "rule row rewritten in {context:?}");
                 checked += 1;
             }
         }
@@ -320,7 +326,7 @@ fn every_reserved_codepoint_in_the_source_comes_back_as_written() {
         for context in BLOCK_CONTEXTS {
             let src = context.replace('@', &format!("a{reserved}b"));
             assert_eq!(
-                serialize(&src),
+                canonical(&src),
                 src,
                 "reserved U+{:04X} rewritten in {context:?}",
                 reserved as u32
@@ -330,7 +336,7 @@ fn every_reserved_codepoint_in_the_source_comes_back_as_written() {
         // …and as the whole of a line, where there is no prose around it to
         // keep the line from reading as something else.
         let alone = format!("{reserved}\n");
-        assert_eq!(serialize(&alone), alone);
+        assert_eq!(canonical(&alone), alone);
     }
     assert_eq!(checked, sentinels::ALL.len() * BLOCK_CONTEXTS.len());
 }

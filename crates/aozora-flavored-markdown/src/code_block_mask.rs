@@ -8,7 +8,7 @@
 //! record the original in source order, restore once the mask is back out —
 //! `comrak::format_html` never disturbs it. One character for one, because
 //! `render` keeps a construct's byte span slicing the caller's text;
-//! `crate::serialize` owes no caller an offset and lifts whole regions out
+//! `crate::canonicalize` owes no caller an offset and lifts whole regions out
 //! instead (`crate::verbatim_regions`), reaching what this cannot.
 //!
 //! **Indented code blocks (CommonMark §4.4) are deliberately not masked**:

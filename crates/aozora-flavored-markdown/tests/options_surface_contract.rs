@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir, serialize};
+use aozora_flavored_markdown::{Options, canonicalize, render, render_blocks_to_ir, render_to_ir};
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
     aozora_fragment, commonmark_adversarial, pathological_aozora,
@@ -281,13 +281,13 @@ fn no_reachable_configuration_lets_raw_html_through_the_ir_paths() {
 
 #[test]
 fn the_canonicaliser_leaves_no_payload_more_dangerous_than_it_found_it() {
-    // `serialize` takes no options, so it has no configuration space — but it
-    // is the other public path a payload can travel, and its output is fed
+    // `canonicalize` takes no options, so it has no configuration space — but
+    // it is the other public path a payload can travel, and its output is fed
     // back to `render` by every round-tripping host.
     for src in XSS_PAYLOADS {
-        let canonical = serialize(src);
+        let canonical = canonicalize(src).expect("in-budget payload canonicalises");
         assert_inert(
-            "serialize→render",
+            "canonicalize→render",
             src,
             &render(&canonical, &Options::new()).html,
         );
