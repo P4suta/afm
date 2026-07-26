@@ -468,6 +468,7 @@ mod tests {
             language: language.to_owned(),
             identifier: None,
             writing_mode,
+            spine: Vec::new(),
         }
     }
 

@@ -1,12 +1,12 @@
-//! Phase 2 — decode each source (UTF-8, or Shift_JIS for `.sjis` /
-//! `.shift_jis`), render it, and wrap it in an XHTML envelope carrying the
+//! Phase 2 — decode each source at the encoding its extension names in
+//! `discover`, render it, and wrap it in an XHTML envelope carrying the
 //! manuscript language and a stylesheet link.
 
 use std::str;
 
 use aozora_flavored_markdown::{Options, render};
 
-use crate::discover::{Manuscript, SourceFile};
+use crate::discover::{Encoding, Manuscript, SourceFile, encoding_of};
 use crate::{ChapterReport, Error, Result};
 
 #[derive(Debug, Clone)]
@@ -61,12 +61,10 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
 }
 
 fn decode_source(source: &SourceFile) -> Result<String> {
-    let ext = source
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    if matches!(ext.as_deref(), Some("sjis" | "shift_jis" | "shift-jis")) {
+    // The extension table in `discover` is the only thing that says Shift_JIS,
+    // so the set this branches on and the set a directory sweep collects are
+    // the same set by construction rather than by two lists agreeing.
+    if encoding_of(&source.path) == Some(Encoding::ShiftJis) {
         aozora::decode_sjis(&source.bytes).map_err(|e| Error::sjis(source.path.clone(), e))
     } else {
         str::from_utf8(&source.bytes)
@@ -124,8 +122,48 @@ mod tests {
     use std::path::PathBuf;
 
     use aozora_flavored_markdown::theme;
+    use aozora_flavored_markdown_test_support::check_well_formed;
 
     use super::*;
+
+    // Titles a chapter file stem can really carry. `<` and `&` are legal in a
+    // POSIX filename, so every one of these is one `touch` away.
+    const HOSTILE_TITLES: &[&str] = &[
+        "plain",
+        "<script>alert(1)</script>",
+        "a & b",
+        "\"quoted\"",
+        "it's",
+        "&amp;",
+        "図 <b>",
+    ];
+
+    // Every other XHTML in the package goes through `quick_xml`, which escapes
+    // on the caller's behalf. This wrapper is the one document built by string
+    // interpolation, so the title and the language tag are the two places
+    // user-controlled text reaches markup with only `escape_attr` in front of
+    // it — and an unescaped `<` there closes `<title>` early and unbalances
+    // the whole document. The body is a real render rather than a literal, so
+    // the check covers the seam between the envelope and the HTML too.
+    #[test]
+    fn the_xhtml_envelope_stays_balanced_whatever_the_title_and_language_hold() {
+        for title in HOSTILE_TITLES {
+            for lang in ["ja", "en-US", "\"><x"] {
+                let body = render(&format!("# {title}\n\n{title}\n"), &Options::default()).html;
+                let xhtml = wrap_xhtml(title, &body, lang);
+                let errors = check_well_formed(&xhtml);
+                assert!(
+                    errors.is_empty(),
+                    "title {title:?} / lang {lang:?} produced ill-formed XHTML: {errors:?}\n\
+                     {xhtml}"
+                );
+                assert!(
+                    !xhtml.contains("<script>"),
+                    "an unescaped tag reached the envelope: {xhtml}"
+                );
+            }
+        }
+    }
 
     /// The wrapper opts into the bundled theme via the `aozora-md-root`
     /// body class and the `aozora-md.css` link; both themes must

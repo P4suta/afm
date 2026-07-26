@@ -88,10 +88,13 @@ pub enum Error {
     #[diagnostic(code(aozora_flavored_markdown_epub::compose::xml))]
     XmlBuild(Cow<'static, str>),
 
-    #[error("render parse error in {path}")]
-    #[diagnostic(code(aozora_flavored_markdown_epub::render::parse))]
+    #[error("no chapter sources under {path}")]
+    #[diagnostic(
+        code(aozora_flavored_markdown_epub::discover::empty),
+        help("EPUB requires a spine of one item or more, so a book needs at least one chapter")
+    )]
     #[non_exhaustive]
-    RenderParse { path: PathBuf, message: String },
+    NoSources { path: PathBuf },
 
     #[error("EPUB packaging failed for {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::package::zip))]

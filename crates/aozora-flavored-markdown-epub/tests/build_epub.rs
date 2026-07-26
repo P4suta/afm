@@ -199,6 +199,198 @@ fn reports_missing_input_directory() {
 }
 
 // ---------------------------------------------------------------------------
+// discovery — which files become chapters, and in what order
+// ---------------------------------------------------------------------------
+
+/// 「あ」 in Shift_JIS. Not valid UTF-8, so a `.sjis` chapter read down the
+/// UTF-8 branch fails loudly instead of arriving as mojibake.
+const SJIS_A: &[u8] = b"\x82\xA0";
+
+/// Distinct enough that "chapter 2 holds what chapter 3 should" is visible.
+const THREE_CHAPTERS: &[(&str, &str)] = &[
+    ("001-a.md", "# 甲\n"),
+    ("002-b.md", "# 乙\n"),
+    ("003-c.md", "# 丙\n"),
+];
+
+fn book_with_spine(entries: &str) -> String {
+    format!("{HORIZONTAL_BOOK}spine = [{entries}]\n")
+}
+
+fn chapter(entries: &[Entry], n: usize) -> String {
+    entry_text(entries, &format!("OEBPS/chapter-{n:03}.xhtml"))
+}
+
+/// A `spine` in `book.toml` is the reading order, and the list of chapters.
+///
+/// `spine_and_manifest_agree_in_lexicographic_order` above could not state
+/// this: sorting the sweep was the *only* order the code could produce, so
+/// that test passed identically whether the manifest was consulted or
+/// ignored — which it was. `deny_unknown_fields` was absent too, so the key
+/// did not even have to be spelled right to be silently dropped.
+#[test]
+fn a_configured_spine_is_the_reading_order_and_omitting_a_file_drops_it() {
+    let dir = fixture(
+        &book_with_spine(r#""003-c.md", "001-a.md""#),
+        THREE_CHAPTERS,
+    );
+    let entries = read_epub(&build_into(dir.path(), "book.epub"));
+
+    assert!(
+        chapter(&entries, 1).contains("丙") && chapter(&entries, 2).contains("甲"),
+        "the spine order must be the book order, got {:?} then {:?}",
+        chapter(&entries, 1),
+        chapter(&entries, 2)
+    );
+    // The title is the source file's stem, so this says *which file* landed
+    // where rather than only which text did.
+    assert!(
+        chapter(&entries, 1).contains("<title>003-c</title>"),
+        "the first chapter must be the first spine entry: {}",
+        chapter(&entries, 1)
+    );
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !names.contains(&"OEBPS/chapter-003.xhtml"),
+        "a file the spine omits is not a chapter, got {names:?}"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|e| String::from_utf8_lossy(&e.bytes).contains('乙')),
+        "the omitted file's text must not reach the package at all"
+    );
+}
+
+/// A spine entry with a typo is the failure the whole manifest existed to
+/// stop being silent, so it names the path it could not read rather than
+/// quietly shipping a shorter book.
+#[test]
+fn a_spine_entry_that_is_not_there_is_named_rather_than_skipped() {
+    let dir = fixture(
+        &book_with_spine(r#""001-a.md", "004-typo.md""#),
+        THREE_CHAPTERS,
+    );
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    let missing = dir.path().join("manuscript").join("004-typo.md");
+    assert!(
+        matches!(err, Error::DiscoverIo { ref path, .. } if path == &missing),
+        "a spine entry that is not on disk must name itself, got {err:?}"
+    );
+}
+
+/// A single-file input has no directory for a spine to order, so a manifest
+/// that carries one is describing a build that is not happening.
+#[test]
+fn a_spine_beside_a_single_file_input_is_refused() {
+    let dir = fixture(&book_with_spine(r#""001-a.md""#), THREE_CHAPTERS);
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript").join("001-a.md"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::MetadataInvalid { field: "spine", .. }),
+        "a configured spine must not be silently unused, got {err:?}"
+    );
+}
+
+/// The other half of `deny_unknown_fields`: a key this crate does not
+/// implement is a key whose author expected something, so it is reported with
+/// the name they typed.
+#[test]
+fn an_unknown_book_toml_key_is_refused_and_named() {
+    let dir = fixture(
+        &format!("{HORIZONTAL_BOOK}spien = [\"001-a.md\"]\n"),
+        THREE_CHAPTERS,
+    );
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::MetadataParse { .. }), "got {err:?}");
+    let chain = chain_of(&err);
+    assert!(
+        chain[1].contains("spien"),
+        "the cause must name the key the author actually wrote, got {chain:?}"
+    );
+}
+
+/// Directory discovery took `.md` alone while the decoder branched on three
+/// Shift_JIS spellings, so a `.sjis` chapter beside a `.md` one left the book
+/// without a word. Both sites read one table now; this is that table's
+/// user-visible half.
+#[test]
+fn a_directory_sweep_takes_shift_jis_chapters_beside_markdown_ones() {
+    let dir = fixture_bytes(
+        HORIZONTAL_BOOK,
+        &[("001.md", "# 甲\n".as_bytes()), ("002.sjis", SJIS_A)],
+    );
+    let entries = read_epub(&build_into(dir.path(), "mixed.epub"));
+    assert!(
+        chapter(&entries, 1).contains("甲"),
+        "the UTF-8 chapter is still the first: {}",
+        chapter(&entries, 1)
+    );
+    assert!(
+        chapter(&entries, 2).contains("あ"),
+        "the swept Shift_JIS chapter must be in the book, decoded: {}",
+        chapter(&entries, 2)
+    );
+}
+
+/// An empty book is not a book: EPUB 3.3 §3.4.12 wants one `itemref` or more,
+/// and `compose` had no opinion — it wrote `<spine></spine>` and `build`
+/// handed it back as a success. `reports_missing_input_directory` above looks
+/// adjacent but is a different failure: that directory does not exist, and an
+/// `fs::read_dir` that fails never reaches this.
+#[test]
+fn an_empty_manuscript_directory_is_refused_rather_than_written() {
+    let dir = fixture(HORIZONTAL_BOOK, &[]);
+    let out = dir.path().join("empty.epub");
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &out,
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::NoSources { ref path, .. } if path == &dir.path().join("manuscript")),
+        "an empty manuscript must be refused by name, got {err:?}"
+    );
+    assert!(
+        !out.exists(),
+        "a refused build must leave no spec-invalid EPUB behind"
+    );
+}
+
+/// The same refusal by the other route — files are there, none of them is a
+/// source. This is what says the emptiness check reads what discovery
+/// *collected* rather than whether the directory has entries in it.
+#[test]
+fn a_directory_holding_nothing_this_crate_reads_is_the_same_refusal() {
+    let dir = fixture(
+        HORIZONTAL_BOOK,
+        &[("notes.txt", "x"), ("README", "x"), ("cover.svg", "x")],
+    );
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::NoSources { .. }), "got {err:?}");
+}
+
+// ---------------------------------------------------------------------------
 // the report — what the renderer saw, chapter by chapter
 // ---------------------------------------------------------------------------
 
@@ -364,8 +556,9 @@ const SJIS_WITH_ORPHAN_CLOSE: &[u8] = b"\x82\xA0\x81\x74\x82\xA0";
 #[test]
 fn a_shift_jis_chapter_reports_against_the_decoded_text() {
     let dir = fixture_bytes(HORIZONTAL_BOOK, &[("001.sjis", SJIS_WITH_ORPHAN_CLOSE)]);
-    // Directory discovery takes `.md` only, so a Shift_JIS chapter is reached
-    // as a single-file input — the same path the `.sjis` decode branch is on.
+    // Named outright rather than swept for: what this rule is about is the
+    // decoded text the spans are measured against, and the single-file input
+    // reaches the `.sjis` branch without depending on what discovery collects.
     let input = dir.path().join("manuscript").join("001.sjis");
     let report = build(&BuildOptions::new(
         &input,
@@ -431,25 +624,45 @@ struct Failure {
 /// `Error::Package` and `Error::XmlBuild` are missing because nothing can
 /// drive `build` to them — the ZIP and the XML are written into an in-memory
 /// sink whose `io::Write` cannot fail (ADR-0018 records the same reasoning for
-/// the coverage carve-out on those two modules). `Error::RenderParse` is
-/// missing because nothing constructs it at all.
+/// the coverage carve-out on those two modules).
 fn reachable_failures() -> Vec<Failure> {
+    let mut all = manifest_failures();
+    all.extend(source_failures());
+    all
+}
+
+/// One case: what it is, the three paths to hand `build`, and whether a
+/// dependency's own diagnosis has to survive underneath the refusal.
+type Case = (&'static str, PathBuf, PathBuf, PathBuf, bool);
+
+fn run(cases: Vec<Case>) -> Vec<Failure> {
+    cases
+        .into_iter()
+        .map(|(what, input, metadata, output, cause)| Failure {
+            what,
+            err: build(&BuildOptions::new(&input, &metadata, &output)).expect_err(what),
+            cause,
+        })
+        .collect()
+}
+
+/// The refusals `book.toml` and the shape of the input can raise, before a
+/// single chapter byte is read.
+fn manifest_failures() -> Vec<Failure> {
     let missing_dir = fixture(HORIZONTAL_BOOK, &[]);
     let malformed_toml = fixture("= not valid toml =", &[("001.md", "x")]);
+    let unknown_key = fixture(
+        &format!("{HORIZONTAL_BOOK}spien = [\"001.md\"]\n"),
+        &[("001.md", "x")],
+    );
     let bad_language = fixture(
         "title = \"T\"\ncreator = \"A\"\nlanguage = \"japanese\"\n",
         &[("001.md", "x")],
     );
-    let blocked_output = fixture(HORIZONTAL_BOOK, &[("001.md", "x")]);
-    let bad_utf8 = fixture_bytes(HORIZONTAL_BOOK, &[("001.md", &[0x80, 0x81])]);
-    let bad_sjis = fixture_bytes(HORIZONTAL_BOOK, &[("001.sjis", &[0xFF, 0xFF, 0xFF])]);
+    let spined_file = fixture(&book_with_spine(r#""001.md""#), &[("001.md", "x")]);
+    let empty_dir = fixture(HORIZONTAL_BOOK, &[]);
 
-    // The output path aims *inside* a regular file, so creating its parent
-    // directory fails.
-    let blocker = blocked_output.path().join("blocker");
-    fs::write(&blocker, b"not a directory").expect("write blocker");
-
-    let cases = [
+    run(vec![
         (
             "a manuscript root that is not there",
             missing_dir.path().join("does-not-exist"),
@@ -465,12 +678,48 @@ fn reachable_failures() -> Vec<Failure> {
             true,
         ),
         (
+            "a book.toml key this crate does not implement",
+            unknown_key.path().join("manuscript"),
+            unknown_key.path().join("book.toml"),
+            unknown_key.path().join("o.epub"),
+            true,
+        ),
+        (
             "a language tag this crate rejects itself",
             bad_language.path().join("manuscript"),
             bad_language.path().join("book.toml"),
             bad_language.path().join("o.epub"),
             false,
         ),
+        (
+            "a spine beside a single-file input",
+            spined_file.path().join("manuscript").join("001.md"),
+            spined_file.path().join("book.toml"),
+            spined_file.path().join("o.epub"),
+            false,
+        ),
+        (
+            "a manuscript directory with no sources in it",
+            empty_dir.path().join("manuscript"),
+            empty_dir.path().join("book.toml"),
+            empty_dir.path().join("o.epub"),
+            false,
+        ),
+    ])
+}
+
+/// The refusals the chapter bytes and the output path can raise.
+fn source_failures() -> Vec<Failure> {
+    let blocked_output = fixture(HORIZONTAL_BOOK, &[("001.md", "x")]);
+    let bad_utf8 = fixture_bytes(HORIZONTAL_BOOK, &[("001.md", &[0x80, 0x81])]);
+    let bad_sjis = fixture_bytes(HORIZONTAL_BOOK, &[("001.sjis", &[0xFF, 0xFF, 0xFF])]);
+
+    // The output path aims *inside* a regular file, so creating its parent
+    // directory fails.
+    let blocker = blocked_output.path().join("blocker");
+    fs::write(&blocker, b"not a directory").expect("write blocker");
+
+    run(vec![
         (
             "an output path under a regular file",
             blocked_output.path().join("manuscript"),
@@ -492,16 +741,7 @@ fn reachable_failures() -> Vec<Failure> {
             bad_sjis.path().join("o.epub"),
             true,
         ),
-    ];
-
-    cases
-        .into_iter()
-        .map(|(what, input, metadata, output, cause)| Failure {
-            what,
-            err: build(&BuildOptions::new(&input, &metadata, &output)).expect_err(what),
-            cause,
-        })
-        .collect()
+    ])
 }
 
 /// Boxing a dependency's error behind an opaque `Cause` must change what a
@@ -518,7 +758,7 @@ fn reachable_failures() -> Vec<Failure> {
 fn every_error_a_build_can_raise_still_hands_over_the_chain_underneath_it() {
     let failures = reachable_failures();
     assert!(
-        failures.len() >= 6,
+        failures.len() >= 9,
         "only {} failures reached; this rule is a sweep, not a sample",
         failures.len()
     );
