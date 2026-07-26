@@ -1,9 +1,9 @@
-//! Lifts every region comrak has already claimed out of the canonicaliser's
-//! reach, for `crate::serialize` — the stronger half of the split
+//! Lifts the regions the canonicaliser must not read out of its reach, for
+//! `crate::serialize` — the stronger half of the split
 //! `crate::code_block_mask` documents. A whole region leaves as one
 //! placeholder, so the line structure inside it (a blank-line run, a rule row,
 //! the `> ` a container puts in front of every line) never reaches the
-//! canonicaliser at all. comrak locating the regions is what keeps this a
+//! canonicaliser at all. comrak locating most of them is what keeps this a
 //! splice rather than the block parser a fence scanner would have to become.
 
 use core::iter::once;
@@ -11,8 +11,8 @@ use core::ops::Range;
 
 use comrak::nodes::{NodeHeading, NodeValue, Sourcepos};
 
-use crate::Options;
 use crate::code_block_mask::MASK_CHAR;
+use crate::{Options, sentinels};
 
 /// Returns the lifted regions in source order, for [`restore`].
 #[must_use]
@@ -49,13 +49,13 @@ pub(crate) fn restore(canonical: &str, originals: &[&str]) -> String {
     out
 }
 
-// The bytes comrak reads as anything but prose: code — fenced, indented,
-// spans — raw HTML, and the rule rows both grammars claim, where CommonMark
-// owns the block structure. Isolating one with blank lines would not only
-// rewrite it, it would demote the setext heading above it to a paragraph and
-// take the next block's protection with it. A placeholder codepoint already
-// in the source is lifted as its own region, restoring to itself, so what the
-// restore walks over is exactly what was taken out.
+// Everything the canonicaliser would rewrite that is not its to rewrite. Two
+// families: what comrak read as anything but prose — code (fenced, indented,
+// a span), raw HTML, a break, a setext heading's underline — and what the
+// canonicaliser rewrites on sight whatever comrak made of it, which is a rule
+// row and a codepoint this crate reserves. The second family is why this is
+// not simply a walk of the AST: a rule row comrak claimed as nothing at all
+// is still one the canonicaliser pushes onto a stanza of its own.
 fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
     let arena = comrak::Arena::new();
     // The dialect `render` parses, so what one holds verbatim the other does.
@@ -81,13 +81,12 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
                 _ => None,
             }
         })
-        .chain(
-            source
-                .match_indices(MASK_CHAR)
-                .map(|(at, found)| at..at + found.len()),
-        )
+        .chain(rule_rows(source))
+        .chain(reserved_codepoints(source))
         .collect();
-    ranges.sort_unstable_by_key(|range| range.start);
+    // Widest first where two of them start together, so the region that
+    // swallows the other is the one the pass below keeps.
+    ranges.sort_unstable_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut disjoint: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
     for range in ranges {
         if disjoint.last().is_none_or(|last| last.end <= range.start) {
@@ -95,6 +94,55 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
         }
     }
     disjoint
+}
+
+// A rule row is markup to one grammar or the other — CommonMark's thematic
+// break, its setext underline, the canonicaliser's decorative rule — and
+// prose to neither, so a length threshold here would only pin this crate to
+// one that lives in the other parser. The canonicaliser pushes such a row
+// onto a stanza of its own, which is right where CommonMark has not claimed
+// the bytes and wrong where it has: the row can be a paragraph's own text, a
+// line continuing the paragraph above it, or a table row, and a blank line in
+// front of it splits the block that owned it. The indent stays outside the
+// region — it is what tells comrak which block the row belongs to.
+fn rule_rows(source: &str) -> Vec<Range<usize>> {
+    let mut rows = Vec::new();
+    let mut at = 0;
+    for line in source.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        let row = line.trim();
+        if is_rule_row(row) {
+            rows.push(at + indent..at + indent + row.len());
+        }
+        at += line.len();
+    }
+    rows
+}
+
+fn is_rule_row(row: &str) -> bool {
+    let mut bytes = row.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    matches!(first, b'-' | b'=' | b'_') && bytes.all(|byte| byte == first)
+}
+
+// Every codepoint this crate reserves, wherever the source already carried
+// one. Four of the five are rewritten to U+FFFD on sight, and the fifth is
+// the placeholder itself: lifting it as a region of its own is what keeps the
+// restore walking exactly the placeholders it has originals for. Read off
+// `sentinels::ALL` rather than re-listed, so one added later is covered here
+// without editing this.
+fn reserved_codepoints(source: &str) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    for reserved in sentinels::ALL {
+        found.extend(
+            source
+                .match_indices(reserved)
+                .map(|(at, text)| at..at + text.len()),
+        );
+    }
+    found
 }
 
 // The heading's last line, starting where its text did: a container prefix is

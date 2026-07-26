@@ -122,6 +122,16 @@ const COMMONMARK_ATOMS: &[&str] = &[
     "***\n\nthematic\n\n***\n",
     "  <em>inline HTML</em>\n",
     "trailing   spaces  \nhard break\n",
+    // DEV-232: a rule row the sibling parser isolates but CommonMark did not
+    // claim as a break. Each of these lost the block that owned it — the
+    // list, the blockquote, the table, the paragraph — until the delegate
+    // learned to lift the row rather than the node comrak made of it. The
+    // pool's own rule atoms are all in a setext position, which is the one
+    // place A3 already covered.
+    "- item\n==========\n",
+    "> quote\n==========\n",
+    "| a |\n| - |\n| b |\n==========\n",
+    "para\n    ----------\n",
     // Aozora notation inside a CommonMark/GFM container.
     "| ruby | note |\n| -- | -- |\n| ｜青梅《おうめ》 | ［＃改ページ］ |\n",
     "- ｜漢字《かんじ》\n- ~~取り消し~~と［＃「X」に傍点］\n  - ｜入子《いれこ》\n",
