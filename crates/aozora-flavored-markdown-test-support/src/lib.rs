@@ -2,7 +2,7 @@
 //! integration test suite.
 //!
 //! Each `check_*` predicate codifies one invariant — a lettered HTML tier, or
-//! a numbered one the serializer owes — and returns `Result<(), Violation>` so
+//! a numbered one the canonicaliser owes — and returns `Result<(), Violation>` so
 //! unit tests, property tests, the corpus sweep, and fuzz harnesses compose
 //! them on equal footing. [`assert_invariants`] runs the always-on HTML ones.
 //!
@@ -177,7 +177,7 @@ pub enum Violation {
         violation: &'static str,
         snippet: String,
     },
-    /// I5 — `serialize` rewrote the interior of a fenced code block.
+    /// I5 — `canonicalize` rewrote the interior of a fenced code block.
     FenceRewritten { interior: String, snippet: String },
 }
 
@@ -243,7 +243,7 @@ impl fmt::Display for Violation {
             }
             Self::FenceRewritten { interior, snippet } => write!(
                 f,
-                "I5: fenced code interior {interior:?} did not survive serialize: {snippet}",
+                "I5: fenced code interior {interior:?} did not survive canonicalize: {snippet}",
             ),
         }
     }
@@ -560,7 +560,7 @@ pub fn check_escape_invariants(html: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-/// I5 — `serialize` reproduces every fenced code interior byte for byte.
+/// I5 — `canonicalize` reproduces every fenced code interior byte for byte.
 ///
 /// # Errors
 ///
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_fence_fidelity_fires_on_a_canonicalised_interior() {
-        // Exactly what an unmasked `serialize` used to return.
+        // Exactly what an unmasked `canonicalize` used to return.
         let src = "```\n｜青梅《おうめ》\n```\n";
         let err = check_fence_fidelity(src, "```\n青梅《おうめ》\n```\n").expect_err("must fire");
         assert!(matches!(err, Violation::FenceRewritten { .. }));
@@ -1601,7 +1601,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_fence_fidelity_ignores_prose_outside_the_fence() {
-        // The one rewrite `serialize` is *supposed* to make.
+        // The one rewrite `canonicalize` is *supposed* to make.
         let src = "｜青梅《おうめ》\n\n```\n｜奥多摩《おくたま》\n```\n";
         let out = "青梅《おうめ》\n\n```\n｜奥多摩《おくたま》\n```\n";
         check_fence_fidelity(src, out).unwrap();
@@ -1641,7 +1641,7 @@ mod tests {
     fn invariant_unit_check_fence_fidelity_reads_no_fence_inside_a_raw_html_block() {
         // Read past a raw-HTML line and the scanner pairs a marker the block
         // swallowed with a real one further down, calling the prose between
-        // them an interior — prose `serialize` is *supposed* to canonicalise,
+        // them an interior — prose `canonicalize` is *supposed* to canonicalise,
         // so a correct output would read as a violation.
         let src = "<div>\n```\n</div>\n\n｜青梅《おうめ》\n\n```\n";
         let out = "<div>\n```\n</div>\n\n青梅《おうめ》\n\n```\n";
@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn invariant_unit_check_fence_fidelity_ignores_a_container_nested_fence() {
-        // Not an excuse for `serialize`, which does hold it byte for byte: a
+        // Not an excuse for `canonicalize`, which does hold it byte for byte: a
         // column-anchored scanner cannot tell a fence behind a blockquote
         // marker from a lazy continuation, so it reads neither.
         let src = "> ```\n> ｜青梅《おうめ》\n> ```\n";

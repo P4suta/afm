@@ -1,12 +1,20 @@
-//! Source-fidelity properties for `aozora_flavored_markdown::serialize`.
+//! Source-fidelity properties for `aozora_flavored_markdown::canonicalize`.
 //!
-//! The serializer had exactly one property: I3, the fixed point
-//! (`serialize(serialize(x)) == serialize(x)`), asserted by the
+//! The canonicaliser had exactly one property: I3, the fixed point
+//! (`canonicalize(canonicalize(x)) == canonicalize(x)`), asserted by the
 //! `serialize_round_trip` fuzz target and by `tests/fuzz_regressions.rs`.
 //! I3 relates the output to *itself*, never to the input, so a rewrite that
-//! is consistently wrong satisfies it — which is how a `serialize` that never
-//! called the code-block mask canonicalised `｜青梅《おうめ》` to
+//! is consistently wrong satisfies it — which is how a canonicaliser that
+//! never called the code-block mask canonicalised `｜青梅《おうめ》` to
 //! `青梅《おうめ》` inside a fence without any gate noticing.
+//!
+//! I9 is the half *underneath* both, and the one the `Result` made
+//! statable: the answer exists at all. While failure was spelled `""` —
+//! indistinguishable from the empty document — a canonicaliser that gave up
+//! on every input satisfied I3 (`""` is a fixed point) and was read by I5 as
+//! having lost nothing (a document with no fence in it has no interior to
+//! check). Both halves are asserted on every source this file hands over:
+//! `Ok`, and non-empty unless the source was blank.
 //!
 //! I5 is the missing half: what the input said inside a fence, the output
 //! must still say. Three shapes assert it, because each covers the others'
@@ -16,7 +24,7 @@
 //!   known to the test and the assertion cannot be skipped by a carve-out.
 //! * `mixed_*` hand whole documents — including the shared
 //!   `commonmark_adversarial` pool, whose atoms have carried a fenced
-//!   `｜青梅《おうめ》` all along without any property ever serializing one —
+//!   `｜青梅《おうめ》` all along without any property ever canonicalising one —
 //!   to [`check_fence_fidelity`], the same predicate the fuzz target runs.
 //! * [`assert_code_survives_verbatim`] asks comrak where the code is and
 //!   compares each node's source slice against the output. It is the only one
@@ -25,7 +33,7 @@
 //!   column-anchored on purpose, because deciding a container prefix needs
 //!   the block parser it must not become.
 
-use aozora_flavored_markdown::{sentinels, serialize};
+use aozora_flavored_markdown::{canonicalize, sentinels};
 use aozora_flavored_markdown_test_support::check_fence_fidelity;
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{aozora_fragment, commonmark_adversarial};
@@ -34,10 +42,45 @@ use core::iter::once;
 use core::ops::RangeInclusive;
 use proptest::prelude::*;
 
-/// I3, I5 as the fuzz target reads it, and I5 over every form of code.
-fn assert_serialize_invariants(src: &str) {
-    let first = serialize(src);
-    let second = serialize(&first);
+/// I9, totality — every source in this file is orders of magnitude under the
+/// span budget, so an `Err` is a bug in the guard and not a case these
+/// properties are stated over.
+///
+/// This is an assertion, not a `let … else`: the answer that was `""` for
+/// both failures is also what an empty document canonicalises to, so a
+/// property that skipped an `Err` — or, before, could not see one — reads a
+/// document that does not exist as one that lost nothing. Every other
+/// invariant below is stated over the output of this call.
+fn canonical(src: &str) -> String {
+    canonicalize(src).expect("in-budget source canonicalises")
+}
+
+/// A source with nothing in it *to* canonicalise, and the only shape allowed
+/// to come back as nothing.
+///
+/// Whitespace, plus the BOM — which `canonicalize`'s own rustdoc names as one
+/// of the three document-wide normalisations the parser applies, beside CRLF
+/// and blank-line collapsing. A `\u{FEFF}`-only source is the input the
+/// property below shrank to, and it is that documented behaviour rather than
+/// a hole: the exemption is over the *whole* source, so `a\u{FEFF}b` still
+/// owes a document back.
+fn is_blank(src: &str) -> bool {
+    src.chars().all(|c| c.is_whitespace() || c == '\u{FEFF}')
+}
+
+/// I3, I5 as the fuzz target reads it, I9's second half, and I5 over every
+/// form of code.
+fn assert_canonical_invariants(src: &str) {
+    let first = canonical(src);
+    let second = canonical(&first);
+    // I9's second half: an `Ok` that is empty means the document was. The
+    // canonicaliser drops nothing but line structure, so a source carrying a
+    // single non-blank character owes one back — which is what makes the
+    // check worth having rather than a restatement of `Ok`.
+    assert!(
+        !first.is_empty() || is_blank(src),
+        "I9: an empty answer for a source with content in it: src={src:?}"
+    );
     assert_eq!(
         first, second,
         "I3 fixed-point broken for src={src:?}\n  first  = {first:?}\n  second = {second:?}"
@@ -53,14 +96,14 @@ fn assert_serialize_invariants(src: &str) {
 /// Deliberately located by the parser rather than by a scanner of this test's
 /// own: what a container prefix, a lazy continuation or an info string does
 /// to a fence is exactly the question a second scanner would get wrong, and
-/// getting it wrong here reads as a `serialize` bug. The arithmetic below is
-/// this file's own, so a library that stopped protecting a region it still
+/// getting it wrong here reads as a canonicaliser bug. The arithmetic below
+/// is this file's own, so a library that stopped protecting a region it still
 /// locates correctly is still caught.
 fn assert_code_survives_verbatim(src: &str, out: &str) {
     for code in code_node_sources(src) {
         assert!(
             out.contains(code),
-            "code {code:?} did not survive serialize for src={src:?}\n  out = {out:?}",
+            "code {code:?} did not survive canonicalize for src={src:?}\n  out = {out:?}",
         );
     }
 }
@@ -223,7 +266,7 @@ fn indented_code_document() -> impl Strategy<Value = (String, String)> {
 
 /// Block leaves that are CommonMark and *only* CommonMark, one per line-owning
 /// construct, none of them carrying a blank line — so a concatenation of them
-/// is a document `serialize` owes back byte for byte, with no run of blank
+/// is a document `canonicalize` owes back byte for byte, with no run of blank
 /// lines to collapse and no notation to canonicalise.
 const PLAIN_BLOCKS: &[&str] = &[
     "aaa\n",
@@ -353,18 +396,18 @@ fn fenced_ruby_is_not_canonicalised() {
     // The acceptance case: the ruby's explicit base marker is dropped
     // everywhere else, and must survive here.
     let src = "```\n｜青梅《おうめ》\n```";
-    assert_eq!(serialize(src), src);
-    assert_serialize_invariants(src);
+    assert_eq!(canonical(src), src);
+    assert_canonical_invariants(src);
 }
 
 #[test]
 fn the_same_notation_is_rewritten_outside_the_fence_and_kept_inside() {
     let src = "｜青梅《おうめ》\n\n```\n｜青梅《おうめ》\n```\n";
     assert_eq!(
-        serialize(src),
+        canonical(src),
         "青梅《おうめ》\n\n```\n｜青梅《おうめ》\n```\n"
     );
-    assert_serialize_invariants(src);
+    assert_canonical_invariants(src);
 }
 
 #[test]
@@ -378,7 +421,7 @@ fn every_shape_of_canonicalisation_stops_at_the_fence() {
         "```\n［＃改ページ］\n```\n",
         "```\n［＃ここから２字下げ］\n```\n",
     ] {
-        assert_eq!(serialize(src), src, "fence body rewritten: {src:?}");
+        assert_eq!(canonical(src), src, "fence body rewritten: {src:?}");
     }
 }
 
@@ -390,8 +433,8 @@ fn tilde_and_wide_fences_are_masked_too() {
         "```rust\n// ｜青梅《おうめ》\n```\n",
         "  ```\n  ｜青梅《おうめ》\n  ```\n",
     ] {
-        assert_eq!(serialize(src), src, "fence not masked: {src:?}");
-        assert_serialize_invariants(src);
+        assert_eq!(canonical(src), src, "fence not masked: {src:?}");
+        assert_canonical_invariants(src);
     }
 }
 
@@ -408,8 +451,8 @@ fn line_structure_inside_a_fence_survives() {
         "```\na\n\n\nb\n```\n",
         "```\na\n\n\n\n\nb\n```\n",
     ] {
-        assert_eq!(serialize(src), src, "fence body rewritten: {src:?}");
-        assert_serialize_invariants(src);
+        assert_eq!(canonical(src), src, "fence body rewritten: {src:?}");
+        assert_canonical_invariants(src);
     }
 }
 
@@ -419,8 +462,8 @@ fn a_crlf_fence_interior_survives_though_the_document_is_normalised_to_lf() {
     // the closing fence's own break arrives as LF — but the interior is the
     // author's byte and comes back as written.
     let src = "```\r\n｜青梅《おうめ》\r\n```\r\n";
-    assert_eq!(serialize(src), "```\r\n｜青梅《おうめ》\r\n```\n");
-    assert_serialize_invariants(src);
+    assert_eq!(canonical(src), "```\r\n｜青梅《おうめ》\r\n```\n");
+    assert_canonical_invariants(src);
 }
 
 #[test]
@@ -437,11 +480,11 @@ fn a_reserved_codepoint_in_the_source_does_not_expose_the_fence() {
     for reserved in sentinels::ALL {
         let src = format!("{reserved}\n```\n｜青梅《おうめ》\n```\n");
         assert_eq!(
-            serialize(&src),
+            canonical(&src),
             src,
             "reserved codepoint or fence rewritten"
         );
-        assert_serialize_invariants(&src);
+        assert_canonical_invariants(&src);
     }
 }
 
@@ -459,8 +502,8 @@ fn a_container_nested_fence_survives_where_the_scanner_cannot_look() {
         "> > ```\n> > ［＃改ページ］\n> > ```\n",
         "> ```\n> a\n> \n> \n> b\n> ------------\n> ```\n",
     ] {
-        assert_eq!(serialize(src), src, "container-nested fence rewritten");
-        assert_serialize_invariants(src);
+        assert_eq!(canonical(src), src, "container-nested fence rewritten");
+        assert_canonical_invariants(src);
     }
 }
 
@@ -469,7 +512,7 @@ fn an_inline_code_span_and_an_indented_block_survive() {
     // Neither was ever masked. The span case also pins the asymmetry: the
     // same notation outside the backticks *must* be rewritten.
     assert_eq!(
-        serialize("`｜青梅《おうめ》` outside ｜青梅《おうめ》\n"),
+        canonical("`｜青梅《おうめ》` outside ｜青梅《おうめ》\n"),
         "`｜青梅《おうめ》` outside 青梅《おうめ》\n"
     );
     for src in [
@@ -478,8 +521,8 @@ fn an_inline_code_span_and_an_indented_block_survive() {
         "`｜青梅《おうめ》`\n",
         "> `｜青梅《おうめ》`\n",
     ] {
-        assert_eq!(serialize(src), src, "code rewritten: {src:?}");
-        assert_serialize_invariants(src);
+        assert_eq!(canonical(src), src, "code rewritten: {src:?}");
+        assert_canonical_invariants(src);
     }
 }
 
@@ -487,7 +530,7 @@ fn an_inline_code_span_and_an_indented_block_survive() {
 fn code_in_every_form_survives_one_document() {
     // The equivalence stated directly: comrak locates the regions the
     // implementation protects, so every node it finds must reappear whole.
-    let out = serialize(CODE_IN_EVERY_FORM);
+    let out = canonical(CODE_IN_EVERY_FORM);
     assert_code_survives_verbatim(CODE_IN_EVERY_FORM, &out);
     // …and again without comrak, so a walk that silently found nothing
     // cannot pass this test: the exact bytes, listed.
@@ -506,7 +549,7 @@ fn code_in_every_form_survives_one_document() {
         out.contains("in a span, 青梅《おうめ》 outside"),
         "prose outside code must still be canonicalised\n  out = {out:?}"
     );
-    assert_serialize_invariants(CODE_IN_EVERY_FORM);
+    assert_canonical_invariants(CODE_IN_EVERY_FORM);
 }
 
 #[test]
@@ -521,13 +564,13 @@ fn a_document_whose_block_structure_moves_between_passes_settles() {
         "本文\n----------\n",
         "本文\r\n----------\r\n",
     ] {
-        assert_serialize_invariants(src);
+        assert_canonical_invariants(src);
     }
     // A setext underline is the one rule row CommonMark owns, so it stays
     // where the author put it rather than being isolated by a blank line.
-    assert_eq!(serialize("本文\n----------\n"), "本文\n----------\n");
+    assert_eq!(canonical("本文\n----------\n"), "本文\n----------\n");
     assert_eq!(
-        serialize("a\n============\n    ｜青梅《おうめ》\n"),
+        canonical("a\n============\n    ｜青梅《おうめ》\n"),
         "a\n============\n    ｜青梅《おうめ》\n"
     );
 }
@@ -556,14 +599,14 @@ fn a_rule_row_is_held_wherever_commonmark_put_it_not_only_under_a_paragraph() {
         "[a]: /url\n----------\n",
         "# h\n==========\n",
     ] {
-        assert_eq!(serialize(src), src, "rule row rewritten: {src:?}");
-        assert_serialize_invariants(src);
+        assert_eq!(canonical(src), src, "rule row rewritten: {src:?}");
+        assert_canonical_invariants(src);
     }
 }
 
 #[test]
 fn plain_commonmark_passes_through_verbatim() {
-    // `serialize`'s rustdoc has claimed this all along, of neither the
+    // `canonicalize`'s rustdoc has claimed this all along, of neither the
     // pre-A2 nor the post-A2 behaviour — which is what makes it worth a test
     // rather than a sentence. Every document here is CommonMark and nothing
     // else, so the canonicaliser owes it back unchanged.
@@ -593,7 +636,7 @@ fn plain_commonmark_passes_through_verbatim() {
         "a\u{E001}b\n",
         "> a\u{E004}b\n",
     ] {
-        assert_eq!(serialize(src), src, "plain CommonMark rewritten: {src:?}");
+        assert_eq!(canonical(src), src, "plain CommonMark rewritten: {src:?}");
     }
 }
 
@@ -603,15 +646,15 @@ fn the_rustdoc_names_the_only_two_normalisations() {
     // form, applied document-wide, and CommonMark distinguishes neither — so
     // they are named in the doc instead of softening what it promises. Inside
     // code both are held byte for byte, which the fence cases above pin.
-    assert_eq!(serialize("a\r\nb\n"), "a\nb\n");
-    assert_eq!(serialize("a\n\n\n\nb\n"), "a\n\nb\n");
+    assert_eq!(canonical("a\r\nb\n"), "a\nb\n");
+    assert_eq!(canonical("a\n\n\n\nb\n"), "a\n\nb\n");
 }
 
 #[test]
 fn a_fence_bearing_document_from_the_shared_pool_holds() {
     // The atom that has been in `commonmark_adversarial` since the pool was
-    // written, never once handed to `serialize`.
-    assert_serialize_invariants("```\n｜青梅《おうめ》\n［＃改ページ］\n```\n");
+    // written, never once handed to `canonicalize`.
+    assert_canonical_invariants("```\n｜青梅《おうめ》\n［＃改ページ］\n```\n");
 }
 
 proptest! {
@@ -623,7 +666,7 @@ proptest! {
     /// container prefix is asserted as strictly as one in column 1.
     #[test]
     fn a_fenced_payload_survives_verbatim((src, payload) in fenced_document()) {
-        let out = serialize(&src);
+        let out = canonical(&src);
         prop_assert!(
             out.contains(&payload),
             "fenced payload {payload:?} lost from src={src:?}\n  out = {out:?}",
@@ -632,37 +675,37 @@ proptest! {
 
     /// …and the surrounding document still satisfies I3 and I5.
     #[test]
-    fn a_fenced_document_satisfies_both_serialize_invariants((src, _) in fenced_document()) {
-        assert_serialize_invariants(&src);
+    fn a_fenced_document_satisfies_both_canonical_invariants((src, _) in fenced_document()) {
+        assert_canonical_invariants(&src);
     }
 
     /// An inline code span, at every container depth.
     #[test]
     fn an_inline_code_span_survives_verbatim((src, payload) in inline_code_document()) {
-        let out = serialize(&src);
+        let out = canonical(&src);
         prop_assert!(
             out.contains(&payload),
             "code span {payload:?} lost from src={src:?}\n  out = {out:?}",
         );
-        assert_serialize_invariants(&src);
+        assert_canonical_invariants(&src);
     }
 
     /// An indented code block, whose boundaries the mask declined to compute.
     #[test]
     fn an_indented_block_survives_verbatim((src, payload) in indented_code_document()) {
-        let out = serialize(&src);
+        let out = canonical(&src);
         prop_assert!(
             out.contains(&payload),
             "indented block {payload:?} lost from src={src:?}\n  out = {out:?}",
         );
-        assert_serialize_invariants(&src);
+        assert_canonical_invariants(&src);
     }
 
     /// Whole documents from the shared pools, scanned for fences the way the
     /// fuzz target scans arbitrary bytes.
     #[test]
-    fn mixed_documents_satisfy_both_serialize_invariants(src in prose()) {
-        assert_serialize_invariants(&src);
+    fn mixed_documents_satisfy_both_canonical_invariants(src in prose()) {
+        assert_canonical_invariants(&src);
     }
 
     /// I7 — a document that is CommonMark and nothing else comes back byte
@@ -674,8 +717,8 @@ proptest! {
     /// both while splitting the list, blockquote or table that owned it.
     #[test]
     fn a_rule_row_bearing_commonmark_document_is_returned_verbatim(src in rule_row_document()) {
-        prop_assert_eq!(&serialize(&src), &src, "rule row document rewritten");
-        assert_serialize_invariants(&src);
+        prop_assert_eq!(&canonical(&src), &src, "rule row document rewritten");
+        assert_canonical_invariants(&src);
     }
 
     /// The same, for the codepoints this crate reserves — which the sibling
@@ -684,8 +727,32 @@ proptest! {
     fn a_reserved_codepoint_bearing_document_is_returned_verbatim(
         src in reserved_codepoint_document()
     ) {
-        prop_assert_eq!(&serialize(&src), &src, "reserved codepoint document rewritten");
-        assert_serialize_invariants(&src);
+        prop_assert_eq!(&canonical(&src), &src, "reserved codepoint document rewritten");
+        assert_canonical_invariants(&src);
+    }
+
+    /// I9 — text no pool wrote still gets an answer.
+    ///
+    /// The fuzz target carries totality over arbitrary UTF-8, but no `just
+    /// ci` step runs it; this is the half of that reach a gate has. Drawn
+    /// codepoint by codepoint rather than from the atom pools, so control
+    /// characters, the codepoints this crate reserves and unpaired notation
+    /// all appear: the shapes a caller reaches by pasting from elsewhere.
+    #[test]
+    fn any_in_budget_source_is_answered_with_a_document(
+        src in prop::collection::vec(any::<char>(), 0..=48)
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+    ) {
+        let answer = canonicalize(&src);
+        prop_assert!(
+            answer.is_ok(),
+            "I9 (totality) violated for src={src:?}: {answer:?}"
+        );
+        let out = answer.unwrap_or_default();
+        prop_assert!(
+            !out.is_empty() || is_blank(&src),
+            "I9: an empty answer for a source with content in it: src={src:?}"
+        );
     }
 
     /// I8 — every reserved codepoint the author typed is still there, and no
@@ -697,7 +764,7 @@ proptest! {
     fn the_reserved_codepoints_of_the_source_are_neither_lost_nor_invented(
         src in reserved_codepoint_in_prose()
     ) {
-        let out = serialize(&src);
+        let out = canonical(&src);
         for reserved in sentinels::ALL {
             prop_assert_eq!(
                 src.matches(reserved).count(),

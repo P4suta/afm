@@ -30,6 +30,7 @@ use core::fmt::Debug;
 use core::hash::Hash;
 use core::iter::once;
 use core::ops::Range as ByteRange;
+use std::collections::BTreeSet;
 use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
@@ -422,8 +423,14 @@ proptest! {
 /// `the_geometric_types_stay_constructible_from_a_consumer_crate`.
 const OPEN_BY_DESIGN: &[&str] = &["Span", "Position", "Range"];
 
-/// The six the rule had missed. Named individually so a regression reports
-/// the type rather than a count.
+/// The six the rule had missed, plus `Error`. Named individually so a
+/// regression reports the type rather than a count — and so deleting one
+/// fails here rather than passing by simply not being found.
+///
+/// `Error` earns its place for a reason the others do not have: the two
+/// failures it names today are the two the canonicaliser can reach today, and
+/// a third — a pass budget, an upstream `ParseError` variant — is exactly the
+/// kind of thing that arrives in a minor release.
 const SEALED_BY_RULE: &[&str] = &[
     "Severity",
     "DiagnosticSource",
@@ -431,6 +438,7 @@ const SEALED_BY_RULE: &[&str] = &[
     "Document",
     "TableRow",
     "ListItem",
+    "Error",
 ];
 
 #[derive(Debug)]
@@ -588,6 +596,94 @@ fn the_geometric_types_are_left_unsealed_on_purpose() {
              construction and functional record update for a field set that cannot grow"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// the fallibility boundary — one public function returns a `Result`
+// ---------------------------------------------------------------------------
+
+/// The entry points that must stay infallible, and the reason the rule below
+/// is a rule rather than a sentence in `canonicalize`'s rustdoc.
+///
+/// CommonMark is a total grammar — pulldown-cmark, comrak and markdown-rs all
+/// render infallibly — so what the lexer saw comes back as a [`Diagnostic`]
+/// beside a rendered document, at a rustc warning's standing. Giving one of
+/// these a `Result` would be a breaking change made in the name of tidiness,
+/// and it is the *symmetry* with `canonicalize` that would motivate it. Read
+/// off the source rather than asserted per function, so an entry point added
+/// later is covered without editing this.
+const INFALLIBLE_BY_DESIGN: &[&str] = &[
+    "render",
+    "render_to_ir",
+    "render_blocks_to_ir",
+    "render_to_string",
+];
+
+/// The name a `pub fn` declares, `const` and `async` spellings included.
+fn public_fn_name(decl: &str) -> Option<String> {
+    let mut rest = decl.trim().strip_prefix("pub ")?.trim_start();
+    for qualifier in ["const ", "async ", "extern "] {
+        if let Some(tail) = rest.strip_prefix(qualifier) {
+            rest = tail.trim_start();
+        }
+    }
+    let name: String = rest
+        .strip_prefix("fn ")?
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+#[test]
+fn the_canonicaliser_is_the_only_public_function_that_can_fail() {
+    let publics: Vec<String> = public_type_decls().into_iter().map(|d| d.name).collect();
+    let mut fallible: Vec<String> = Vec::new();
+    let mut infallible_seen: BTreeSet<String> = BTreeSet::new();
+    let mut checked = 0usize;
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for start in 0..lines.len() {
+            if !opens_public_surface(lines[start], &publics) {
+                continue;
+            }
+            let decl = declaration_text(&lines, start);
+            let Some(name) = public_fn_name(&decl) else {
+                continue;
+            };
+            checked += 1;
+            if INFALLIBLE_BY_DESIGN.contains(&name.as_str()) {
+                infallible_seen.insert(name.clone());
+            }
+            if decl.contains("-> Result") {
+                fallible.push(format!("{}:{}: {name}", path.display(), start + 1));
+            }
+        }
+    }
+    assert!(
+        checked > 15,
+        "only {checked} public functions found; the reader must be retargeted, not deleted"
+    );
+    assert_eq!(
+        infallible_seen,
+        INFALLIBLE_BY_DESIGN
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect::<BTreeSet<String>>(),
+        "an entry point named here is gone or renamed; retarget the rule rather than \
+         letting it pass by finding nothing"
+    );
+    assert_eq!(
+        fallible.len(),
+        1,
+        "exactly one public function may return a `Result` — the canonicaliser, which \
+         has a source it can be handed too much of. Found: {fallible:?}"
+    );
+    assert!(
+        fallible[0].ends_with(": canonicalize"),
+        "the fallible one must be `canonicalize`, not {:?}",
+        fallible[0]
+    );
 }
 
 // ---------------------------------------------------------------------------

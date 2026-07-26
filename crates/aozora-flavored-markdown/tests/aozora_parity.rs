@@ -9,7 +9,7 @@
 //! the 青空文庫 markup in the two outputs to be the same.
 //!
 //! Only the public surface is used on the parser's side ([`Document`],
-//! [`Document::parse`], `to_html`, `serialize`), because that is all this
+//! [`Document::parse`], `to_html`, `canonicalize`), because that is all this
 //! crate is allowed to depend on. A regression that reaches for something
 //! else would not be caught here; a regression in what a construct renders
 //! to would be, immediately.
@@ -60,6 +60,13 @@ fn parse(src: &str) -> Snapshot {
         .expect("a fixture is never past the parser's span budget")
         .snapshot()
 }
+
+/// This crate's own reading of `src`, failing for the same one reason.
+fn canonical(src: &str) -> String {
+    aozora_flavored_markdown::canonicalize(src)
+        .expect("a fixture is never past the parser's span budget")
+}
+
 use aozora_flavored_markdown::html as md_html;
 use aozora_flavored_markdown::{AOZORA_MD_CLASSES, Options};
 use aozora_flavored_markdown_test_support::check_html_tag_balance;
@@ -595,8 +602,8 @@ fn every_construct_of_a_pure_aozora_document_is_accounted_for() {
 }
 
 #[test]
-fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
-    // On pure 青空文庫 source `aozora_flavored_markdown::serialize` is a thin
+fn aozora_flavored_markdown_canonicalize_matches_the_parsers_own() {
+    // On pure 青空文庫 source `aozora_flavored_markdown::canonicalize` is a thin
     // delegate, so the two must produce identical bytes. What CommonMark reads
     // as block structure is not pure 青空文庫 source, which is why the rule
     // fixtures are skipped for the same reason the word comparison skips them
@@ -606,10 +613,10 @@ fn aozora_flavored_markdown_serialize_matches_the_parsers_own() {
             continue;
         }
         let aozora_out = parse(src).to_source();
-        let md_out = aozora_flavored_markdown::serialize(src);
+        let md_out = canonical(src);
         assert_eq!(
             md_out, aozora_out,
-            "serialize drift on {label} ({src:?}):\n  aozora-md: {md_out:?}\n  aozora: {aozora_out:?}"
+            "canonicalize drift on {label} ({src:?}):\n  aozora-md: {md_out:?}\n  aozora: {aozora_out:?}"
         );
     }
 }
@@ -639,7 +646,7 @@ fn the_delegation_stops_where_commonmark_owns_the_bytes() {
         "本文\u{E001}続き\n",
     ] {
         let aozora_out = parse(src).to_source();
-        let md_out = aozora_flavored_markdown::serialize(src);
+        let md_out = canonical(src);
         assert_eq!(md_out, src, "the source must survive this crate: {src:?}");
         assert_ne!(
             aozora_out, src,

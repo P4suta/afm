@@ -1,5 +1,5 @@
-//! Parse an aozora-flavored-markdown source and confirm `serialize ∘ parse ≡ id` on the
-//! lexer-normalised input, demonstrated on a single file.
+//! Parse an aozora-flavored-markdown source and confirm `canonicalize ∘ parse ≡ id` on
+//! the lexer-normalised input, demonstrated on a single file.
 //!
 //! Run:
 //!
@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use aozora_flavored_markdown::serialize;
+use aozora_flavored_markdown::canonicalize;
 
 fn main() -> ExitCode {
     let Some(path) = env::args().nth(1) else {
@@ -25,7 +25,15 @@ fn main() -> ExitCode {
         }
     };
 
-    let serialised = serialize(&input);
+    let canonical = match canonicalize(&input) {
+        Ok(s) => s,
+        // The error type says which of the two it was, so print it rather
+        // than restating a guess about the input.
+        Err(e) => {
+            eprintln!("failed to canonicalize {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Mirror the lexer's sanitize phase: strip UTF-8 BOM, CRLF → LF.
     // Anything the lexer normalises cannot round-trip byte-for-byte to
@@ -36,14 +44,14 @@ fn main() -> ExitCode {
         .unwrap_or(&input)
         .replace("\r\n", "\n");
 
-    if serialised == expected {
-        println!("round-trip OK ({} bytes)", serialised.len());
+    if canonical == expected {
+        println!("round-trip OK ({} bytes)", canonical.len());
         ExitCode::SUCCESS
     } else {
         eprintln!(
             "round-trip drift: {} bytes in (post-sanitize) → {} bytes out",
             expected.len(),
-            serialised.len(),
+            canonical.len(),
         );
         ExitCode::from(3)
     }

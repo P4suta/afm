@@ -16,7 +16,7 @@
 //! is the core guarantee; the assertions additionally pin that the
 //! innermost content still renders.
 
-use aozora_flavored_markdown::{Options, render, render_blocks_to_ir, render_to_ir, serialize};
+use aozora_flavored_markdown::{Options, canonicalize, render, render_blocks_to_ir, render_to_ir};
 
 /// ~100k nested blockquotes on a single line, wrapping a leaf paragraph.
 /// Pre-fix this overflowed `ast_splice::walk`'s recursion; the input is
@@ -50,11 +50,12 @@ fn render_blocks_to_ir_survives_deep_blockquote_nesting() {
 }
 
 #[test]
-fn serialize_survives_deep_nesting() {
-    // `serialize` runs the aozora linear serializer (not comrak), but
+fn canonicalize_survives_deep_nesting() {
+    // `canonicalize` runs the aozora linear serializer (not comrak), but
     // pin it too so the whole public surface is covered.
-    let serialized = serialize(&deeply_nested_blockquotes());
-    assert!(serialized.contains("deep"));
+    let canonical =
+        canonicalize(&deeply_nested_blockquotes()).expect("in-budget source canonicalises");
+    assert!(canonical.contains("deep"));
 }
 
 #[test]

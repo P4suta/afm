@@ -1,5 +1,5 @@
 //! Lifts the regions the canonicaliser must not read out of its reach, for
-//! `crate::serialize` — the stronger half of the split
+//! `crate::canonicalize` — the stronger half of the split
 //! `crate::code_block_mask` documents. A whole region leaves as one
 //! placeholder, so the line structure inside it (a blank-line run, a rule row,
 //! the `> ` a container puts in front of every line) never reaches the

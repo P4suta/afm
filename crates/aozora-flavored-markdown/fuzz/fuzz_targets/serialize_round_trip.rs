@@ -1,15 +1,15 @@
-//! Fuzz target — `aozora_flavored_markdown::serialize` on arbitrary UTF-8.
+//! Fuzz target — `aozora_flavored_markdown::canonicalize` on arbitrary UTF-8.
 //!
-//! Two invariants, because the first alone proved insufficient:
+//! Three invariants, because the first alone proved insufficient:
 //!
-//! * **I3, fixed point.** `serialize(serialize(src))` must be byte-identical
-//!   to `serialize(src)`: the lex pipeline canonicalises the source on the
-//!   first pass; oscillation on the second would mean the classifier and the
-//!   serializer disagree on the canonical form.
+//! * **I3, fixed point.** `canonicalize(canonicalize(src))` must be
+//!   byte-identical to `canonicalize(src)`: the lex pipeline canonicalises the
+//!   source on the first pass; oscillation on the second would mean the
+//!   classifier and the canonicaliser disagree on the canonical form.
 //! * **I5, fence fidelity.** Every fenced code interior of `src` must reappear
 //!   in the output byte for byte. I3 cannot see this class of bug at all — a
 //!   *consistently* wrong rewrite is still a fixed point — which is how a
-//!   `serialize` that skipped the code-block mask fuzzed clean for a release
+//!   canonicaliser that skipped the code-block mask fuzzed clean for a release
 //!   cycle while canonicalising fence bodies as prose.
 //! * **I8, reserved-codepoint fidelity.** Every codepoint the crate reserves
 //!   appears in the output exactly as often as in the source. Four of the five
@@ -19,11 +19,19 @@
 //!   happens outside any fence. Every input carrying one is UTF-8 the fuzzer
 //!   reaches directly, which is what makes this target the right home for it.
 //!
+//! * **I9, totality.** An `Err` *is* a finding here. libFuzzer feeds inputs
+//!   bounded by `-max_len`, orders of magnitude under the `u32` span budget,
+//!   and the only other failure needs a source within a placeholder's width
+//!   of that same bound — so on this target the answer is always `Ok`, and
+//!   returning early on an `Err` would be the old bug's hiding place: when
+//!   failure was spelled `""`, I3 held vacuously (`""` is a fixed point) and
+//!   I5 and I8 read a document with nothing in it as having lost nothing.
+//!
 //! Run with: `just fuzz serialize_round_trip -- -runs=10000`
 
 #![no_main]
 
-use aozora_flavored_markdown::{sentinels, serialize};
+use aozora_flavored_markdown::{canonicalize, sentinels};
 use aozora_flavored_markdown_test_support::check_fence_fidelity;
 use libfuzzer_sys::fuzz_target;
 
@@ -31,8 +39,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(src) = core::str::from_utf8(data) else {
         return;
     };
-    let first = serialize(src);
-    let second = serialize(&first);
+    let first = canonicalize(src)
+        .unwrap_or_else(|e| panic!("I9 (totality) violated for src={src:?}: {e}"));
+    let second = canonicalize(&first)
+        .unwrap_or_else(|e| panic!("I9 (totality) violated for a canonical form: {e}"));
     assert_eq!(
         first, second,
         "I3 fixed-point broken for src={src:?}: first vs second differ"

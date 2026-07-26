@@ -523,7 +523,16 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // hatches and their security warnings, the two getters and the raw-HTML
 // constructors' prose all went, and the typed `with_*` builders that replaced
 // them each say their one thing in a line. Bookkeeping after a cut.
-const MAX_DOC_LINES: u64 = 1_571;
+//
+// Raised by 13 for the crate's first public error type. Nine are `Error`
+// itself: which of the two failures a caller can provoke, and — the
+// load-bearing line — that the rendering entry points deliberately do *not*
+// gain a `Result`, because CommonMark is a total grammar and a diagnostic has
+// a warning's standing. Four are `canonicalize`'s `# Errors` section, which
+// `clippy::missing_errors_doc` requires of a public `Result`, and the `?` its
+// doctest now needs. None of it restates the signature: the signature says
+// `Result<String, Error>` and stops there.
+const MAX_DOC_LINES: u64 = 1_584;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured

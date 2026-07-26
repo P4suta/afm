@@ -193,22 +193,24 @@ fn empty_title_heading_hint_never_emits_an_empty_heading() {
 }
 
 #[test]
-fn heading_hint_round_trips_through_serialize() {
-    // I3 (serialize ∘ parse fixed point) demands that a heading hint
+fn heading_hint_round_trips_through_canonicalize() {
+    // I3 (canonicalize ∘ parse fixed point) demands that a heading hint
     // reconstructs its original `［＃「…」は…見出し］` form through
-    // the serializer even though the HTML pipeline promotes the host
-    // paragraph to `<h{level}>`. The serializer works off the lexer's
+    // the canonicaliser even though the HTML pipeline promotes the host
+    // paragraph to `<h{level}>`. The canonicaliser works off the lexer's
     // placeholder registry, so the heading's HTML-side promotion does
     // not lose round-trip information.
     let input = "第一篇［＃「第一篇」は大見出し］";
-    let serialised = aozora_flavored_markdown::serialize(input);
+    let canonical =
+        aozora_flavored_markdown::canonicalize(input).expect("in-budget source canonicalises");
     assert!(
-        serialised.contains("［＃「第一篇」は大見出し］"),
-        "heading-hint markup must survive round-trip; got: {serialised}"
+        canonical.contains("［＃「第一篇」は大見出し］"),
+        "heading-hint markup must survive round-trip; got: {canonical}"
     );
-    let second = aozora_flavored_markdown::serialize(&serialised);
+    let second =
+        aozora_flavored_markdown::canonicalize(&canonical).expect("a canonical form settles");
     assert_eq!(
-        serialised, second,
-        "serialize ∘ parse must be a fixed point after one iteration"
+        canonical, second,
+        "canonicalize ∘ parse must be a fixed point after one iteration"
     );
 }
