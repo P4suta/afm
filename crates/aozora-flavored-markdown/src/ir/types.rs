@@ -9,14 +9,13 @@
 //! [`Inline::Aozora`] with an opaque `kind` tag, because mirroring the
 //! sibling parser's type vocabulary would own it twice (ADR-0021).
 
-use serde::Serialize;
-
 #[doc(inline)]
 pub use crate::diagnostics::Span;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // ADR-0013 sealed the IR enums; the containers around them are sealed for the
 // same reason — document-level metadata (a source digest, a schema tag) is
 // exactly the kind of field a later release adds.
@@ -25,12 +24,16 @@ pub struct Document {
     pub blocks: Vec<Block>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )
 )]
 // New Markdown constructs land as new variants; `#[non_exhaustive]`
 // (ADR-0013) lets that happen in a minor release without breaking external
@@ -40,34 +43,43 @@ pub struct Document {
 pub enum Block {
     Paragraph {
         children: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Heading {
         level: u8,
         children: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Blockquote {
         children: Vec<Block>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     List {
         ordered: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         start: Option<u32>,
         items: Vec<ListItem>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     // `Block::CodeBlock` stutters once the enum is `Block` (the same reason
@@ -75,29 +87,36 @@ pub enum Block {
     // half of the pair. The wire tag stays `codeBlock` — the tag names the
     // node across a union that has both halves in it, where `code` alone
     // would be ambiguous.
-    #[serde(rename = "codeBlock")]
+    #[cfg_attr(feature = "serde", serde(rename = "codeBlock"))]
     Code {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         lang: Option<String>,
         value: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     ThematicBreak {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Table {
         header: TableRow,
         rows: Vec<TableRow>,
         align: Vec<TableAlign>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     /// A 青空文庫 construct occupying a whole block.
@@ -107,44 +126,51 @@ pub enum Block {
     /// nesting without this crate re-deriving it.
     Aozora {
         /// Opaque notation tag. See [`Inline::Aozora`]'s `kind`.
-        #[serde(rename = "aozoraKind")]
+        #[cfg_attr(feature = "serde", serde(rename = "aozoraKind"))]
         kind: String,
         /// As [`Inline::Aozora`]'s `span`, and additionally `None` for a
         /// close marker synthesised because the document ended with the
         /// container still open.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         span: Option<Span>,
         /// Rebranded to `aozora-md-*` classes (ADR-0011).
         html: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 // See `Document`: a row gains fields (a header flag, a span) without the
 // variants around it changing.
 #[non_exhaustive]
 pub struct TableRow {
     pub cells: Vec<Vec<Inline>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub range: Option<Range>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 // As `TableRow`: GFM task-list state is the obvious next field here.
 #[non_exhaustive]
 pub struct ListItem {
     pub children: Vec<Block>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub range: Option<Range>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // The IR enum ADR-0013 missed. `Default` here is the column's *absence* of an
 // alignment marker, which is also the variant a fresh column starts from.
 #[non_exhaustive]
@@ -156,12 +182,16 @@ pub enum TableAlign {
     Default,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )
 )]
 // See `Block`: `#[non_exhaustive]` (ADR-0013) keeps new inline Markdown
 // constructs additive for external consumers.
@@ -169,45 +199,54 @@ pub enum TableAlign {
 pub enum Inline {
     Text {
         value: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Code {
         value: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Strong {
         children: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Emphasis {
         children: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     Link {
         href: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         title: Option<String>,
         children: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     /// CommonMark image. `alt` carries the alt-text inlines as comrak parses
     /// them, so it is a list rather than a string.
     Image {
         url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         title: Option<String>,
         alt: Vec<Inline>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     LineBreak {
         hard: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
     /// A 青空文庫 construct inside a text run: ruby, bouten, 縦中横, 外字,
@@ -220,7 +259,7 @@ pub enum Inline {
         /// already the union's discriminant. An **open** string set: an
         /// unrecognised tag just means a notation newer than the consumer,
         /// and `html` still renders it.
-        #[serde(rename = "aozoraKind")]
+        #[cfg_attr(feature = "serde", serde(rename = "aozoraKind"))]
         kind: String,
         /// End-exclusive byte range: slicing the source you passed in
         /// recovers the text the author wrote.
@@ -230,7 +269,8 @@ pub enum Inline {
         /// bytes (BOM stripped, `\r\n` folded, accent digraphs combined,
         /// decorative rules given a blank line), so the offsets would
         /// address a different — possibly mid-codepoint — position.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "serde", serde(default))]
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         span: Option<Span>,
         /// Rebranded to `aozora-md-*` classes (ADR-0011), and byte-identical
         /// to the run this notation contributes to [`crate::render`] —
@@ -247,9 +287,10 @@ pub enum Inline {
 /// bridge maps them to editor positions without UTF-8 byte arithmetic —
 /// which the previous pseudo-byte representation silently broke for
 /// multi-byte CJK.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // Left open for literal construction for the reason `Span` is — see its
 // definition in `crate::diagnostics`.
 pub struct Range {
@@ -267,9 +308,10 @@ impl Range {
 
 /// `column` is grapheme-blind, matching comrak, so it suits editor surfaces
 /// but not byte slicing.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // Left open for literal construction; see `Range`.
 pub struct Position {
     pub line: u32,
@@ -284,8 +326,17 @@ impl Position {
     }
 }
 
-#[cfg(test)]
+// Every assertion below reads a serialised value, so the module follows the
+// feature that puts one on the wire — as `diagnostics::miette_impl` follows
+// `miette`. The gate is what keeps a `--no-default-features` build of this
+// crate's own tests compiling.
+#[cfg(all(test, feature = "serde"))]
 mod tests {
+    use core::fmt::Debug;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
     use super::*;
 
     /// The error is unreachable: `serde_json` only fails for a custom
@@ -591,5 +642,120 @@ mod tests {
                 "the `TableAlign` variant tagged {tag} does not serialise under it"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // the read-back half — a format only one side can read is a dead letter
+    // -----------------------------------------------------------------
+    //
+    // Everything above asserts what these types *write*. ADR-0017 calls the
+    // IR a stable wire format and ADR-0012 says the same of the diagnostic
+    // envelope, and a format is a claim about two processes: what one writes,
+    // another reads. Nothing in the workspace asserted the second half, and
+    // nothing could — no type here derived `Deserialize`, so a test that tried
+    // did not compile. Every serde assertion in the suite therefore held for
+    // a write-only format, which is what these types shipped as.
+    //
+    // The samples are the ones the tag alphabet above already forces to be
+    // exhaustive: `block_tag` / `inline_tag` are wildcard-free `match`es, so
+    // a variant added to either union is a compile error until it is named,
+    // and naming it enrols it here too. No second list to keep in step.
+    //
+    // Every optional field in those samples is `None`, so every key
+    // `skip_serializing_if` can drop is dropped: what these assert is that a
+    // document with the keys missing still reads. The `Some` half is rendered
+    // output rather than a literal, and is asserted over generated sources by
+    // `tests/property_ir_value_identity.rs`.
+    //
+    // The `#[serde(default)]` beside each skip is not what makes this pass —
+    // the fields are `Option`, and serde's derive already resolves a missing
+    // one to `None`. It is the declaration that will matter for the first
+    // omittable field that is not an `Option`, and the source-text rule in
+    // `tests/public_type_contract.rs` is what holds it there.
+
+    // Read back equal, and rewrite what it was read from. The second half is
+    // what catches a `#[serde(default)]` that supplies something other than
+    // the value `skip_serializing_if` omitted: the pair is then a round trip
+    // in neither direction, and only re-serialising says so.
+    fn assert_reads_back<T: Serialize + DeserializeOwned + PartialEq + Debug>(
+        value: &T,
+        label: &str,
+    ) {
+        let written = json(value);
+        let read: T = match serde_json::from_value(written.clone()) {
+            Ok(read) => read,
+            Err(err) => panic!("{label} did not read back from {written}: {err}"),
+        };
+        assert_eq!(
+            &read, value,
+            "{label} read back as a different value from {written}"
+        );
+        assert_eq!(
+            json(&read),
+            written,
+            "{label} read back does not rewrite the JSON it was read from"
+        );
+    }
+
+    #[test]
+    fn every_block_variant_reads_back_from_the_wire_form_it_writes() {
+        for block in &one_of_every_block() {
+            assert_reads_back(block, block_tag(block));
+        }
+    }
+
+    #[test]
+    fn every_inline_variant_reads_back_from_the_wire_form_it_writes() {
+        for inline in &one_of_every_inline() {
+            assert_reads_back(inline, inline_tag(inline));
+        }
+    }
+
+    #[test]
+    fn every_table_alignment_reads_back_from_its_frozen_wire_tag() {
+        for align in [
+            TableAlign::Left,
+            TableAlign::Center,
+            TableAlign::Right,
+            TableAlign::Default,
+        ] {
+            assert_reads_back(&align, "TableAlign");
+        }
+    }
+
+    // The shapes the two unions travel inside. `Document` is what a consumer
+    // is actually handed; `ListItem` and `TableRow` are reachable only
+    // through a variant, so an unpaired attribute on either shows up not as a
+    // bad list item but as a whole document that will not read. The geometry
+    // types come along because they are the leaves every other shape's
+    // optional keys resolve to.
+    #[test]
+    fn the_containers_and_the_geometry_read_back_too() {
+        assert_reads_back(
+            &Document {
+                blocks: one_of_every_block(),
+            },
+            "Document",
+        );
+        assert_reads_back(
+            &ListItem {
+                children: one_of_every_block(),
+                range: Some(Range::new(Position::new(1, 1), Position::new(2, 4))),
+            },
+            "ListItem",
+        );
+        assert_reads_back(
+            &TableRow {
+                cells: vec![one_of_every_inline()],
+                range: None,
+            },
+            "TableRow",
+        );
+        assert_reads_back(
+            &Range::new(Position::new(1, 1), Position::new(9, 3)),
+            "Range",
+        );
+        assert_reads_back(&Position::new(4, 12), "Position");
+        assert_reads_back(&Span::new(0, 7), "Span");
     }
 }

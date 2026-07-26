@@ -23,7 +23,10 @@ aozora          = { workspace = true }
 # `miette`: the library's own `Diagnostic` implements miette's trait, so this
 # binary reports what a render saw directly instead of copying it into a
 # shadow type it then has to keep in step.
-aozora-flavored-markdown    = { workspace = true, features = ["miette"] }
+# `serde`: `--format json` serialises `Severity` / `DiagnosticSource` / `Span`
+# straight into the `aozora-md.diagnostics.v1` envelope (ADR-0012), so the
+# library's own derives are what the binary writes.
+aozora-flavored-markdown    = { workspace = true, features = ["miette", "serde"] }
 clap      = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen   = { workspace = true }

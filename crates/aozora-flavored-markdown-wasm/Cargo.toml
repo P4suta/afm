@@ -23,7 +23,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # `tsify` makes the lib's IR + diagnostic types derive `Tsify`, so wasm-pack
 # emits their `.d.ts` alongside this crate's envelope types (ADR-0017).
-aozora-flavored-markdown   = { workspace = true, features = ["tsify"] }
+# `serde` is named as well as implied by `tsify`: this crate's envelopes
+# serialise the lib's `Document` / `Diagnostic` through serde-wasm-bindgen, so
+# the requirement is its own and does not rest on what `tsify` happens to pull.
+aozora-flavored-markdown   = { workspace = true, features = ["tsify", "serde"] }
 # Editor-assist surface (completion catalogue + the source-coordinate
 # Document API used by the playground's hover / inlay / outline / fold
 # features). aozora-flavored-markdown composes aozora; here it also re-exposes aozora's own

@@ -717,13 +717,22 @@ fn fields_of(lines: &[&str], decl: usize) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// Whether the attribute block above a declaration puts it on the wire. Only
-/// a `#[derive(…)]` counts: the `#[cfg_attr(feature = "tsify", …)]` beside it
-/// names `Tsify`, which follows serde rather than deciding anything.
-fn derives_serialize(lines: &[&str], decl: usize) -> bool {
+/// The attribute line that puts a declaration on the wire, if there is one.
+/// The derive sits behind `#[cfg_attr(feature = "serde", …)]`, so the match is
+/// on the `derive(…Serialize…)` wherever it is written; the `tsify` `cfg_attr`
+/// beside it names `Tsify`, which follows serde rather than deciding anything.
+///
+/// Returned rather than reduced to a `bool` because the *rest* of that one
+/// line is itself contract — see
+/// [`every_type_on_the_wire_can_be_read_back_off_it`].
+fn wire_derive<'a>(lines: &[&'a str], decl: usize) -> Option<&'a str> {
     attributes_above(lines, decl)
-        .iter()
-        .any(|line| line.starts_with("#[derive(") && line.contains("Serialize"))
+        .into_iter()
+        .find(|line| line.contains("derive(") && line.contains("Serialize"))
+}
+
+fn derives_serialize(lines: &[&str], decl: usize) -> bool {
+    wire_derive(lines, decl).is_some()
 }
 
 /// Whether the file declares a public reader of that name, `const` or not.
@@ -773,10 +782,14 @@ fn every_wire_field_a_consumer_cannot_name_has_a_reader_of_the_same_name() {
 }
 
 /// The JSON one public value serialises to.
+// The rule above reads the source text and holds whatever the manifest says;
+// this one runs the derive, so it follows the feature that produces it.
+#[cfg(feature = "serde")]
 fn wire<T: serde::Serialize>(value: T) -> serde_json::Value {
     serde_json::to_value(value).expect("a public value must serialise")
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn the_wire_keys_of_a_diagnostic_are_exactly_what_its_readers_answer() {
     for diagnostic in &diagnostics_from_the_malformed_pool() {
@@ -814,6 +827,232 @@ fn the_wire_keys_of_a_diagnostic_are_exactly_what_its_readers_answer() {
         );
         assert_eq!(object["span"], wire(diagnostic.span()), "span: {json}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// the other direction — a wire format is a claim about two processes
+// ---------------------------------------------------------------------------
+//
+// Every rule above reads what these types *write*. ADR-0012 and ADR-0017 call
+// the diagnostic envelope and the IR stable wire formats, and a format is by
+// definition something a second process reads: the CLI writes
+// `aozora-md.diagnostics.v1` and no Rust consumer could parse it back, the
+// wasm bridge posts an IR the editor could not return. That was not a rule
+// anybody had broken — it was a rule nothing could state, because no type
+// here derived `Deserialize` and a test that asked would not compile.
+//
+// So the two rules below are read off the source text, like the sealing rule
+// above and for the same reason: they have to hold for the type declared
+// *next*, not for the twelve that exist today.
+
+/// The wire types, in `sources()` order. Named so the rules below cannot pass
+/// by matching nothing, and so a type leaving the wire is a deliberate edit
+/// here rather than a rule that quietly covers less.
+const WIRE_TYPES: &[&str] = &[
+    "Severity",
+    "DiagnosticSource",
+    "Span",
+    "Diagnostic",
+    "Document",
+    "Block",
+    "TableRow",
+    "ListItem",
+    "TableAlign",
+    "Inline",
+    "Range",
+    "Position",
+];
+
+/// The condition an attribute applies under — the `cfg_attr` predicate it
+/// carries, or the empty string when it carries none.
+///
+/// The two derives being spelled on one line or on two is formatting; being
+/// live under the *same* condition is contract, and this is what tells the
+/// two apart.
+fn attribute_condition(line: &str) -> &str {
+    line.split_once("cfg_attr(")
+        .and_then(|(_, rest)| rest.split_once(','))
+        .map_or("", |(condition, _)| condition.trim())
+}
+
+/// The `serde` feature gate, spelled as it appears in an attribute.
+const WIRE_CONDITION: &str = "feature = \"serde\"";
+
+#[test]
+fn every_type_on_the_wire_can_be_read_back_off_it() {
+    let mut found: Vec<String> = Vec::new();
+    let mut write_only: Vec<String> = Vec::new();
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let Some((_, name)) = declared_type(line) else {
+                continue;
+            };
+            let Some(writer) = wire_derive(&lines, idx) else {
+                continue;
+            };
+            found.push(name.clone());
+            // Not just "a `Deserialize` is somewhere above": the two halves
+            // must be live under the same condition, or the type is a wire
+            // format for some builds and a write-only one for the rest —
+            // which is a difference a consumer meets as a link error.
+            let condition = attribute_condition(writer);
+            let readable = attributes_above(&lines, idx).iter().any(|attribute| {
+                attribute.contains("derive(")
+                    && attribute.contains("Deserialize")
+                    && attribute_condition(attribute) == condition
+            });
+            if !readable || condition != WIRE_CONDITION {
+                write_only.push(format!("{}: {name} — {}", path.display(), writer.trim()));
+            }
+        }
+    }
+    assert!(
+        write_only.is_empty(),
+        "these types serialise but cannot be read back, or read back under a different \
+         condition than they write under. A format only one side can parse is a dead letter, \
+         and `Serialize` alone is what shipped it: {write_only:#?}"
+    );
+    assert_eq!(
+        found, WIRE_TYPES,
+        "the set of types on the wire changed; add or remove it here deliberately rather than \
+         letting this rule pass by finding nothing"
+    );
+}
+
+/// Whether a line is an attribute rather than code, a comment or a doc line.
+/// Prose *about* `skip_serializing_if` — of which this file and `ir/types.rs`
+/// both carry some — is not an attribute and must not read as one.
+fn is_attribute(line: &str) -> bool {
+    line.trim_start().starts_with("#[")
+}
+
+/// The unbroken run of attribute lines containing `at`, as a half-open index
+/// pair.
+///
+/// One field's attributes and never the previous field's: the declaration
+/// between two fields is not an attribute, so it stops the walk in both
+/// directions. The end index is returned rather than a length because it is
+/// also where the field being decorated is declared.
+fn attribute_run(lines: &[&str], at: usize) -> (usize, usize) {
+    let start = lines[..at]
+        .iter()
+        .rposition(|line| !is_attribute(line))
+        .map_or(0, |idx| idx + 1);
+    let end = lines[at..]
+        .iter()
+        .position(|line| !is_attribute(line))
+        .map_or(lines.len(), |idx| at + idx);
+    (start, end)
+}
+
+/// The name of the field an attribute run decorates — the `source_line` of
+/// `source_line: Option<u32>,`.
+fn field_below<'a>(lines: &[&'a str], run_end: usize) -> Option<&'a str> {
+    let name = lines.get(run_end)?.trim().split_once(':')?.0;
+    let name = name.strip_prefix("pub ").unwrap_or(name).trim();
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(name)
+}
+
+/// The wire keys a consumer may find missing, because `skip_serializing_if`
+/// leaves them out. Every one of them is a key some *other* document does
+/// carry, so a reader that cannot cope with the absence cannot read half the
+/// documents this crate writes.
+const OMITTABLE_WIRE_KEYS: &[&str] = &["lang", "range", "source_line", "span", "start", "title"];
+
+/// Every `skip_serializing_if` is paired with a `#[serde(default)]` under the
+/// same condition.
+///
+/// Today the pairing is insurance rather than repair: all six keys above are
+/// `Option<_>`, and serde's derive resolves a missing field of that shape to
+/// `None` on its own — removing one of the 30 `#[serde(default)]` attributes
+/// leaves every value-level round trip in this suite green. What makes the
+/// rule worth stating is the *next* omittable field. The moment one is a
+/// `Vec` skipped when empty, a `bool` skipped when false or a `String`
+/// skipped when blank — all of them natural things to add to a wire format
+/// that already omits — the missing key becomes a hard `missing field` error,
+/// and the document that fails to read is one this crate wrote itself. That
+/// is a defect a `#[test]` finds only if the corpus happens to contain the
+/// shape; this finds it in the declaration.
+#[test]
+fn every_omittable_wire_field_is_paired_with_the_default_that_reads_it_back() {
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    let mut unpaired: Vec<String> = Vec::new();
+    for (path, src) in sources() {
+        let lines: Vec<&str> = src.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            if !is_attribute(line) || !line.contains("skip_serializing_if") {
+                continue;
+            }
+            let (start, end) = attribute_run(&lines, idx);
+            let field = field_below(&lines, end).unwrap_or("<unnamed>");
+            keys.insert(field.to_owned());
+            // Under the same condition as the skip, or the field is omitted
+            // in a build whose reader has no default to put it back.
+            let condition = attribute_condition(line);
+            if !lines[start..end].iter().any(|attribute| {
+                attribute.contains("serde(default)") && attribute_condition(attribute) == condition
+            }) {
+                unpaired.push(format!("{}:{} — {field}", path.display(), idx + 1));
+            }
+        }
+    }
+    assert!(
+        unpaired.is_empty(),
+        "these fields are dropped from the JSON when absent, with no `#[serde(default)]` under \
+         the same condition to put them back. For an `Option` serde covers it; for anything \
+         else the document this crate wrote comes back as `missing field`, and which of the two \
+         a field is should not be what decides whether the wire format round-trips: {unpaired:#?}"
+    );
+    assert_eq!(
+        keys,
+        OMITTABLE_WIRE_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<BTreeSet<String>>(),
+        "the omittable wire keys changed. A new one is a new way for a consumer to receive a \
+         document missing a key it expected — and, if it is not an `Option`, the first one this \
+         rule is load-bearing for. A vanished one means this rule found less than it used to"
+    );
+}
+
+/// The read-back twin of
+/// [`the_wire_keys_of_a_diagnostic_are_exactly_what_its_readers_answer`]:
+/// same envelope, same readers, other direction.
+///
+/// The literal at the end is the load-bearing half. Everything before it
+/// round-trips through this crate's own derive, and a round trip is symmetric
+/// — rename a key on both sides and it still holds. `aozora-md.diagnostics.v1`
+/// is a published name, so the shape is asserted against bytes this test
+/// wrote.
+#[cfg(feature = "serde")]
+#[test]
+fn a_diagnostic_reads_back_off_the_envelope_it_writes() {
+    for diagnostic in &diagnostics_from_the_malformed_pool() {
+        let json = wire(diagnostic);
+        let read: Diagnostic = serde_json::from_value(json.clone())
+            .unwrap_or_else(|e| panic!("a diagnostic must read back off {json}: {e}"));
+        assert_eq!(&read, diagnostic, "a diagnostic read back differs: {json}");
+        assert_eq!(wire(&read), json, "a diagnostic read back rewrites {json}");
+    }
+
+    let read: Diagnostic = serde_json::from_value(serde_json::json!({
+        "severity": "warning",
+        "source": "source",
+        "code": "aozora-md::unclosed",
+        "message": "an unclosed container",
+        "span": { "start": 3, "end": 21 },
+    }))
+    .expect("the published `aozora-md.diagnostics.v1` envelope must read");
+    assert_eq!(read.severity(), Severity::Warning, "severity is camelCase");
+    assert_eq!(read.source(), DiagnosticSource::Source, "source is an enum");
+    assert_eq!(
+        read.code(),
+        "aozora-md::unclosed",
+        "code is owned on the way in"
+    );
+    assert_eq!(read.message(), "an unclosed container", "message survives");
+    assert_eq!(read.span(), Span::new(3, 21), "a span is two byte offsets");
 }
 
 // ---------------------------------------------------------------------------
