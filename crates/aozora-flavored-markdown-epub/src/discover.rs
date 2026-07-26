@@ -15,7 +15,12 @@ pub(crate) struct Manuscript {
     pub sources: Vec<SourceFile>,
 }
 
+// `deny_unknown_fields` because a key this crate does not know is a key the
+// author expected to do something. Silence is the failure mode this whole
+// manifest had: `spine` parsed, deserialised into nothing, and ordered the
+// book lexicographically anyway.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Metadata {
     pub title: String,
     pub creator: String,
@@ -24,6 +29,12 @@ pub(crate) struct Metadata {
     pub identifier: Option<String>,
     #[serde(default = "default_mode")]
     pub writing_mode: WritingMode,
+    // Chapter files in reading order, each relative to the manuscript
+    // directory. Authoritative when present: exactly these files, in this
+    // order. Empty — the default — leaves the order to the directory sweep,
+    // which is lexicographic.
+    #[serde(default)]
+    pub spine: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -43,6 +54,37 @@ pub(crate) struct SourceFile {
     pub bytes: Vec<u8>,
 }
 
+// How a source file's bytes decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encoding {
+    Utf8,
+    ShiftJis,
+}
+
+// Every extension a manuscript source can carry, and the encoding its bytes
+// are in. The sweep below collects exactly these rows and `render` decodes
+// from the same ones, so an extension cannot become collectable without also
+// becoming decodable. The two were written out separately once, and the sweep
+// took `.md` alone while the decoder branched on three Shift_JIS spellings —
+// a `.sjis` chapter beside a `.md` one was dropped from the book without a
+// word.
+const SOURCE_EXTENSIONS: &[(&str, Encoding)] = &[
+    ("md", Encoding::Utf8),
+    ("sjis", Encoding::ShiftJis),
+    ("shift_jis", Encoding::ShiftJis),
+    ("shift-jis", Encoding::ShiftJis),
+];
+
+// `None` for anything the sweep does not collect. A file named outright still
+// reads — naming it *is* the choice the sweep's filter stands in for — and
+// takes the UTF-8 branch.
+pub(crate) fn encoding_of(path: &Path) -> Option<Encoding> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    SOURCE_EXTENSIONS
+        .iter()
+        .find_map(|&(name, encoding)| (name == ext).then_some(encoding))
+}
+
 pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
     let metadata_text = fs::read_to_string(opts.metadata).map_err(|source| Error::DiscoverIo {
         path: opts.metadata.to_path_buf(),
@@ -51,26 +93,58 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
     let metadata: Metadata = toml::from_str(&metadata_text)
         .map_err(|source| Error::metadata_parse(opts.metadata.to_path_buf(), source))?;
 
-    let mut sources = Vec::new();
-    if opts.input.is_file() {
-        sources.push(read_source(opts.input)?);
-    } else {
-        let entries = fs::read_dir(opts.input).map_err(|source| Error::DiscoverIo {
-            path: opts.input.to_path_buf(),
-            source,
-        })?;
-        let mut paths: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        paths.sort();
-        for p in paths {
-            sources.push(read_source(&p)?);
+    let sources = if opts.input.is_file() {
+        // A spine names files inside a manuscript directory, so there is
+        // nothing here for it to order. Refusing beats the alternative:
+        // building the one file the caller named while the list of chapters
+        // the manifest asked for goes unread, without a word.
+        if !metadata.spine.is_empty() {
+            return Err(Error::MetadataInvalid {
+                field: "spine",
+                reason: format!(
+                    "`spine` orders the files of a manuscript directory, but the input is the \
+                     single file {}",
+                    opts.input.display()
+                ),
+            });
         }
+        vec![read_source(opts.input)?]
+    } else if metadata.spine.is_empty() {
+        sweep(opts.input)?
+    } else {
+        metadata
+            .spine
+            .iter()
+            .map(|entry| read_source(&opts.input.join(entry)))
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    // An empty book is not a book. Left to run, `compose` writes a package
+    // whose `<spine>` holds no `itemref` — a shape EPUB 3.3 does not allow —
+    // and `build` hands it back as a success.
+    if sources.is_empty() {
+        return Err(Error::NoSources {
+            path: opts.input.to_path_buf(),
+        });
     }
 
     Ok(Manuscript { metadata, sources })
+}
+
+// Lexicographic by full path, which is what zero-padded chapter numbers are
+// named for.
+fn sweep(dir: &Path) -> Result<Vec<SourceFile>> {
+    let entries = fs::read_dir(dir).map_err(|source| Error::DiscoverIo {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| encoding_of(p).is_some())
+        .collect();
+    paths.sort();
+    paths.iter().map(|p| read_source(p)).collect()
 }
 
 fn read_source(path: &Path) -> Result<SourceFile> {
@@ -86,6 +160,8 @@ fn read_source(path: &Path) -> Result<SourceFile> {
 
 #[cfg(test)]
 mod tests {
+    use crate::render::render_all;
+
     use super::*;
 
     fn book_toml(dir: &Path) -> PathBuf {
@@ -94,8 +170,16 @@ mod tests {
         p
     }
 
+    fn opts<'a>(input: &'a Path, metadata: &'a Path) -> BuildOptions<'a> {
+        BuildOptions {
+            input,
+            metadata,
+            output: Path::new("unused.epub"),
+        }
+    }
+
     #[test]
-    fn collects_markdown_sorted_and_ignores_non_md() {
+    fn sweeps_sources_in_lexicographic_order_and_skips_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let meta = book_toml(dir.path());
         let src = dir.path().join("manuscript");
@@ -103,16 +187,114 @@ mod tests {
         fs::write(src.join("002-b.md"), "b").unwrap();
         fs::write(src.join("001-a.md"), "a").unwrap();
         fs::write(src.join("notes.txt"), "ignored").unwrap();
-        let opts = BuildOptions {
-            input: &src,
-            metadata: &meta,
-            output: Path::new("unused.epub"),
-        };
-        let m = collect(&opts).unwrap();
-        assert_eq!(m.sources.len(), 2, "the .txt file must be ignored");
-        assert!(m.sources[0].path.ends_with("001-a.md"));
-        assert!(m.sources[1].path.ends_with("002-b.md"));
-        assert!(matches!(m.metadata.writing_mode, WritingMode::Horizontal));
+        fs::write(src.join("README"), "no extension at all").unwrap();
+        let m = collect(&opts(&src, &meta)).unwrap();
+        assert_eq!(m.sources.len(), 2, "only the two sources are collected");
+        assert!(m.sources[0].path.ends_with("001-a.md"), "sorted by path");
+        assert!(m.sources[1].path.ends_with("002-b.md"), "sorted by path");
+        assert!(
+            matches!(m.metadata.writing_mode, WritingMode::Horizontal),
+            "the default writing mode is horizontal"
+        );
+    }
+
+    // The statement two hand-written extension lists could not make. It walks
+    // `SOURCE_EXTENSIONS` rather than naming extensions, so a row added later
+    // is covered the day it is added: the sweep has to collect it, and `render`
+    // has to decode it at the encoding the row declares.
+    //
+    // Both directions fail loudly if the two sites disagree. Shift_JIS `あ` is
+    // not valid UTF-8, so a `.sjis` row read down the UTF-8 branch is an
+    // `Error::Utf8`; UTF-8 `あ` decoded as Shift_JIS is mojibake, not `あ`.
+    #[test]
+    fn every_extension_the_sweep_collects_decodes_at_the_encoding_the_table_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = book_toml(dir.path());
+        let src = dir.path().join("manuscript");
+        fs::create_dir(&src).unwrap();
+        for (idx, (ext, encoding)) in SOURCE_EXTENSIONS.iter().enumerate() {
+            let bytes: &[u8] = match *encoding {
+                Encoding::Utf8 => "あ".as_bytes(),
+                Encoding::ShiftJis => &[0x82, 0xA0],
+            };
+            fs::write(src.join(format!("{idx:03}.{ext}")), bytes).unwrap();
+        }
+
+        let manuscript = collect(&opts(&src, &meta)).expect("the sweep takes every row");
+        assert_eq!(
+            manuscript.sources.len(),
+            SOURCE_EXTENSIONS.len(),
+            "an extension in the table that the sweep drops leaves a chapter out of the book"
+        );
+        let rendered = render_all(&manuscript).expect("every row decodes");
+        for (idx, (ext, _)) in SOURCE_EXTENSIONS.iter().enumerate() {
+            let item = &rendered.items[idx];
+            assert_eq!(
+                item.title,
+                format!("{idx:03}"),
+                ".{ext} landed out of order"
+            );
+            assert!(
+                item.xhtml.contains('あ'),
+                ".{ext} decoded to {:?} rather than あ",
+                item.xhtml
+            );
+        }
+    }
+
+    #[test]
+    fn an_extension_the_table_does_not_carry_is_not_a_source() {
+        assert!(encoding_of(Path::new("README")).is_none(), "no extension");
+        assert!(
+            encoding_of(Path::new("notes.txt")).is_none(),
+            "not a source"
+        );
+        assert_eq!(
+            encoding_of(Path::new("CH.MD")),
+            Some(Encoding::Utf8),
+            "the table is matched case-insensitively"
+        );
+    }
+
+    // A filename is bytes on Unix, so an extension need not be text at all.
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_that_is_not_utf8_is_not_a_source() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"chapter.\xFF".to_vec()));
+        assert!(
+            encoding_of(&path).is_none(),
+            "an extension that is not UTF-8 cannot match a row of the table"
+        );
+    }
+
+    #[test]
+    fn a_spine_is_the_reading_order_and_the_whole_chapter_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("book.toml");
+        fs::write(
+            &meta,
+            "title = \"T\"\ncreator = \"A\"\nlanguage = \"ja\"\nspine = [\"c.md\", \"a.md\"]\n",
+        )
+        .unwrap();
+        let src = dir.path().join("manuscript");
+        fs::create_dir(&src).unwrap();
+        for name in ["a.md", "b.md", "c.md"] {
+            fs::write(src.join(name), name).unwrap();
+        }
+        let m = collect(&opts(&src, &meta)).unwrap();
+        let names: Vec<_> = m
+            .sources
+            .iter()
+            .map(|s| s.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["c.md", "a.md"],
+            "the spine order wins over the sweep's, and b.md is not in it"
+        );
     }
 
     #[test]
