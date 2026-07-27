@@ -186,6 +186,11 @@ serde_json = "1.0"
 # so the TypeScript surface can't drift from the Rust shape — replacing the
 # former hand-written xtask codegen (ADR-0017). `js` = serde-wasm-bindgen ABI.
 wasm-bindgen = "0.2"
+# The harness `just test-wasm` (`wasm-pack test --node`) collects. Only
+# `#[wasm_bindgen_test]` functions run under it, and only on wasm32 — which is
+# the point: the exports it reaches are the ones a host-target test cannot,
+# starting with the `web-sys` clock behind `profileJson`.
+wasm-bindgen-test = "0.3"
 tsify   = { version = "0.5.6", default-features = false, features = ["js"] }
 
 # Observability

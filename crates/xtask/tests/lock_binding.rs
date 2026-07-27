@@ -106,6 +106,14 @@ impl Command {
             .map_or(&[][..], |at| &self.tokens[at..])
     }
 
+    /// Everything before a bare `--`, i.e. what this command keeps for itself.
+    fn own_args(&self) -> &[String] {
+        self.tokens
+            .iter()
+            .position(|token| token == "--")
+            .map_or(&self.tokens[..], |at| &self.tokens[..at])
+    }
+
     /// The command, short enough to read in a failure message.
     fn rendered(&self) -> String {
         let joined = self.tokens.join(" ");
@@ -273,22 +281,49 @@ fn cargo_verdict(command: &Command, at: usize) -> Verdict {
     }
 }
 
+/// Where a wasm-pack sub-command's cargo flags have to sit.
+#[derive(Clone, Copy)]
+enum CargoFlagsGo {
+    /// `wasm-pack build` forwards what follows a bare `--` to `cargo build`.
+    AfterDoubleDash,
+    /// `wasm-pack test` takes cargo's flags as trailing positionals
+    /// (`PATH_AND_EXTRA_OPTIONS`) and hands a `--` on to the *test binary*,
+    /// where `--locked` is not an argument at all. Writing the build form here
+    /// fails with "unexpected argument" from wasm-bindgen-test-runner, which is
+    /// loud — but the reader has to know the difference or it would bless the
+    /// unbound shape `wasm-pack test … --node` on the way past.
+    AsPositionals,
+}
+
+/// The two wasm-pack sub-commands that shell out to cargo. `test` is here for
+/// the same reason `build` is, and was missing for as long as no recipe spelled
+/// it: an unlisted sub-command reads as "not an invocation", so `just test-wasm`
+/// would have been exempt by silence rather than by argument.
+const WASM_PACK_RESOLVING: &[(&str, CargoFlagsGo)] = &[
+    ("build", CargoFlagsGo::AfterDoubleDash),
+    ("test", CargoFlagsGo::AsPositionals),
+];
+
 fn wasm_pack_verdict(command: &Command, at: usize) -> Verdict {
-    if command.tokens.get(at + 1).map(String::as_str) != Some("build") {
+    let Some(&(sub, where_flags_go)) = command
+        .tokens
+        .get(at + 1)
+        .and_then(|token| WASM_PACK_RESOLVING.iter().find(|&&(name, _)| name == token))
+    else {
         return Verdict::NotAnInvocation;
-    }
-    if command
-        .passthrough()
-        .iter()
-        .any(|token| token == "--locked")
-    {
+    };
+    let seen = match where_flags_go {
+        CargoFlagsGo::AfterDoubleDash => command.passthrough(),
+        CargoFlagsGo::AsPositionals => command.own_args(),
+    };
+    if seen.iter().any(|token| token == "--locked") {
         Verdict::Resolves
     } else {
-        Verdict::Unbound(
-            "`wasm-pack build` without a `-- --locked` passthrough: wasm-pack shells \
-             out to `cargo build`, and only what follows `--` reaches it"
-                .to_owned(),
-        )
+        Verdict::Unbound(format!(
+            "`wasm-pack {sub}` without a `--locked` the cargo it shells out to can see: \
+             `build` forwards what follows a `--`, `test` takes cargo's flags as trailing \
+             positionals and gives the `--` to the test binary instead"
+        ))
     }
 }
 
@@ -561,6 +596,25 @@ fn wasm_pack_needs_the_flag_where_the_cargo_it_shells_out_to_can_see_it() {
         Syntax::Lines,
     );
     assert!(passed.unbound.is_empty(), "{:?}", passed.unbound);
+
+    // `test` reaches cargo too, and reading only `build` is how a `wasm-pack
+    // test` recipe would have been exempt without anyone deciding it should be.
+    // Its flags are trailing positionals, so the two sub-commands want the flag
+    // in DIFFERENT places and each rejects the other's spelling.
+    let tested = scan(
+        "Justfile",
+        "wasm-pack test --node crates/x --locked\n",
+        Syntax::Lines,
+    );
+    assert_eq!(tested.resolutions, 1);
+    assert!(tested.unbound.is_empty(), "{:?}", tested.unbound);
+
+    let after_dashes = scan(
+        "Justfile",
+        "wasm-pack test --node crates/x -- --locked\n",
+        Syntax::Lines,
+    );
+    assert_eq!(after_dashes.unbound.len(), 1, "{:?}", after_dashes.unbound);
 }
 
 #[test]

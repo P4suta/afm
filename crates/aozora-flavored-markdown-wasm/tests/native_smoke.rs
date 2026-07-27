@@ -17,6 +17,14 @@
 //! looks. `just wasm-build` only has to produce a file, `just
 //! playground-build` type-checks the playground against whatever `.d.ts` came
 //! out, and the library's own test suite has never heard of this crate.
+//!
+//! The `cfg` below is the title line, stated where it binds. `just test-wasm`
+//! builds this crate's test targets for wasm32 as well, and a plain `#[test]`
+//! there is a function wasm-bindgen's runner does not collect — silently, so
+//! the file would read as passing while running nothing. The wasm half of this
+//! crate's suite is `tests/wasm.rs`.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use aozora_flavored_markdown::{
     Options, RenderedBlocks, render_blocks as render_blocks_core, render_to_ir,
