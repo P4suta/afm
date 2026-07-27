@@ -22,7 +22,10 @@ automatically.
    similar escape hatches are rejected by `just strict-code`. Fix the real
    issue.
 4. **TDD, with the coverage floor as a ratchet.** A failing test lands
-   first. The floor is `_COV_FLOOR` in the `Justfile` and only moves up.
+   first. The floor is `_COV_FLOOR` in the `Justfile`; it moves up as tests
+   land. It moves down only when the *denominator* widens — a PR that stops
+   excusing a source file re-measures and sets the floor to what the wider
+   denominator actually reads, and records both numbers.
 5. **No unused dependencies.** `just shear` rejects them. For a macro- or
    `cfg`-only use its `syn` pass cannot see, record a documented
    `[workspace.metadata.cargo-shear] ignored = [...]`.

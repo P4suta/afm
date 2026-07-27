@@ -10,9 +10,10 @@ mod app;
 mod args;
 mod output;
 
-// A shim, deliberately: `_COV_IGNORE`'s `/main\.rs$` drops whatever lives in
-// this file from the coverage denominator, so the less that lives here the
-// less that exclusion hides.
+// A shim, deliberately: `main.rs` is no longer excused from the coverage
+// denominator (`_COV_IGNORE`), so the entry point is measured like the rest of
+// `src/` — the CLI integration tests reach these regions through the spawned
+// binary.
 fn main() -> ExitCode {
     app::run()
 }

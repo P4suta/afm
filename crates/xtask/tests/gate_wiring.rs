@@ -52,6 +52,8 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use regex::Regex;
+
 // ---------------------------------------------------------------------------
 // reading a command out of a config file
 // ---------------------------------------------------------------------------
@@ -1985,22 +1987,36 @@ fn a_flag_pair_counts_only_where_it_arrives_whole_and_in_order() {
 //
 // A fourth way a check can check nothing, and the one this file did not
 // cover: the check runs, and something is exempted from it on the strength of
-// a sentence. `_COV_IGNORE` drops whole directories out of the coverage
-// denominator, and each is written down with a reason. Prose counting as
-// enforcement is what the header of this file rejects, and an exemption is
-// where it costs the most — the gate goes green faster for it.
+// a sentence. `_COV_IGNORE` drops files out of the coverage denominator, and
+// each entry is written down with a reason. Prose counting as enforcement is
+// what the header of this file rejects, and an exemption is where it costs the
+// most — the gate goes green faster for it.
 //
-// One of those reasons is checkable, because it names another step: a crate
-// compiled for a target `cargo llvm-cov` cannot instrument is genuinely
-// invisible to the coverage gate, and the exclusion is honest exactly when
-// something else runs that crate's tests on that target. That is the shape
-// read below. The remaining exclusions do not defer to a step at all
-// (`target/` is not source, `/main\.rs$` and the epub serialisation files are
-// policy about regions), so there is nothing for a reader to resolve.
+// Two questions settle an exemption, and both are asked below of the regex the
+// gate hands llvm-cov rather than of the paragraph above it:
+//
+//   * Does it hide source this repo publishes? Nothing else measures a
+//     published `src/` file, so an exclusion that reaches one takes that file
+//     out of every gate at once. Four were in exactly that position — both CLI
+//     `main.rs` entry points and the epub serialisation pair — and this
+//     section did not see them, because it asked what SHAPE an exclusion had
+//     (a bare directory, or "a pattern, therefore policy, therefore not mine
+//     to resolve") instead of asking which files it matches. Shape is the
+//     wrong question twice over: it let a pattern hide published source, and
+//     it would have let the wasm exemption below escape the reader written for
+//     it just by being spelled as a pattern over that crate's files.
+//   * Does it defer to a step that exists? A crate compiled for a target
+//     `cargo llvm-cov` cannot instrument is genuinely invisible to the
+//     coverage gate, and the exclusion is honest exactly when something else
+//     runs that crate's tests on that target.
+//
+// So the reader matches every member's `src/` files against the exclusions and
+// answers with files. `target/` is the one entry that matches none, which is
+// the whole of its claim to be there: it is not source.
 
-/// Split a regex alternation at the top level. `_COV_IGNORE` holds one nested
-/// group (`(compose|package)`), and the `|` inside it separates two file names
-/// rather than two exclusions.
+/// Split a regex alternation at the top level. A `|` inside a group — the
+/// shape `_COV_IGNORE` carried for `epub/src/(compose|package)\.rs` —
+/// separates two file names within ONE exclusion, not two exclusions.
 fn split_alternatives(regex: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -2043,21 +2059,183 @@ fn coverage_exclusions(justfile: &str) -> Vec<String> {
             .unwrap_or(regex);
         return split_alternatives(body)
             .into_iter()
-            .map(str::to_owned)
+            .map(unescaped)
             .collect();
     }
     Vec::new()
 }
 
-/// The directory one exclusion drops wholesale, or `None` when it is a pattern
-/// over files inside a crate that is otherwise still counted. A plain path
-/// fragment ending in `/` is the first; anything carrying regex punctuation
-/// (`/main\.rs$`, the epub group) is the second.
-fn excluded_directory(alternative: &str) -> Option<&str> {
-    let plain = alternative
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/'));
-    (plain && alternative.len() > 1 && alternative.ends_with('/')).then_some(alternative)
+/// One `"…"` value as `just` hands it on, from the literal the `Justfile`
+/// spells. `\\` there is one backslash and `\"` is one quote, so the
+/// `(compose|package)\\.rs` written on disk is the `\.` llvm-cov receives.
+///
+/// A reader that skipped this step would hold a pattern for a literal
+/// backslash, match no file with it, and report the exemption it cannot read
+/// as harmless — the failure mode this whole section exists to refuse.
+fn unescaped(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    let mut chars = literal.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && matches!(chars.peek(), Some('\\' | '"')) {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Every `.rs` file under one directory, at any depth.
+fn rust_files(dir: &Path) -> Vec<PathBuf> {
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|e| panic!("reading an entry of {}: {e}", dir.display()))
+            .path();
+        if path.is_dir() {
+            out.extend(rust_files(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// One spelling for a crate directory, so `crates/x`, `./crates/x` and
+/// `crates/x/` are one answer whichever file wrote them.
+fn crate_dir(path: &str) -> &str {
+    path.trim_start_matches("./").trim_end_matches('/')
+}
+
+/// Every `src/` file of every workspace member, as `(member, path)` with both
+/// relative to the repo root.
+///
+/// Off the filesystem rather than a list written here: a file added to a crate
+/// is measured, or excused, the moment it exists, and a reader working from
+/// names would answer for the repo as it was when the names were typed.
+fn member_sources() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    for member in workspace_members() {
+        let directory = root.join(&member.path).join("src");
+        let files = rust_files(&directory);
+        assert!(
+            !files.is_empty(),
+            "no `.rs` file under {} — a member whose source this reader cannot find is a member \
+             it would report as fully measured",
+            directory.display()
+        );
+        for file in files {
+            let relative = file
+                .strip_prefix(&root)
+                .unwrap_or_else(|e| panic!("{} is not under the repo root: {e}", file.display()));
+            out.push((
+                member.path.clone(),
+                relative.to_string_lossy().replace('\\', "/"),
+            ));
+        }
+    }
+    out
+}
+
+/// One source file the coverage gate does not measure, and the exclusion that
+/// takes it out.
+#[derive(Debug)]
+struct Dropped {
+    /// The workspace member holding it, as the root `Cargo.toml` lists it.
+    member: String,
+    /// Repo-relative path — what a failure has to be able to name.
+    file: String,
+    /// The `_COV_IGNORE` alternative that matches it.
+    exclusion: String,
+}
+
+/// Every member `src/` file `_COV_IGNORE` keeps out of the denominator.
+///
+/// Matched against a repo-relative path under a leading `/` rather than
+/// against the absolute one llvm-cov sees. The absolute path here is this
+/// crate's own directory plus `../..`, which spells `xtask/` — so the checkout
+/// location would decide what counts as excluded, and the exclusion list would
+/// appear to swallow the workspace.
+fn dropped_sources(justfile: &str) -> Vec<Dropped> {
+    let exclusions: Vec<(String, Regex)> = coverage_exclusions(justfile)
+        .into_iter()
+        .map(|alternative| {
+            let compiled = Regex::new(&alternative).unwrap_or_else(|e| {
+                panic!("`_COV_IGNORE` holds `{alternative}`, which is not a regex: {e}")
+            });
+            (alternative, compiled)
+        })
+        .collect();
+    member_sources()
+        .into_iter()
+        .filter_map(|(member, file)| {
+            let hit = exclusions
+                .iter()
+                .find(|(_, pattern)| pattern.is_match(&format!("/{file}")))?;
+            Some(Dropped {
+                member,
+                file,
+                exclusion: hit.0.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The members with at least one `src/` file out of the denominator. Partly is
+/// enough: a crate is either wholly measured or it is one whose coverage
+/// number answers for less than the crate.
+fn dropped_members(justfile: &str) -> BTreeSet<String> {
+    dropped_sources(justfile)
+        .into_iter()
+        .map(|dropped| crate_dir(&dropped.member).to_owned())
+        .collect()
+}
+
+/// The binaries one member declares. An explicit `[[bin]]` names itself; a
+/// crate with `src/main.rs` and no `[[bin]]` still gets one, named after the
+/// package — and `CARGO_BIN_EXE_…` follows exactly that rule, which is what
+/// makes the name the link between a manifest and a test that spawns it.
+fn binary_names(member: &Member) -> Vec<String> {
+    let declared: Vec<String> = table_pairs(&member.manifest, "bin")
+        .into_iter()
+        .filter(|&(key, _)| key == "name")
+        .map(|(_, value)| value.trim_matches('"').to_owned())
+        .collect();
+    if !declared.is_empty() {
+        return declared;
+    }
+    let implicit = repo_root().join(&member.path).join("src/main.rs").is_file();
+    implicit
+        .then(|| manifest_value(&member.manifest, "package", "name"))
+        .flatten()
+        .map(|name| name.trim_matches('"').to_owned())
+        .into_iter()
+        .collect()
+}
+
+/// One member's integration tests, read.
+fn test_sources(member: &str) -> Vec<String> {
+    let directory = repo_root().join(member).join("tests");
+    if !directory.is_dir() {
+        return Vec::new();
+    }
+    rust_files(&directory)
+        .into_iter()
+        .map(|file| {
+            fs::read_to_string(&file).unwrap_or_else(|e| panic!("reading {}: {e}", file.display()))
+        })
+        .collect()
+}
+
+/// The members whose `src/` reaches crates.io.
+fn published_members() -> BTreeSet<String> {
+    workspace_members()
+        .into_iter()
+        .filter(|member| is_published(&member.manifest))
+        .map(|member| crate_dir(&member.path).to_owned())
+        .collect()
 }
 
 /// A recipe's body with backslash continuations folded into single lines.
@@ -2139,19 +2317,149 @@ fn wasm_pack_paths(justfile: &str, sub: &str) -> BTreeSet<String> {
 /// the exemption: llvm-cov instruments the host build, the exclusion says so,
 /// and then no step reaches the code the exclusion is about.
 fn coverage_debts(justfile: &str) -> Vec<String> {
-    let excluded: Vec<String> = coverage_exclusions(justfile)
+    let excluded = dropped_members(justfile);
+    let tested: BTreeSet<String> = wasm_pack_paths(justfile, "test")
         .iter()
-        .filter_map(|alternative| excluded_directory(alternative))
-        .map(ToOwned::to_owned)
+        .map(|path| crate_dir(path).to_owned())
         .collect();
-    let tested = wasm_pack_paths(justfile, "test");
     wasm_pack_paths(justfile, "build")
         .into_iter()
-        .filter(|path| {
-            let inside = format!("{path}/");
-            excluded.iter().any(|dir| inside.contains(dir.as_str())) && !tested.contains(path)
-        })
+        .map(|path| crate_dir(&path).to_owned())
+        .filter(|path| excluded.contains(path) && !tested.contains(path))
         .collect()
+}
+
+#[test]
+fn no_source_file_of_a_crate_this_repo_publishes_is_out_of_the_coverage_denominator() {
+    let justfile = read("Justfile");
+    let dropped = dropped_sources(&justfile);
+    assert!(
+        !dropped.is_empty(),
+        "`_COV_IGNORE` matched no file under any member's `src/`. Every exclusion it carries \
+         today names a crate in this workspace, so the likely answer is that this reader stopped \
+         reading them — an escape it unescapes wrongly matches nothing, and a reader matching \
+         nothing calls every exemption harmless. If the list really did shrink to entries that \
+         reach no source, retarget this reader rather than leaving it passing over an empty set"
+    );
+    let published = published_members();
+    let hidden: Vec<String> = dropped
+        .iter()
+        .filter(|dropped| published.contains(crate_dir(&dropped.member)))
+        .map(|dropped| format!("{} (by `{}`)", dropped.file, dropped.exclusion))
+        .collect();
+    assert!(
+        hidden.is_empty(),
+        "{hidden:?} ships to crates.io and is outside the coverage denominator. No other gate \
+         measures a `src/` file, so each of these is code the floor cannot see — and the floor \
+         reads higher for their absence, which is the direction that hides the loss. Either \
+         narrow the exclusion until it stops reaching published source, or drop it and \
+         re-measure `_COV_FLOOR` over the wider denominator"
+    );
+}
+
+#[test]
+fn the_exemptions_that_stood_before_this_reader_hid_published_source() {
+    // `_COV_IGNORE` as it was. Every assertion in this section passed on it:
+    // the two entries doing the hiding carried regex punctuation, the reader
+    // classified anything punctuated as "policy about regions", and policy was
+    // what it declined to resolve. So the CLI entry points and the epub
+    // serialisation pair were out of every gate in the repo, and the number
+    // the floor is set from was measured without them.
+    let before = concat!(
+        "_COV_IGNORE := \"(target/|/main\\\\.rs$|xtask/\
+         |aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/\
+         |aozora-flavored-markdown-epub/src/(compose|package)\\\\.rs)\"\n",
+        "\n",
+        "[group('gate')]\n",
+        "coverage:\n",
+        "    cargo llvm-cov nextest --ignore-filename-regex '{{_COV_IGNORE}}'\n",
+    );
+    let published = published_members();
+    let mut hidden: Vec<String> = dropped_sources(before)
+        .into_iter()
+        .filter(|dropped| published.contains(crate_dir(&dropped.member)))
+        .map(|dropped| dropped.file)
+        .collect();
+    hidden.sort();
+    assert_eq!(
+        hidden,
+        vec![
+            "crates/aozora-flavored-markdown-cli/src/main.rs".to_owned(),
+            "crates/aozora-flavored-markdown-epub-cli/src/main.rs".to_owned(),
+            "crates/aozora-flavored-markdown-epub/src/compose.rs".to_owned(),
+            "crates/aozora-flavored-markdown-epub/src/package.rs".to_owned(),
+        ],
+        "the reader no longer sees the defect it was written for"
+    );
+}
+
+#[test]
+fn the_coverage_gate_measures_every_crate_and_fails_under_the_floor_it_declares() {
+    // What the reader above asserts is only worth its name if the gate reads
+    // the whole workspace and fails on the number `_COV_FLOOR` holds. A gate
+    // measuring one crate, or comparing against a literal while a variable
+    // above it documents a different floor, would satisfy every other
+    // assertion here while excusing far more than `_COV_IGNORE` names.
+    let justfile = read("Justfile");
+    let variables = plain_variables(&justfile);
+    let floor = variables
+        .get("_COV_FLOOR")
+        .unwrap_or_else(|| panic!("no `_COV_FLOOR := \"…\"` in the Justfile"));
+    let body: Vec<String> = joined_body(&justfile, "coverage")
+        .iter()
+        .map(|line| expand(line, &variables))
+        .collect();
+    assert!(
+        recipes_in_group(&justfile, "gate").contains("coverage"),
+        "the coverage recipe is not in the gate manifest, so nothing runs it"
+    );
+    assert!(
+        body.iter().any(|line| line.contains("--workspace")),
+        "the coverage gate measures something narrower than the workspace: {body:?}"
+    );
+    assert!(
+        body.iter()
+            .any(|line| line.contains(&format!("--fail-under-regions {floor}"))),
+        "the coverage gate does not fail under `_COV_FLOOR` ({floor}); it runs {body:?}"
+    );
+}
+
+#[test]
+fn every_binary_this_repo_publishes_is_run_as_a_process_by_its_own_tests() {
+    // What replaced the `/main\.rs$` exemption. The entry points are in the
+    // denominator now on one condition — that a test spawns the binary, so
+    // llvm-cov collects the child process — and that condition is a sentence
+    // in the `Justfile` unless something reads it. The floor cannot: a `main`
+    // reduced to `app::run()` is three regions in seven thousand, so tests
+    // rewritten to call the crate in-process would leave the entry point
+    // uncovered and every gate green.
+    let mut checked = 0usize;
+    let mut unspawned = Vec::new();
+    for member in workspace_members() {
+        if !is_published(&member.manifest) {
+            continue;
+        }
+        let tests = test_sources(&member.path);
+        for name in binary_names(&member) {
+            checked += 1;
+            let needle = format!("CARGO_BIN_EXE_{name}\"");
+            if !tests.iter().any(|source| source.contains(&needle)) {
+                unspawned.push(format!("{} ({name})", member.path));
+            }
+        }
+    }
+    assert!(
+        checked >= 2,
+        "this repo publishes two binaries and the reader found {checked}; it is not finding the \
+         `[[bin]]` targets it is written to check"
+    );
+    assert!(
+        unspawned.is_empty(),
+        "{unspawned:?}: no test under the crate's own `tests/` names `CARGO_BIN_EXE_<bin>`, so \
+         nothing runs the binary as a process. Its `main` is then measured by nothing while \
+         sitting inside the coverage denominator — too few regions for the floor to notice, and \
+         exactly the state the `main.rs` exemption used to describe honestly"
+    );
 }
 
 #[test]
@@ -2215,20 +2523,98 @@ fn the_arrangement_that_stood_before_test_wasm_reads_as_a_debt() {
     );
 }
 
+/// A `Justfile` holding one `_COV_IGNORE` and a coverage gate that uses it.
+fn coverage_fixture(ignore: &str) -> String {
+    format!(
+        "_COV_IGNORE := \"({ignore})\"\n\
+         \n\
+         [group('gate')]\n\
+         coverage:\n    \
+         cargo llvm-cov nextest --ignore-filename-regex '{{{{_COV_IGNORE}}}}'\n"
+    )
+}
+
 #[test]
-fn an_exclusion_naming_files_inside_a_crate_is_not_the_crate() {
-    // The two shapes `_COV_IGNORE` mixes. Reading the second as a directory
-    // would have this file demand a wasm test for the epub generator, and
-    // reading the first as a file would let a whole crate out unexamined.
-    assert_eq!(excluded_directory("xtask/"), Some("xtask/"));
+fn an_exclusion_naming_files_inside_a_crate_is_those_files_and_the_crate_they_are_in() {
+    // The shape that went unread. Answering "not a directory, so not mine"
+    // left two published files unmeasured and unremarked; answering "the whole
+    // crate" would have this file demand a wasm test for the epub generator.
+    // It is neither: it is the files it matches, and the member each belongs
+    // to — so the epub pair reads as published source going unmeasured, and
+    // nothing about a wasm target follows from it.
+    let justfile =
+        coverage_fixture("aozora-flavored-markdown-epub/src/(compose|package)\\\\.rs|xtask/");
+    let hit: Vec<String> = dropped_sources(&justfile)
+        .into_iter()
+        .filter(|dropped| dropped.member.ends_with("-epub"))
+        .map(|dropped| dropped.file)
+        .collect();
     assert_eq!(
-        excluded_directory("aozora-md-wasm/"),
-        Some("aozora-md-wasm/")
+        hit,
+        vec![
+            "crates/aozora-flavored-markdown-epub/src/compose.rs".to_owned(),
+            "crates/aozora-flavored-markdown-epub/src/package.rs".to_owned(),
+        ]
     );
-    assert_eq!(excluded_directory("/main\\.rs$"), None);
-    assert_eq!(excluded_directory("epub/src/(compose|package)\\.rs"), None);
-    // A fragment naming no directory at all.
-    assert_eq!(excluded_directory("/"), None);
+    assert!(
+        dropped_members(&justfile).contains("crates/aozora-flavored-markdown-epub"),
+        "a pattern over a crate's files leaves that crate partly unmeasured, and a reader that \
+         reported it as untouched would be the one that missed these two files"
+    );
+    assert!(
+        coverage_debts(&justfile).is_empty(),
+        "the epub generator ships to no wasm target, so no wasm test is owed for it"
+    );
+}
+
+#[test]
+fn a_crate_excused_by_a_pattern_over_its_files_is_excused_all_the_same() {
+    // The same hole, aimed at the exemption this section was built for. The
+    // wasm crate's entry could be spelled as a pattern over the files inside
+    // it — the exact form `_COV_IGNORE` used for the epub pair — and the
+    // shape-based reader answered `None` for anything punctuated, so the crate
+    // read as measured, the debt read as settled, and `just test-wasm` could
+    // have been deleted without a word from this file.
+    let justfile = format!(
+        "{}\n\
+         [group('gate')]\n\
+         playground-build: wasm-build\n    \
+         bun run build\n\
+         \n\
+         wasm-build:\n    \
+         bash -c 'wasm-pack build crates/aozora-flavored-markdown-wasm \\\n        \
+         --target bundler --out-dir pkg -- --locked'\n",
+        coverage_fixture("target/|aozora-flavored-markdown-wasm/src/.*\\\\.rs$")
+    );
+    assert_eq!(
+        coverage_debts(&justfile),
+        vec!["crates/aozora-flavored-markdown-wasm".to_owned()],
+        "an exemption spelled as a pattern excuses the crate as thoroughly as one spelled as a \
+         directory, and has to read as the same debt"
+    );
+}
+
+#[test]
+fn a_backslash_the_justfile_spells_twice_reaches_the_reader_once() {
+    // `just` unescapes a `"…"` value before the shell ever sees it. A reader
+    // holding the on-disk spelling would compile a regex for a literal
+    // backslash, match nothing with it, and call every exemption written that
+    // way harmless — silence that looks exactly like a clean workspace.
+    assert_eq!(
+        unescaped("src/(compose|package)\\\\.rs"),
+        "src/(compose|package)\\.rs"
+    );
+    assert_eq!(unescaped("a\\\"b"), "a\"b");
+    assert_eq!(unescaped("target/"), "target/");
+    assert_eq!(
+        coverage_exclusions(&coverage_fixture("/main\\\\.rs$")),
+        vec!["/main\\.rs$".to_owned()]
+    );
+    assert!(
+        !dropped_sources(&coverage_fixture("/main\\\\.rs$")).is_empty(),
+        "the escaped form matched no `main.rs` in this workspace, so the reader is holding a \
+         pattern the coverage gate never uses"
+    );
 }
 
 #[test]

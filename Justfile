@@ -422,21 +422,62 @@ samply-render REPEAT="200":
 
 # Coverage gate. Fails when region coverage drops below `_COV_FLOOR`.
 #
-# Regions, not branches: `cargo-llvm-cov` 0.8.5 has `--fail-under-regions` but
-# no `--fail-under-branches` (branch counts need nightly); regions are finer
-# than branches, so a region threshold implies the branch one on stable.
+# Regions, not branches: `cargo-llvm-cov` has `--fail-under-regions` but no
+# `--fail-under-branches` (branch counts need nightly); regions are finer than
+# branches, so a region threshold implies the branch one on stable.
 #
-# Excludes (`_COV_IGNORE`): build artefacts, CLI
-# `main.rs` entrypoints, xtask tooling, test-support, and aozora-flavored-markdown-wasm (exercised
-# by `just test-wasm`, a gate of its own — llvm-cov instruments the host build
-# and every one of those exports runs on wasm32). Also the EPUB
-# generator's XML/ZIP serialisation files (compose.rs / package.rs): they
-# write to an in-memory `Cursor<Vec<u8>>` sink whose `io::Write` is infallible,
-# so the per-call `.map_err(…)` error arms are dead defensive regions that can't
-# be reached by a test — their OPF/NAV/ZIP output is covered behaviourally by
-# the snapshot + build_epub integration tests instead (ADR-0018).
-_COV_FLOOR := "97"
-_COV_IGNORE := "(target/|/main\\.rs$|xtask/|aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/|aozora-flavored-markdown-epub/src/(compose|package)\\.rs)"
+# The denominator is every `src/` file of every crate this workspace publishes,
+# entry points included. That is a rule and not a wish: `gate_wiring.rs`'s
+# `no_source_file_of_a_crate_this_repo_publishes_is_out_of_the_coverage_denominator`
+# matches this regex against every member's `src/` and fails on any published
+# file it reaches, whatever shape the entry that reaches it is written in.
+# `_COV_IGNORE` therefore holds only what is not published source, or what a
+# gate that DOES run it covers — never what a comment asserts is fine:
+#
+#   target/             build artefacts, not source.
+#   xtask/              repo tooling; `publish = false`.
+#   ...-test-support/   test scaffolding; `publish = false`.
+#   ...-wasm/           ships to wasm32 and llvm-cov instruments the host
+#                       build, so the exclusion defers to `just test-wasm`,
+#                       which runs that crate's tests on the target it ships
+#                       to. `gate_wiring.rs`'s
+#                       `a_crate_excused_from_coverage_for_shipping_to_wasm_is_tested_on_wasm`
+#                       goes red if that gate ever disappears.
+#
+# Test code is out of the denominator already, and by nothing written here:
+# cargo-llvm-cov's own default regex drops
+# `<workspace>/**/{tests,examples,benches}/` and appends ours to it — read the
+# merged regex back with `cargo llvm-cov report -vv`. Naming `tests/` here
+# would move no number. A `#[cfg(test)] mod tests` INSIDE a `src/` file is the
+# case no filename regex can reach (same file as the code it tests), and
+# `#[coverage(off)]` is nightly-only and banned by `just strict-code` — so
+# those modules are counted, on both sides of the ratio.
+#
+# The floor is measured, not chosen, and it does not survive a change of
+# denominator: 97 was set over a narrower one. Two exclusions were dropped
+# here, both of which had only prose behind them (DEV-315):
+#   * `/main\.rs$` — since the binaries were thinned to a shim it excused 3
+#     regions per binary, and both measure 100%: the CLI integration tests
+#     spawn the binary and llvm-cov collects the subprocess. It excused
+#     nothing, so it can enforce something instead. What it now rests on is
+#     read too:
+#     `every_binary_this_repo_publishes_is_run_as_a_process_by_its_own_tests`
+#     fails if a CLI's tests stop spawning it, which the floor itself would
+#     never notice at 3 regions in 7317.
+#   * the EPUB `compose.rs` / `package.rs` file-level exclusion — its claim
+#     (`.map_err(…)` arms over an infallible `Cursor<Vec<u8>>` sink) is true of
+#     ~160 regions and hid ~725 more of live OPF/NAV/ZIP logic with it, and is
+#     not true at all of `package.rs`, which writes a real `fs::File` and
+#     already tests one of those arms. The dead arms are a ~2.4-point tax;
+#     narrowing the exemption to just them is DEV-315's job, not a reason to
+#     keep two source files out of sight.
+# Measured over the full published source: 95.65-95.67% (7317 regions, 317-318
+# missed on consecutive runs — the proptest seeds are random, so the last
+# region or two moves), where the narrower denominator read 98.04% (6226 / 122).
+# Hence a whole number rather than a tight fractional floor: 95 leaves the
+# ~0.6 points that variance needs and nothing like enough for untested code.
+_COV_FLOOR := "95"
+_COV_IGNORE := "(target/|xtask/|aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/)"
 
 [group('gate')]
 [group('coverage')]
