@@ -12,6 +12,7 @@
 #[doc(inline)]
 pub use crate::diagnostics::Span;
 
+/// A whole document, as [`crate::render_to_ir`] projected it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -21,9 +22,12 @@ pub use crate::diagnostics::Span;
 // exactly the kind of field a later release adds.
 #[non_exhaustive]
 pub struct Document {
+    /// In source order, and flat: a 青空文庫 container is two sibling markers
+    /// here rather than a subtree (see [`Block::Aozora`]).
     pub blocks: Vec<Block>,
 }
 
+/// A block-level node: one variant per Markdown construct, plus [`Block::Aozora`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -41,43 +45,63 @@ pub struct Document {
 // arrive as a new `kind` on `Block::Aozora` (ADR-0022).
 #[non_exhaustive]
 pub enum Block {
+    /// A run of inline content that is no other block.
     Paragraph {
+        /// The paragraph's inline content, in source order.
         children: Vec<Inline>,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// An ATX or setext heading — or the paragraph a 青空文庫 heading hint
+    /// promoted to one, at any nesting depth.
     Heading {
+        /// Clamped to `1..=6`, so it always names a real `<h*>` level.
         level: u8,
+        /// The heading text, in source order.
         children: Vec<Inline>,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A `>` quote.
     Blockquote {
+        /// The quoted blocks, in source order.
         children: Vec<Block>,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A bullet or ordered list.
     List {
+        /// `true` for an ordered list, `false` for a bullet one.
         ordered: bool,
+        /// The number an ordered list counts from; `None` for a bullet list.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         start: Option<u32>,
+        /// The list's items, in source order.
         items: Vec<ListItem>,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
@@ -87,34 +111,48 @@ pub enum Block {
     // half of the pair. The wire tag stays `codeBlock` — the tag names the
     // node across a union that has both halves in it, where `code` alone
     // would be ambiguous.
+    /// A fenced or indented code block. Its body is never notation-parsed.
     #[cfg_attr(feature = "serde", serde(rename = "codeBlock"))]
     Code {
+        /// A fence's info string; `None` for an indented block or a bare fence.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         lang: Option<String>,
+        /// The code body, as the author wrote it.
         value: String,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A horizontal rule.
     ThematicBreak {
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A GFM table.
     Table {
+        /// The header row, which a table always has.
         header: TableRow,
+        /// Body rows, in source order; empty for a header-only table.
         rows: Vec<TableRow>,
+        /// One entry per column, in column order.
         align: Vec<TableAlign>,
+        /// 1-based line the block opens on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
@@ -136,12 +174,14 @@ pub enum Block {
         span: Option<Span>,
         /// Rebranded to `aozora-md-*` classes (ADR-0011).
         html: String,
+        /// 1-based line the marker sits on; `None` below top level.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         source_line: Option<u32>,
     },
 }
 
+/// One row of a [`Block::Table`], header or body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -149,24 +189,30 @@ pub enum Block {
 // variants around it changing.
 #[non_exhaustive]
 pub struct TableRow {
+    /// Cells left to right, each holding its own inline content.
     pub cells: Vec<Vec<Inline>>,
+    /// Extent in the source; `None` if the parser reported it inverted.
     #[cfg_attr(feature = "serde", serde(default))]
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub range: Option<Range>,
 }
 
+/// One item of a [`Block::List`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 // As `TableRow`: GFM task-list state is the obvious next field here.
 #[non_exhaustive]
 pub struct ListItem {
+    /// The item's own blocks, in source order.
     pub children: Vec<Block>,
+    /// Extent in the source; `None` if the parser reported it inverted.
     #[cfg_attr(feature = "serde", serde(default))]
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub range: Option<Range>,
 }
 
+/// How a [`Block::Table`] column is aligned.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -175,13 +221,18 @@ pub struct ListItem {
 // alignment marker, which is also the variant a fresh column starts from.
 #[non_exhaustive]
 pub enum TableAlign {
+    /// Delimiter row `:---`.
     Left,
+    /// Delimiter row `:---:`.
     Center,
+    /// Delimiter row `---:`.
     Right,
+    /// Delimiter row `---` — a value in its own right, not a missing one.
     #[default]
     Default,
 }
 
+/// An inline node: one variant per Markdown construct, plus [`Inline::Aozora`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
@@ -197,36 +248,53 @@ pub enum TableAlign {
 // constructs additive for external consumers.
 #[non_exhaustive]
 pub enum Inline {
+    /// A literal text run.
     Text {
+        /// The run, already split wherever a 青空文庫 notation interrupts it.
         value: String,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A code span. Wire tag `code`, against the block half's `codeBlock`.
     Code {
+        /// The span's body, as the author wrote it.
         value: String,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// Strong emphasis.
     Strong {
+        /// The emphasised content, in source order.
         children: Vec<Inline>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// Ordinary emphasis.
     Emphasis {
+        /// The emphasised content, in source order.
         children: Vec<Inline>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A link, inline or reference-resolved.
     Link {
+        /// Destination, resolved but otherwise as written.
         href: String,
+        /// The link's title attribute; `None` when it has none.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         title: Option<String>,
+        /// The link text, in source order.
         children: Vec<Inline>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
@@ -234,17 +302,24 @@ pub enum Inline {
     /// CommonMark image. `alt` carries the alt-text inlines as comrak parses
     /// them, so it is a list rather than a string.
     Image {
+        /// Source, resolved but otherwise as written.
         url: String,
+        /// The image's title attribute; `None` when it has none.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         title: Option<String>,
+        /// Alt text, still as inlines — flatten it yourself for an `alt=`.
         alt: Vec<Inline>,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
     },
+    /// A break inside a paragraph.
     LineBreak {
+        /// `true` for an explicit break, `false` for a wrapped source line.
         hard: bool,
+        /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         range: Option<Range>,
@@ -294,7 +369,9 @@ pub enum Inline {
 // Left open for literal construction for the reason `Span` is — see its
 // definition in `crate::diagnostics`.
 pub struct Range {
+    /// First position the node covers.
     pub start: Position,
+    /// First position past it.
     pub end: Position,
 }
 
@@ -314,7 +391,9 @@ impl Range {
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 // Left open for literal construction; see `Range`.
 pub struct Position {
+    /// 1-based line.
     pub line: u32,
+    /// 1-based column, counted in characters.
     pub column: u32,
 }
 

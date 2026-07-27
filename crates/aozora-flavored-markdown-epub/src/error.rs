@@ -58,76 +58,109 @@ impl StdError for Cause {
     }
 }
 
+/// Every way a build can fail, tagged by the phase that raised it.
 #[derive(Debug, Error, Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
+    /// Discovery could not read the manuscript tree.
     #[error("failed to read manuscript root: {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::discover::io))]
     #[non_exhaustive]
     DiscoverIo {
+        /// The entry that would not read.
         path: PathBuf,
+        /// What the filesystem said.
         #[source]
         source: io::Error,
     },
 
+    /// `book.toml` is present but not valid TOML.
     #[error("failed to parse book metadata at {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::discover::metadata))]
     #[non_exhaustive]
     MetadataParse {
+        /// The metadata file that would not parse.
         path: PathBuf,
+        /// The parser's own failure, held opaquely.
         #[source]
         source: Cause,
     },
 
+    /// Metadata parsed, but a field cannot go into an EPUB package document.
     #[error("metadata field {field:?} is invalid: {reason}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::compose::metadata))]
     #[non_exhaustive]
-    MetadataInvalid { field: &'static str, reason: String },
+    MetadataInvalid {
+        /// Name of the offending field, as spelled in `book.toml`.
+        field: &'static str,
+        /// Why that value is not usable.
+        reason: String,
+    },
 
+    /// The OPF / NAV writer rejected what it was asked to emit.
     #[error("failed to build XML for the EPUB scaffolding: {0}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::compose::xml))]
-    XmlBuild(Cow<'static, str>),
+    XmlBuild(
+        /// What the XML writer objected to.
+        Cow<'static, str>,
+    ),
 
+    /// The tree held no chapter, so there is no spine to write.
     #[error("no chapter sources under {path}")]
     #[diagnostic(
         code(aozora_flavored_markdown_epub::discover::empty),
         help("EPUB requires a spine of one item or more, so a book needs at least one chapter")
     )]
     #[non_exhaustive]
-    NoSources { path: PathBuf },
+    NoSources {
+        /// The root that was searched.
+        path: PathBuf,
+    },
 
+    /// The ZIP container could not be assembled.
     #[error("EPUB packaging failed for {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::package::zip))]
     #[non_exhaustive]
     Package {
+        /// The archive being written.
         path: PathBuf,
+        /// The archiver's own failure, held opaquely.
         #[source]
         source: Cause,
     },
 
+    /// The finished archive could not be written out.
     #[error("EPUB packaging I/O error at {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::package::io))]
     #[non_exhaustive]
     PackageIo {
+        /// The archive being written.
         path: PathBuf,
+        /// What the filesystem said.
         #[source]
         source: io::Error,
     },
 
+    /// A chapter's bytes are neither UTF-8 nor recoverable as `Shift_JIS`.
     #[error("source bytes are not valid UTF-8: {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::render::utf8))]
     #[non_exhaustive]
     Utf8 {
+        /// The chapter that would not decode.
         path: PathBuf,
+        /// Where in the byte stream decoding stopped.
         #[source]
         source: Utf8Error,
     },
 
+    /// A chapter looked like `Shift_JIS` and still would not decode.
     #[error("Shift_JIS source could not be decoded: {path}")]
     #[diagnostic(code(aozora_flavored_markdown_epub::render::sjis))]
     #[non_exhaustive]
     Sjis {
+        /// The chapter that would not decode.
         path: PathBuf,
+        /// The decoder's own failure, held opaquely.
         #[source]
         source: Cause,
     },

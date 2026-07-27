@@ -87,15 +87,26 @@ build:
 # that file — `.gitignore` excludes `/.cargo/` because CARGO_HOME resolves there
 # inside the dev image, so the config would be untracked and the gate would
 # exist only on the machine that wrote it.
-_DOC_DENY := "-D warnings"
+#
+# `--cfg docsrs` rides along because docs.rs passes it: every published crate's
+# `[package.metadata.docs.rs]` sets `rustdoc-args = ["--cfg", "docsrs"]`, and a
+# gate that omits it is building a different configuration from the one
+# consumers read. Nothing in `src/` gates on it today, so it costs nothing —
+# but the day an item takes a `#[cfg(docsrs)]` feature badge, the badge is
+# already under a gate instead of being discovered on the published page.
+_DOC_DENY := "-D warnings --cfg docsrs"
 
 # Build rustdoc for every crate, private items included — the wider of the two
 # doc gates, and the only one that resolves a link written inside a private
 # item. check / clippy run no rustdoc lint at all.
+#
+# `--all-features` for the same reason `doc-public` needs it (see below); this
+# recipe is also what `docs.yml` deploys to Pages, and `[workspace.package]
+# documentation` points a reader there.
 [group('gate')]
 [group('build')]
 doc:
-    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --no-deps --document-private-items'
+    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps --document-private-items'
 
 # The build docs.rs performs: the public surface, no `--document-private-items`.
 # Not a subset of `doc` — documenting private items also SILENCES
@@ -103,10 +114,18 @@ doc:
 # passes `doc` and dangles for every reader of the published documentation.
 # This recipe is the one kept equivalent to docs.rs's own invocation, so what a
 # PR checks is what consumers will actually get.
+#
+# `--all-features` because every published crate's `[package.metadata.docs.rs]`
+# says `all-features = true`, and the library has no default features at all:
+# without it this gate builds `theme`, `serde`, `miette` and `tsify` — most of
+# the documented surface — for nobody, and their rustdoc never runs until
+# docs.rs runs it. `a_gate_builds_the_documentation_docs_rs_will_publish` reads
+# the manifests and holds this line to them, so the pair cannot drift apart
+# again by editing one side.
 [group('gate')]
 [group('build')]
 doc-public:
-    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --no-deps'
+    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps'
 
 # Build release binaries
 [group('build')]

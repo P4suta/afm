@@ -540,7 +540,33 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // document-scoped — moved off `render_blocks`, which is 2 shorter for it —
 // and 2 in `classes`, where `is_known` now owns the numeric-family rule and
 // has to state it. Bookkeeping after a cut, not a decision.
-const MAX_DOC_LINES: u64 = 1_580;
+//
+// Raised by 151 — the largest single raise this constant will take, and a
+// decision, not bookkeeping. `missing_docs` is now `warn` in
+// `[workspace.lints.rust]`, which `just clippy`'s `-D warnings` makes a gate,
+// and it found 145 public items carrying no doc comment at all: every
+// `ir::Block` / `ir::Inline` variant and field, `Document` / `ListItem` /
+// `TableRow` / `TableAlign`, the `Range` + `Position` leaves, `RenderedIr` /
+// `RenderedBlock` / `RenderedBlocks` and `Error::SourceTooLarge`'s `len`, the
+// whole epub `Error` tree, test-support's `Violation` / `WellFormedError`, and
+// the two wasm envelopes. 151 lines for 145 items: six needed a second line.
+//
+// None of it is restatement, because there was nothing there to restate. Each
+// line says what the type cannot: that `source_line` is `None` below top
+// level, that `range` is `None` when the parser reported the position
+// inverted, that `TableAlign::Default` is a value and not a missing marker,
+// that `Image`'s `alt` is still inlines. The alternative — paying for a
+// mandatory-prose lint by cutting explanation somewhere else — would trade
+// documentation a reader asked for against documentation a reader needed, so
+// the raise is the honest move and it is recorded here as one.
+//
+// Lowered by 2 in the same change: the test module's `SOURCE_LINES` — a
+// hand-written snapshot of the workspace size, 2 677 lines stale — became a
+// live measurement, and its doc comment went with it. Bookkeeping after a cut.
+// It is written down because it now has to be: the ceiling is asserted equal
+// to the measured count (`the_pinned_ceiling_is_the_count_it_is_pinned_to`),
+// so silent headroom is no longer somewhere prose can accumulate.
+const MAX_DOC_LINES: u64 = 1_728;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured
@@ -1034,13 +1060,40 @@ mod tests {
     use super::{
         MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path, PathBuf, RETIRED_PATH_LIST_FILE,
         RETIRED_REPO_PATHS, RETIRED_UPSTREAM_PATHS, SCANNED_FILES, aozora_pin_pattern,
-        count_doc_lines, doc_budget_failure, fold_separators, fs, is_semver_triple, scan_comments,
-        scan_repo_paths,
+        collect_crate_sources, count_doc_lines, doc_budget_failure, fold_separators, fs,
+        is_semver_triple, scan_comments, scan_repo_paths,
     };
 
-    /// The workspace size [`MAX_DOC_LINES`] was pinned against. Only its
-    /// distance from the backstop's floor matters below, so it may drift.
-    const SOURCE_LINES: u64 = 10_398;
+    // The `(doc, all)` the gate itself would measure — the same walk over the
+    // same files, run here instead of read off a constant.
+    //
+    // It was a constant, `SOURCE_LINES`, whose own doc comment licensed it to
+    // drift ("only its distance from the backstop's floor matters"). By the
+    // time this was written it stood at 10 398 against a real 13 075: a number
+    // nothing recomputed, standing in for the workspace in every assertion
+    // below. The licence holds only while the distance stays positive, and it
+    // is a `u64` subtraction — so past a high enough ceiling a stale snapshot
+    // does not report a thin margin, it panics inside the test that exists to
+    // show the gate has slack. Measuring costs one directory walk and cannot
+    // go stale at all.
+    fn measured_source() -> (u64, u64) {
+        let mut files = Vec::new();
+        collect_crate_sources(&repo_root(), &mut files).expect("walking crates/*/src");
+        let mut doc = 0;
+        let mut all = 0;
+        for path in &files {
+            let src = fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let (file_doc, file_all) = count_doc_lines(&src);
+            doc += file_doc;
+            all += file_all;
+        }
+        assert!(
+            all > 1_000,
+            "only {all} source line(s) found under crates/*/src; the walk is reading nothing"
+        );
+        (doc, all)
+    }
 
     #[test]
     fn doc_line_count_sees_both_rustdoc_markers_and_ignores_plain_notes() {
@@ -1049,16 +1102,42 @@ mod tests {
         assert_eq!((doc, all), (3, 6));
     }
 
+    // The ceiling is the count, not a budget the count sits under.
+    //
+    // The gate fails on `doc > MAX_DOC_LINES`, so every doc line deleted
+    // without the matching edit here leaves headroom — and headroom is prose
+    // that can be added later without the hand edit that is this constant's
+    // entire reason to exist. It is not hypothetical: the ceiling stood at
+    // 1 580 against a measured 1 579, so one `///` line could have gone in
+    // free, and nothing in the repo could have said so. `just
+    // comment-discipline` cannot: a count under its ceiling is exactly what it
+    // is built to pass.
+    //
+    // Failing here reads as "do the bookkeeping the constant's own doc comment
+    // describes": below, lower it and say what was cut; above, this is the
+    // deliberate raise, so raise it and say what grew.
+    #[test]
+    fn the_pinned_ceiling_is_the_count_it_is_pinned_to() {
+        let (doc, _) = measured_source();
+        assert_eq!(
+            doc, MAX_DOC_LINES,
+            "MAX_DOC_LINES is {MAX_DOC_LINES} and crates/*/src carries {doc} doc line(s). \
+             The ceiling is pinned to today's count — a gap either way is a hand edit that was \
+             not made."
+        );
+    }
+
     /// The ratchet's whole point: one doc line more than the pinned count
     /// fails, however the surrounding source moved.
     #[test]
     fn one_extra_doc_line_breaks_the_pinned_ceiling() {
+        let (_, all) = measured_source();
         assert!(
-            doc_budget_failure(MAX_DOC_LINES + 1, SOURCE_LINES + 1).is_some(),
+            doc_budget_failure(MAX_DOC_LINES + 1, all + 1).is_some(),
             "a doc line added along with its file must not fit"
         );
         assert!(
-            doc_budget_failure(MAX_DOC_LINES + 1, SOURCE_LINES).is_some(),
+            doc_budget_failure(MAX_DOC_LINES + 1, all).is_some(),
             "a plain note promoted to a doc comment must not fit either"
         );
     }
@@ -1072,14 +1151,20 @@ mod tests {
     fn deleting_source_lines_does_not_trip_the_ratchet() {
         // How far the source may shrink at the pinned doc count before the
         // backstop fires. A ratio pinned to today's measurement left none.
+        let (_, all) = measured_source();
         let floor = MAX_DOC_LINES * 100_000 / MAX_DOC_RATIO_PER_100K;
-        let slack = SOURCE_LINES - floor;
-        assert!(slack >= 500, "only {slack} non-doc line(s) of slack");
+        let slack = all.saturating_sub(floor);
+        assert!(
+            slack >= 500,
+            "only {slack} non-doc line(s) of slack: {all} source lines against a backstop floor \
+             of {floor} at a ceiling of {MAX_DOC_LINES}. Raising the ceiling raises that floor, \
+             so the backstop is now close enough to fire on a plain deletion."
+        );
 
-        assert!(doc_budget_failure(MAX_DOC_LINES, SOURCE_LINES).is_none());
+        assert!(doc_budget_failure(MAX_DOC_LINES, all).is_none());
         for shrunk_by in [1, 100, 500] {
             assert!(
-                doc_budget_failure(MAX_DOC_LINES, SOURCE_LINES - shrunk_by).is_none(),
+                doc_budget_failure(MAX_DOC_LINES, all - shrunk_by).is_none(),
                 "removing {shrunk_by} non-doc line(s) must not fail a doc-comment gate"
             );
         }
@@ -1089,7 +1174,8 @@ mod tests {
     /// for.
     #[test]
     fn removing_a_doc_line_stays_within_budget() {
-        assert!(doc_budget_failure(MAX_DOC_LINES - 1, SOURCE_LINES).is_none());
+        let (_, all) = measured_source();
+        assert!(doc_budget_failure(MAX_DOC_LINES - 1, all).is_none());
         assert!(doc_budget_failure(0, 1).is_none());
     }
 

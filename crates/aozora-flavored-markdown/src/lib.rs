@@ -329,8 +329,12 @@ pub struct Rendered {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedIr {
+    /// The projected document.
     pub ir: ir::Document,
+    /// The same document as HTML, so a host can render either without a
+    /// second pass.
     pub html: String,
+    /// Non-fatal lexer observations. Empty on the happy path.
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -549,6 +553,7 @@ pub struct RenderedBlock {
     /// Usually one block; empty for comrak constructs the IR does not model
     /// (definition lists, footnote refs, raw HTML, …).
     pub ir: Vec<ir::Block>,
+    /// This block's HTML, ready to concatenate with its neighbours'.
     pub html: String,
     /// 1-based line where this block began in the source.
     pub source_line: u32,
@@ -558,6 +563,7 @@ pub struct RenderedBlock {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenderedBlocks {
+    /// One entry per top-level comrak child, in document order.
     pub blocks: Vec<RenderedBlock>,
     /// Document-scoped rather than per-block: the lexer pass is not
     /// block-scoped, so a construct's diagnostic has no one block to sit in.
@@ -704,7 +710,10 @@ pub enum Error {
     /// Refused ahead of the lexer, whose own `u32` span assert would abort
     /// the process under this workspace's `panic = "abort"`.
     #[error("source is {len} bytes; the parser addresses at most u32::MAX")]
-    SourceTooLarge { len: usize },
+    SourceTooLarge {
+        /// Length of the source that was refused, in bytes.
+        len: usize,
+    },
     /// A pass handed the lexer text it would not take — reachable only
     /// because lifting a verbatim region out can grow a source past the bound.
     #[error("the source did not lex")]

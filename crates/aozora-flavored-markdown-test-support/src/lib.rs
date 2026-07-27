@@ -133,52 +133,86 @@ pub const fn snap_right(s: &str, mut i: usize) -> usize {
 pub enum Violation {
     /// Tier A — a bare `［＃` leaked outside any `aozora-md-directive` wrapper.
     BareBracket {
+        /// Byte offset of the first leak, into the stripped HTML.
         first_offset: usize,
+        /// Context around that offset.
         snippet: String,
+        /// How many leaked in all, so a shrunk case still reports the scale.
         total: usize,
     },
     /// Tier B — a PUA sentinel (U+E000–U+E004) reached the rendered HTML.
     SentinelLeak {
+        /// Which sentinel from `sentinels::ALL` survived.
         codepoint: char,
+        /// Byte offset of the first occurrence, into the HTML.
         first_offset: usize,
+        /// Context around that offset.
         snippet: String,
     },
     /// Tier C — a heading (`<h1>`–`<h6>`) body contains a forbidden class.
     HeadingContaminated {
+        /// Which heading level, 1 through 6.
         level: u8,
+        /// The class token that must not appear in a heading body.
         forbidden_class: String,
+        /// Context around the offending heading.
         snippet: String,
     },
     /// Tier D — a tag-balance violation from [`check_well_formed`].
-    UnbalancedTag(WellFormedError),
+    UnbalancedTag(
+        /// The first imbalance the scan found.
+        WellFormedError,
+    ),
     /// Tier E — the `aozora-md-directive` wrapper shape is malformed.
     DirectiveWrapper {
+        /// Which wrapper rule was broken.
         violation: &'static str,
+        /// Context around the offending wrapper.
         snippet: String,
     },
     /// Tier F — an XSS marker leaked into the HTML.
     XssLeak {
+        /// The marker the fixture planted, found unescaped.
         marker: &'static str,
+        /// Byte offset of the first occurrence, into the HTML.
         first_offset: usize,
+        /// Context around that offset.
         snippet: String,
     },
     /// Tier G — an `aozora-md-*` class token the library's
     /// [`classes::is_known`] does not recognise.
-    UnknownCssClass { class: String, snippet: String },
+    UnknownCssClass {
+        /// The unrecognised class token.
+        class: String,
+        /// Context around the element carrying it.
+        snippet: String,
+    },
     /// Tier I — a double-encoded HTML entity (e.g. `&amp;lt;`) slipped in.
-    DoubleEncodedEntity { snippet: String },
+    DoubleEncodedEntity {
+        /// Context around the double-encoded entity.
+        snippet: String,
+    },
     /// Tier J — HTML content-model violation (orphan `<rt>`, `<rp>`, …).
     ContentModel {
+        /// Which content-model rule was broken.
         violation: &'static str,
+        /// Context around the offending element.
         snippet: String,
     },
     /// Tier K — `<ruby>` element missing its `<rp>(</rp>` ↔ `<rp>)</rp>` pair.
     MarkupIncomplete {
+        /// Which half of the pair is missing.
         violation: &'static str,
+        /// Context around the incomplete `<ruby>`.
         snippet: String,
     },
     /// I5 — `canonicalize` rewrote the interior of a fenced code block.
-    FenceRewritten { interior: String, snippet: String },
+    FenceRewritten {
+        /// The fence body as it was written, which had to survive verbatim.
+        interior: String,
+        /// Context around the rewritten fence.
+        snippet: String,
+    },
 }
 
 impl fmt::Display for Violation {
@@ -1041,20 +1075,32 @@ fn find_javascript_uri_in_tag(html: &str) -> Option<usize> {
 /// failure message is actionable without a full dump of the rendered HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WellFormedError {
+    /// An element opened and the document ended with it still open.
     UnclosedTag {
+        /// Name of the tag left open.
         tag: String,
+        /// Context around where it opened.
         near: String,
     },
+    /// A closing tag arrived with nothing open to close.
     ExtraClose {
+        /// Name of the tag being closed.
         tag: String,
+        /// Context around the stray close.
         near: String,
     },
+    /// Elements closed out of order, so the nesting crosses over.
     MisorderedClose {
+        /// The innermost tag still open.
         opened: String,
+        /// The tag that tried to close over it.
         closed: String,
+        /// Context around the crossing.
         near: String,
     },
+    /// The scanner met a `<` it could not read as a tag at all.
     MalformedTag {
+        /// Context around the unreadable markup.
         near: String,
     },
 }

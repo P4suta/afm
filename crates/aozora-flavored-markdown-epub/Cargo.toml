@@ -12,6 +12,11 @@ readme        = { workspace = true }
 keywords      = ["epub", "epub3", "markdown", "aozora", "japanese"]
 categories    = ["text-processing"]
 
+# Same docs.rs build as the library (see its manifest for why).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

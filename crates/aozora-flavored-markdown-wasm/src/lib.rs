@@ -81,6 +81,7 @@ pub fn hash_source(source: &str) -> u64 {
     XxHash3_64::oneshot_with_seed(0, source.as_bytes())
 }
 
+/// One block of a [`render_blocks`] call, as JS receives it.
 #[derive(Debug, Serialize, Tsify)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockResult {
@@ -92,6 +93,8 @@ pub struct BlockResult {
     source_line: u32,
 }
 
+/// What [`render_blocks`] returns: the blocks, and the diagnostics for the
+/// document they came from.
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct BlocksResult {

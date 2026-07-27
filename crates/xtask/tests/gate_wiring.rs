@@ -1261,15 +1261,46 @@ fn a_gate_builds_the_documentation_docs_rs_will_publish() {
          build fire first for them.",
         builds.iter().map(|build| &build.recipe).collect::<Vec<_>>()
     );
+
+    // The rest of what "the build docs.rs performs" means is not a fact about
+    // rustdoc, it is whatever `[package.metadata.docs.rs]` says — so it is read
+    // out of the manifests rather than written down here a second time. A list
+    // spelled here would be a second copy of the published build, and this
+    // test's own history is what that costs: the three arguments above were
+    // written by hand, the manifests then declared `all-features = true`, and
+    // the assertion went on passing over a gate that documented the default
+    // feature set. No crate here has one, so `theme`, `serde`, `miette` and
+    // `tsify` — most of the documented surface — were built by no gate at all
+    // and rustdoc first ran over them on docs.rs.
+    let wanted = docs_rs_requirement();
+    assert!(
+        wanted.all_features || !wanted.rustdoc_args.is_empty(),
+        "no published crate declares a [package.metadata.docs.rs] build, so this test derives \
+         nothing and holds the gate to a list written inside itself instead"
+    );
+    let mut required: Vec<&str> = vec!["--locked", "--workspace", "--no-deps"];
+    if wanted.all_features {
+        required.push("--all-features");
+    }
+
     for build in published {
-        for required in ["--locked", "--workspace", "--no-deps"] {
+        for argument in &required {
             assert!(
-                build.arguments.iter().any(|argument| argument == required),
-                "`just {}` is the docs.rs-equivalent gate and is missing `{required}`:\n      {}",
+                build.arguments.iter().any(|have| have == argument),
+                "`just {}` is the docs.rs-equivalent gate and is missing `{argument}`:\n      {}",
                 build.recipe,
                 build.line.trim()
             );
         }
+        let flags = build.flags.as_deref().unwrap_or("");
+        assert!(
+            contains_run(flags, &wanted.rustdoc_args),
+            "`just {}` builds with RUSTDOCFLAGS=`{flags}`, and the published crates ask docs.rs \
+             for `rustdoc-args = {:?}`. What consumers read is built with those flags; a gate \
+             without them is checking a different configuration.",
+            build.recipe,
+            wanted.rustdoc_args
+        );
     }
 }
 
@@ -1617,4 +1648,332 @@ fn a_recipes_own_command_is_owned_and_a_recipe_it_depends_on_is_too() {
         !owned.contains_key(&("cargo".to_owned(), "fmt".to_owned())),
         "a recipe no gate depends on had its command counted as gate-owned"
     );
+}
+
+// ---------------------------------------------------------------------------
+// what a cargo manifest declares
+// ---------------------------------------------------------------------------
+//
+// Everything above reads a Justfile or a workflow. Two of the properties this
+// repo leans on are declared somewhere no recipe can reach: a lint table that
+// covers a crate only if that crate's own manifest opts in, and a docs.rs
+// build configured per published crate and performed on a machine none of
+// these gates run on. Both are the shape this file exists for — a declaration
+// whose execution is somewhere else — so they are read the same way.
+
+/// The table a `[header]` line opens, or `None` for any other line. `[[bin]]`
+/// reads as `bin`: an array-of-tables is still that table.
+fn table_header(line: &str) -> Option<&str> {
+    let trimmed = strip_comment(line).trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    Some(inner.trim_start_matches('[').trim_end_matches(']'))
+}
+
+/// A `key = value` line, comment stripped. A dotted key (`version.workspace`)
+/// keeps its dots, so it never answers for the bare key beside it.
+fn manifest_pair(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = strip_comment(line).split_once('=')?;
+    Some((key.trim(), value.trim()))
+}
+
+/// Every `key = value` inside one table of a manifest.
+fn table_pairs<'a>(manifest: &'a str, table: &str) -> Vec<(&'a str, &'a str)> {
+    let mut current = "";
+    let mut out = Vec::new();
+    for line in manifest.lines() {
+        if let Some(header) = table_header(line) {
+            current = header;
+            continue;
+        }
+        if current != table {
+            continue;
+        }
+        if let Some(pair) = manifest_pair(line) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+/// The value `key` takes inside `[table]`.
+fn manifest_value<'a>(manifest: &'a str, table: &str, key: &str) -> Option<&'a str> {
+    table_pairs(manifest, table)
+        .into_iter()
+        .find(|&(name, _)| name == key)
+        .map(|(_, value)| value)
+}
+
+/// The quoted strings of a single-line TOML value: an array's items, or the
+/// one string a scalar holds.
+fn quoted_items(value: &str) -> Vec<String> {
+    value
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A workspace member: the directory the manifest sits in, and that manifest.
+struct Member {
+    path: String,
+    manifest: String,
+}
+
+/// Every member the workspace manifest lists, with its manifest read. Derived
+/// rather than listed here for the same reason the gate manifest is: a crate
+/// added and forgotten is the one this file has to see.
+fn workspace_members() -> Vec<Member> {
+    let root = read("Cargo.toml");
+    let mut paths: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in root.lines() {
+        let body = strip_comment(line);
+        if !inside {
+            inside = body.trim_start().starts_with("members") && body.contains('[');
+            continue;
+        }
+        if body.trim_start().starts_with(']') {
+            break;
+        }
+        paths.extend(quoted_items(body));
+    }
+    assert!(
+        paths.len() >= 5,
+        "only {paths:?} read out of the workspace manifest's `members`; the reader is not \
+         finding the list"
+    );
+    paths
+        .into_iter()
+        .map(|path| {
+            let manifest = read(&format!("{path}/Cargo.toml"));
+            Member { path, manifest }
+        })
+        .collect()
+}
+
+/// Does this member reach crates.io? `publish = false` is the opt-out cargo
+/// honours and the only one any member here uses.
+fn is_published(manifest: &str) -> bool {
+    manifest_value(manifest, "package", "publish") != Some("false")
+}
+
+/// What a crate's manifest asks docs.rs to build for it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DocsRsBuild {
+    all_features: bool,
+    rustdoc_args: Vec<String>,
+}
+
+/// The `[package.metadata.docs.rs]` table, or `None` when the crate declares
+/// none — in which case docs.rs builds default features and stops there.
+fn docs_rs_build(manifest: &str) -> Option<DocsRsBuild> {
+    const TABLE: &str = "package.metadata.docs.rs";
+    let declared = manifest
+        .lines()
+        .any(|line| table_header(line) == Some(TABLE));
+    declared.then(|| DocsRsBuild {
+        all_features: manifest_value(manifest, TABLE, "all-features") == Some("true"),
+        rustdoc_args: manifest_value(manifest, TABLE, "rustdoc-args")
+            .map(quoted_items)
+            .unwrap_or_default(),
+    })
+}
+
+/// The build the published crates ask docs.rs to perform, as one answer.
+/// `all-features` counts only when every one of them says it: a gate passing
+/// `--all-features` on behalf of a crate whose manifest does not would be
+/// checking a configuration nobody publishes.
+fn docs_rs_requirement() -> DocsRsBuild {
+    let declared: Vec<DocsRsBuild> = workspace_members()
+        .iter()
+        .filter(|member| is_published(&member.manifest))
+        .filter_map(|member| docs_rs_build(&member.manifest))
+        .collect();
+    DocsRsBuild {
+        all_features: !declared.is_empty() && declared.iter().all(|build| build.all_features),
+        rustdoc_args: declared
+            .first()
+            .map(|build| build.rustdoc_args.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// Does `flags` carry `wanted` as a run of consecutive words? `--cfg docsrs`
+/// is two words that mean nothing apart, so they have to arrive together and
+/// in that order.
+fn contains_run(flags: &str, wanted: &[String]) -> bool {
+    let words: Vec<&str> = flags.split_whitespace().collect();
+    wanted.is_empty()
+        || words.windows(wanted.len()).any(|window| {
+            window
+                .iter()
+                .zip(wanted)
+                .all(|(word, want)| *word == want.as_str())
+        })
+}
+
+#[test]
+fn every_crate_this_repo_publishes_declares_the_docs_rs_build_it_wants() {
+    // docs.rs builds default features unless a crate says otherwise, and every
+    // feature in this workspace is off by default: `theme`'s stylesheets, the
+    // `serde` derives, the `miette` impl, the `tsify` bindings. A published
+    // crate with no `[package.metadata.docs.rs]` therefore ships a page
+    // missing most of what a reader opened it for — and nothing here could
+    // have reported it, because the build that would show it runs on docs.rs,
+    // after publication, with no gate in front of it.
+    //
+    // Over every member rather than the four crates that publish today. The
+    // fifth is precisely the one that gets forgotten, and it would be
+    // forgotten in the direction nothing notices.
+    let members = workspace_members();
+    let mut published = 0_usize;
+    let mut opted_out = 0_usize;
+    let mut args: Vec<(String, Vec<String>)> = Vec::new();
+    for member in &members {
+        if !is_published(&member.manifest) {
+            opted_out += 1;
+            continue;
+        }
+        published += 1;
+        let build = docs_rs_build(&member.manifest).unwrap_or_else(|| {
+            panic!(
+                "{}/Cargo.toml publishes to crates.io and declares no \
+                 [package.metadata.docs.rs]. Its page would document the default feature set, \
+                 which in this workspace means: none of them.",
+                member.path
+            )
+        });
+        assert!(
+            build.all_features,
+            "{}/Cargo.toml declares [package.metadata.docs.rs] without `all-features = true`, \
+             so docs.rs builds its default features — and no crate here has any.",
+            member.path
+        );
+        args.push((member.path.clone(), build.rustdoc_args));
+    }
+
+    // Blindness check on the reader, both ways: it has to find crates that
+    // publish AND crates that do not, or `publish = false` is not being read
+    // and every assertion above was skipped or vacuous.
+    assert!(
+        published >= 1 && opted_out >= 1,
+        "{published} published and {opted_out} opted-out member(s) out of {}; the reader is not \
+         telling `publish = false` apart from its absence",
+        members.len()
+    );
+
+    // One build for all of them. Four pages built four ways is four
+    // configurations to reason about, and only one of them can be the one a
+    // gate here reproduces.
+    for pair in args.windows(2) {
+        assert_eq!(
+            pair[0].1, pair[1].1,
+            "{} and {} ask docs.rs for different `rustdoc-args`. A gate can reproduce one \
+             published build, so they have to be one build.",
+            pair[0].0, pair[1].0
+        );
+    }
+}
+
+#[test]
+fn every_lint_this_workspace_declares_reaches_every_crate_it_builds() {
+    // `[workspace.lints]` is a declaration with a per-crate opt-in, and the
+    // opt-in fails open. A member whose manifest omits `[lints] workspace =
+    // true` inherits none of it — not `unsafe_code = "forbid"`, not the eight
+    // rustdoc denials, not `missing_docs` — and nothing reports that. The
+    // crate simply stops being covered while `just clippy` and `just
+    // doc-public` stay green over it, which is the state this file's own
+    // header describes and no assertion in it had yet checked.
+    let members = workspace_members();
+    for member in &members {
+        assert_eq!(
+            manifest_value(&member.manifest, "lints", "workspace"),
+            Some("true"),
+            "{}/Cargo.toml carries no `[lints] workspace = true`, so [workspace.lints] reaches \
+             it with nothing at all and every lint this repo relies on is off there.",
+            member.path
+        );
+    }
+
+    // And the declaration the opt-in distributes. `missing_docs` is what makes
+    // the published surface explain itself; it is warn-level because a bare
+    // `cargo build` should stay usable mid-edit, and `just clippy`'s
+    // `-D warnings` is what turns it into a gate — so `allow`, or absence,
+    // silently reopens every undocumented public item.
+    let root = read("Cargo.toml");
+    let rust_lints = table_pairs(&root, "workspace.lints.rust");
+    assert!(
+        rust_lints.len() >= 5,
+        "[workspace.lints.rust] came out as {rust_lints:?}; the reader is not finding the table"
+    );
+    let level = rust_lints
+        .iter()
+        .find(|&&(key, _)| key == "missing_docs")
+        .map(|&(_, value)| value);
+    assert!(
+        matches!(level, Some(set) if set.contains("warn") || set.contains("deny")),
+        "[workspace.lints.rust] sets missing_docs to {level:?}. Undocumented public items are \
+         then nobody's failure: rustdoc does not mind them, clippy does not either, and the \
+         first reader to notice is looking at the published page."
+    );
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_dotted_key_does_not_answer_for_the_bare_key() {
+    // Every member spells its inherited fields `version.workspace = true`. A
+    // reader that matched on a prefix would read `publish.workspace` — or
+    // `version` — as `publish` and call a published crate opted out.
+    let manifest = "[package]\nversion.workspace = true\npublish.workspace = true\n";
+    assert_eq!(manifest_value(manifest, "package", "publish"), None);
+    assert_eq!(manifest_value(manifest, "package", "version"), None);
+    assert!(is_published(manifest));
+}
+
+#[test]
+fn a_key_in_a_neighbouring_table_is_not_in_this_one() {
+    // `[package.metadata.dist]` sits beside `[package.metadata.docs.rs]` in
+    // the epub CLI's manifest, and it holds a `dist = false` that a reader
+    // ignoring table boundaries would hand to whoever asked next.
+    let manifest = concat!(
+        "[package.metadata.dist]\n",
+        "dist = false\n",
+        "[package.metadata.docs.rs]\n",
+        "all-features = true\n",
+    );
+    assert_eq!(
+        manifest_value(manifest, "package.metadata.dist", "all-features"),
+        None
+    );
+    assert_eq!(
+        manifest_value(manifest, "package.metadata.docs.rs", "all-features"),
+        Some("true")
+    );
+}
+
+#[test]
+fn a_crate_declaring_no_docs_rs_table_asks_for_no_build() {
+    assert_eq!(docs_rs_build("[package]\nname = \"x\"\n"), None);
+    assert_eq!(
+        docs_rs_build(
+            "[package.metadata.docs.rs]\nall-features = true\nrustdoc-args = [\"--cfg\", \"docsrs\"]\n"
+        ),
+        Some(DocsRsBuild {
+            all_features: true,
+            rustdoc_args: vec!["--cfg".to_owned(), "docsrs".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn a_flag_pair_counts_only_where_it_arrives_whole_and_in_order() {
+    let wanted = vec!["--cfg".to_owned(), "docsrs".to_owned()];
+    assert!(contains_run("-D warnings --cfg docsrs", &wanted));
+    assert!(!contains_run("-D warnings --cfg", &wanted));
+    assert!(!contains_run("--cfg feature docsrs", &wanted));
+    assert!(!contains_run("docsrs --cfg", &wanted));
+    // A crate asking for no rustdoc-args constrains nothing.
+    assert!(contains_run("-D warnings", &[]));
 }
