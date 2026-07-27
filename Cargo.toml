@@ -30,6 +30,16 @@ categories    = ["parser-implementations", "text-processing", "localization"]
 unsafe_code      = "forbid"
 non_ascii_idents = "deny" # all 日本語 is string literals, never identifiers
 
+# The published surface has to explain itself. `warn` rather than `deny`
+# because `just clippy` passes `-D warnings`, which makes it a gate anyway,
+# while leaving a bare `cargo build` usable mid-edit. It is workspace-wide and
+# not per-published-crate on purpose: `aozora-flavored-markdown-wasm`'s
+# envelopes are the obsidian/playground `.d.ts` and
+# `aozora-flavored-markdown-test-support`'s `Violation` variants are what a
+# failing invariant prints, so both are read by someone who cannot see the
+# source even though neither reaches crates.io.
+missing_docs                  = "warn"
+
 # Strong signals that tend to mask real bugs.
 missing_debug_implementations = "warn"
 missing_copy_implementations  = "warn"

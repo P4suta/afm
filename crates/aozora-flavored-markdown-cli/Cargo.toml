@@ -11,6 +11,13 @@ readme.workspace      = true
 keywords.workspace    = true
 categories.workspace  = true
 
+# Same docs.rs build as the library (see its manifest for why). A binary crate
+# gets a docs.rs page too, and this is what keeps every published crate's page
+# built the one way.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

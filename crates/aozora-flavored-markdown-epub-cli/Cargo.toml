@@ -18,6 +18,11 @@ categories    = ["command-line-utilities"]
 [package.metadata.dist]
 dist = false
 
+# Same docs.rs build as the library (see its manifest for why).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

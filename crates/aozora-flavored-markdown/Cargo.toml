@@ -11,6 +11,19 @@ readme.workspace       = true
 keywords.workspace     = true
 categories.workspace   = true
 
+# docs.rs otherwise builds default features only, and every feature here is off
+# by default — so the published page would omit `theme`'s stylesheets, the
+# `serde` derives and the `miette` impl, which is most of what a reader is
+# there to check. `just doc-public` is the local equivalent and already passes
+# `--all-features`, so this is what keeps the two builds asking the same
+# question. `--cfg docsrs` is the flag that identifies the docs.rs build to
+# rustdoc; no `cfg(docsrs)` is read in `src/` today, and it is set here so an
+# item that later wants a feature badge does not need a manifest change to get
+# one.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
