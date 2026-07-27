@@ -47,7 +47,15 @@ const VERSION_COMMENT_EXEMPT: &[(&str, &str)] = &[(
 /// A floor under the refs found per file, so this cannot pass by having
 /// stopped reading. A step written in a shape the line scanner does not
 /// recognise otherwise turns the whole test green.
+///
+/// The list is checked in both directions. It has to be: a floor is a claim
+/// about ONE file, so a file nobody added a line for has a floor of nothing
+/// and the "the scan is still reading" half never applied to it. `audit.yml`
+/// arrived with five `uses:` and three checkouts and would have been in
+/// exactly that state — pinned by the scan today, and free to stop being read
+/// tomorrow with every test still green.
 const USES_FLOOR: &[(&str, usize)] = &[
+    (".github/workflows/audit.yml", 5),
     // ci.yml fell from 20 to 14 when eleven hand-written jobs collapsed into
     // one matrix generated from the Justfile's `[group('gate')]`. Fewer jobs,
     // not less reading: a floor tracks the file as it is.
@@ -66,8 +74,10 @@ const USES_FLOOR: &[(&str, usize)] = &[
 
 /// Same floor for the checkout scan: the credential rule is worth nothing if
 /// the scanner finds no checkouts to apply it to. Fell from 20 to 18 with
-/// ci.yml's gate matrix — seven jobs' worth of checkouts became one leg's.
-const CHECKOUT_FLOOR: usize = 18;
+/// ci.yml's gate matrix — seven jobs' worth of checkouts became one leg's —
+/// and rose to 21 when audit.yml added three jobs, one checkout each. Left at
+/// 21 against 22 present for the same one step of slack it has always carried.
+const CHECKOUT_FLOOR: usize = 21;
 
 /// Actions this repo pins at two different commits, each with why it is still
 /// like that. Every entry is a LIVE DEFECT, not an exemption: an immutable pin
@@ -292,18 +302,45 @@ fn scanned_files(root: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-fn assert_floors(found: &[(String, usize)]) {
+/// Why a `(file, count)` scan fails its floors — in both directions. A floor
+/// that names a file the scan never reached is a floor over nothing, and a
+/// file the scan reached with no floor beside it is a file whose silence
+/// nobody is holding to anything.
+fn floor_failures(found: &[(String, usize)]) -> Vec<String> {
+    let mut out = Vec::new();
     for &(file, floor) in USES_FLOOR {
         let seen = found
             .iter()
             .find(|(label, _)| label == file)
             .map_or(0, |&(_, count)| count);
-        assert!(
-            seen >= floor,
-            "{file}: {seen} `uses:` found, expected at least {floor}. The scan is \
-             reading less of the file than it used to, so its silence means nothing."
-        );
+        if seen < floor {
+            out.push(format!(
+                "{file}: {seen} `uses:` found, expected at least {floor}. The scan is \
+                 reading less of the file than it used to, so its silence means nothing."
+            ));
+        }
     }
+    for (label, count) in found {
+        if *count == 0 || USES_FLOOR.iter().any(|&(file, _)| file == label) {
+            continue;
+        }
+        out.push(format!(
+            "{label}: {count} `uses:` found and no floor beside it. Add \
+             (\"{label}\", {count}) to USES_FLOOR — until then this file is pinned only for as \
+             long as the reader happens to understand it, and a step rewritten into a shape it \
+             cannot parse unpins the file with nothing going red."
+        ));
+    }
+    out
+}
+
+fn assert_floors(found: &[(String, usize)]) {
+    let failures = floor_failures(found);
+    assert!(
+        failures.is_empty(),
+        "the `uses:` scan is not covering what it is written over:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -666,5 +703,47 @@ fn a_persist_credentials_setting_belongs_to_its_own_step() {
         verdicts,
         vec![true, false],
         "a step's setting leaked into its neighbour"
+    );
+}
+
+#[test]
+fn a_workflow_the_floor_list_forgot_is_reported() {
+    // The half of the floor rule that did not exist until audit.yml was
+    // written. A floor is per file, so the file nobody wrote a line for is the
+    // one whose "the scan is still reading it" claim was never made — and that
+    // is precisely the newly added workflow, i.e. the file most likely to be
+    // written in a shape the reader does not yet handle.
+    let clean: Vec<(String, usize)> = USES_FLOOR
+        .iter()
+        .map(|&(file, floor)| (file.to_owned(), floor))
+        .collect();
+    assert!(
+        floor_failures(&clean).is_empty(),
+        "every file at exactly its floor was reported: {:?}",
+        floor_failures(&clean)
+    );
+
+    let mut forgotten = clean.clone();
+    forgotten.push((".github/workflows/tomorrow.yml".to_owned(), 4));
+    assert_eq!(
+        floor_failures(&forgotten).len(),
+        1,
+        "a scanned file with no floor beside it passed"
+    );
+
+    let mut no_refs = clean.clone();
+    no_refs.push((".github/dependabot.yml".to_owned(), 0));
+    assert!(
+        floor_failures(&no_refs).is_empty(),
+        "a file the scan found no `uses:` in was asked for a floor; there is nothing there \
+         for the scan to stop reading"
+    );
+
+    let mut gone = clean;
+    gone[0].1 -= 1;
+    assert_eq!(
+        floor_failures(&gone).len(),
+        1,
+        "a file that fell below its floor passed"
     );
 }

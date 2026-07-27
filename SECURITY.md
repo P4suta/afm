@@ -41,7 +41,20 @@ Out of scope:
 Every dependency, comrak included, resolves from crates.io and appears in
 `Cargo.lock` with a `source` and a `checksum` (ADR-0024), so `just audit`
 (RustSec) and `just deny` walk the complete graph. Both ride every pull
-request; there is no cron workflow.
+request, and `.github/workflows/audit.yml` re-runs both nightly. The
+schedule is not redundant with the pull request: an advisory is normally
+published against a `Cargo.lock` nobody has touched, which is the one case
+a scan triggered by a diff can never see.
+
+That nightly run also **files a GitHub issue per newly disclosed
+advisory** (`rustsec/audit-check`), rather than only turning a workflow
+red where nobody is looking. Dependabot alerts and Dependabot security
+updates are both enabled, so GitHub raises the same finding independently
+and opens the version-bump pull request for it.
+
+`just audit` runs with `--deny warnings`, so an `unmaintained`, `unsound`
+or `yanked` crate fails it too and not just a live vulnerability —
+matching `yanked = "deny"` on the cargo-deny side.
 
 On a hit the gate prints the matching `RUSTSEC-…` id, and the fix is
 normally a version bump. An advisory that provably does not apply to how

@@ -37,10 +37,21 @@
 //! does was written in `docs.yml`, i.e. one Pages deploy after the merge.
 //!
 //! Nothing above notices any of that, because every assertion up to here is
-//! about a recipe's NAME. The last section reads what a gate hands its tool,
-//! holds the rustdoc build the repo publishes to the shape docs.rs will
-//! build, and runs rustdoc against a probe so that "these flags deny" is
+//! about a recipe's NAME. The middle sections read what a gate hands its tool,
+//! hold the rustdoc build the repo publishes to the shape docs.rs will
+//! build, and run rustdoc against a probe so that "these flags deny" is
 //! measured rather than spelled.
+//!
+//! A fourth way, and `just audit` was in it: a check that is declared, is run,
+//! is strict, and is only ever asked at the wrong moment. Every rule above
+//! holds a gate to the tree it is handed, which is the right frame for all of
+//! them but two. The advisory scans are functions of a database elsewhere, so
+//! a run triggered by a diff answers whether THIS diff added a finding and
+//! nothing answers whether one appeared against a lockfile nobody edited —
+//! which is how advisories normally appear. `SECURITY.md` stated that gap as
+//! policy ("there is no cron workflow"), which is the same defect written
+//! where a reader would mistake it for a decision. The last section is about
+//! when a gate is asked, and about what a scheduled answer reaches.
 
 #![forbid(unsafe_code)]
 
@@ -262,14 +273,16 @@ fn runs_recipe(lines: &[&str], recipe: &str) -> bool {
 // reading the workflow
 // ---------------------------------------------------------------------------
 
-/// The lines under the workflow's `jobs:` mapping. `on:`, `env:` and
-/// `permissions:` hold keys indented exactly like a job and are not jobs.
-fn jobs_block(workflow: &str) -> Vec<&str> {
+/// The lines under one top-level mapping key. `jobs:`, `on:`, `env:` and
+/// `permissions:` all hold keys indented alike, so only the column-zero header
+/// above them says which block a line is in.
+fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
     let mut out = Vec::new();
-    let mut in_jobs = false;
+    let mut inside = false;
     for line in workflow.lines() {
         if line.starts_with([' ', '\t']) || line.trim().is_empty() {
-            if in_jobs {
+            if inside {
                 out.push(line);
             }
             continue;
@@ -277,10 +290,15 @@ fn jobs_block(workflow: &str) -> Vec<&str> {
         // A column-zero comment interrupts nothing; any other column-zero line
         // is the next top-level key.
         if !line.starts_with('#') {
-            in_jobs = line.trim_end() == "jobs:";
+            inside = line.trim_end() == header;
         }
     }
     out
+}
+
+/// The lines under the workflow's `jobs:` mapping.
+fn jobs_block(workflow: &str) -> Vec<&str> {
+    top_level_block(workflow, "jobs")
 }
 
 /// The job a line opens, if it opens one.
@@ -4825,4 +4843,593 @@ fn a_sweep_reads_its_targets_and_a_definition_is_not_a_call() {
         "the reader took a string out of `replay_each`'s own body, or missed the call that \
          spreads its argument onto the next line"
     );
+}
+
+// ---------------------------------------------------------------------------
+// a scan whose answer changes without a commit
+// ---------------------------------------------------------------------------
+// The fourth way a check can exist and check nothing, and the one the file
+// above cannot see: a gate that is declared, is run, is strict, and is asked
+// only at the wrong moments. Every assertion up to here holds a gate to the
+// tree it is handed. `just audit` and `just deny` are not functions of the
+// tree — they are functions of a database somewhere else, which moves while
+// nobody is pushing. Running them on `pull_request` answers "did this diff add
+// a finding"; nothing was answering "did one appear since the last diff", and
+// SECURITY.md stated that gap as policy ("there is no cron workflow") where no
+// reader could act on it.
+//
+// The other half is what a scheduled run does when it finds something. A cron
+// that blocks no merge and reports nowhere is a control only for whoever
+// remembers to go and look, so the last section here reads what each schedule
+// hands a human.
+
+/// The events a workflow declares under `on:`.
+fn triggers(workflow: &str) -> BTreeSet<String> {
+    top_level_block(workflow, "on")
+        .into_iter()
+        .filter_map(job_key)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Does this workflow run on a clock? Both halves are needed: `schedule:` with
+/// no `cron:` under it is a trigger that never fires, and GitHub says nothing
+/// about it.
+fn runs_on_a_cron(workflow: &str) -> bool {
+    triggers(workflow).contains("schedule")
+        && top_level_block(workflow, "on")
+            .iter()
+            .any(|line| strip_comment(line).trim().starts_with("- cron:"))
+}
+
+/// Every workflow, read: `(repo-relative label, contents)`.
+fn read_workflows() -> Vec<(String, String)> {
+    workflow_files()
+        .into_iter()
+        .map(|path| {
+            let label = label_of(&path);
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+            (label, text)
+        })
+        .collect()
+}
+
+/// Gates whose verdict is a function of the world outside this repository, and
+/// what moves it. Listed by hand because the property is not written anywhere
+/// a reader could derive it from — but the names are checked against the
+/// manifest below, so an entry cannot quietly stop naming a gate.
+const CLOCK_DEPENDENT_GATES: &[(&str, &str)] = &[
+    (
+        "audit",
+        "the RustSec advisory database, which files advisories against lockfiles nobody has touched",
+    ),
+    (
+        "deny",
+        "the same database, plus the yanked flag crates.io sets on a version long after it resolved",
+    ),
+];
+
+#[test]
+fn every_gate_whose_answer_changes_without_a_commit_runs_without_one() {
+    let justfile = read("Justfile");
+    let gates = recipes_in_group(&justfile, "gate");
+    let workflows = read_workflows();
+    let mut unscheduled = Vec::new();
+
+    for &(gate, moved_by) in CLOCK_DEPENDENT_GATES {
+        assert!(
+            gates.contains(gate),
+            "`{gate}` is not a `[group('gate')]` recipe any more. It was this repo's watch over \
+             {moved_by}; a rename that leaves this list behind is how the schedule below stops \
+             covering anything while staying green."
+        );
+        let on_a_cron = workflows
+            .iter()
+            .any(|(_, text)| runs_on_a_cron(text) && recipes_invoked(text).contains(gate));
+        if !on_a_cron {
+            unscheduled.push(format!(
+                "  `just {gate}` watches {moved_by}, and no workflow runs it on a `cron:`. Its \
+                 pull-request run answers whether THIS diff introduced a finding. Nothing answers \
+                 whether one appeared against a lockfile nobody edited, which is how they \
+                 normally appear."
+            ));
+        }
+    }
+
+    assert!(
+        unscheduled.is_empty(),
+        "gates that are only ever asked about a diff:\n{}",
+        unscheduled.join("\n")
+    );
+}
+
+#[test]
+fn the_two_advisory_scanners_fail_on_the_same_findings() {
+    // The pair is only a pair if both halves have the same idea of a finding.
+    // cargo-deny's `yanked = "deny"` is in `deny.toml`; cargo-audit's default
+    // exit status counts vulnerabilities ONLY — `unmaintained`, `unsound`,
+    // `notice` and a yanked crate are printed and exit 0 — so without
+    // `--deny warnings` the two disagree, and the half that runs on the
+    // lockfile is the lax one. That was the live state: the flag existed once,
+    // on the vendored-comrak `audit-comrak` recipe, and left with it.
+    let deny_toml = read("deny.toml");
+    let yanked =
+        manifest_value(&deny_toml, "advisories", "yanked").map(|value| value.trim_matches('"'));
+    assert_eq!(
+        yanked,
+        Some("deny"),
+        "deny.toml no longer denies yanked crates. That is a decision about what counts as a \
+         finding, and it has to be taken for both scanners at once — this test is where they are \
+         held together."
+    );
+
+    let justfile = read("Justfile");
+    let scans: Vec<(String, String)> = expanded_recipe_lines(&justfile)
+        .into_iter()
+        .filter(|(_, line)| {
+            tool_commands(line)
+                .iter()
+                .any(|(tool, sub)| tool == "cargo" && sub == "audit")
+        })
+        .collect();
+    assert!(
+        !scans.is_empty(),
+        "no recipe in the Justfile runs `cargo audit` any more, so the RustSec half of the pair \
+         is gone and `deny.toml` is carrying the advisory policy alone"
+    );
+
+    let lax: Vec<String> = scans
+        .iter()
+        .filter(|(_, line)| !denies_warnings(line))
+        .map(|(recipe, line)| format!("  {recipe}: {}", line.trim()))
+        .collect();
+    assert!(
+        lax.is_empty(),
+        "`cargo audit` without `--deny warnings`, while deny.toml denies yanked crates:\n{}\n\
+         cargo-audit exits 0 on everything RustSec files as a warning, so this scan can only fail \
+         on a live vulnerability — it prints the rest into a log nobody reads.",
+        lax.join("\n")
+    );
+}
+
+/// The reporter that turns an advisory into something with an assignee.
+/// `rustsec/audit-check` opens one issue per newly disclosed advisory when
+/// `github.event_name` is `schedule`, and writes a check run on every other
+/// event. So the schedule is not decoration around it — drop the trigger and
+/// the workflow still runs, still goes red, and files nothing.
+const ADVISORY_REPORTER: &str = "rustsec/audit-check";
+
+#[test]
+fn a_new_advisory_arrives_as_an_issue_and_not_only_as_a_red_square() {
+    let workflows = read_workflows();
+    let scheduled: Vec<&(String, String)> = workflows
+        .iter()
+        .filter(|(_, text)| {
+            runs_on_a_cron(text)
+                && CLOCK_DEPENDENT_GATES
+                    .iter()
+                    .any(|&(gate, _)| recipes_invoked(text).contains(gate))
+        })
+        .collect();
+    assert!(
+        !scheduled.is_empty(),
+        "no workflow runs an advisory scan on a cron, so there is nothing here to report from"
+    );
+
+    for (label, text) in scheduled {
+        let job = job_keys(text)
+            .into_iter()
+            .find(|job| {
+                job_lines(text, job).is_some_and(|lines| {
+                    lines
+                        .iter()
+                        .any(|line| strip_comment(line).contains(ADVISORY_REPORTER))
+                })
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label} runs an advisory scan nightly and no job in it uses \
+                     `{ADVISORY_REPORTER}`. A cron whose only output is a red square on a \
+                     workflow that blocks no merge notifies nobody; the issue is the control."
+                )
+            });
+
+        let lines = job_lines(text, &job).unwrap_or_default();
+        assert!(
+            lines
+                .iter()
+                .any(|line| strip_comment(line).trim() == "issues: write"),
+            "{label}'s `{job}` job runs {ADVISORY_REPORTER} without `issues: write`. The action \
+             falls back to a check run it cannot fail on, so the scheduled run reports into the \
+             same place nobody is looking."
+        );
+
+        assert!(
+            job_needs(text, &job).is_empty(),
+            "{label}'s `{job}` job waits on {:?}. A reporter downstream of the scan is skipped \
+             exactly when the scan fails, which is the only run whose finding anyone needed.",
+            job_needs(text, &job)
+        );
+    }
+}
+
+/// Files that describe this repository's own CI to a reader. History is out:
+/// `CHANGELOG.md` and the ADRs record what was true when they were written,
+/// and editing them to match today is how a record stops being one.
+const CI_PROSE_ROOTS: &[&str] = &["", "docs"];
+const CI_PROSE_HISTORY: &[&str] = &["CHANGELOG.md", "docs/adr"];
+
+/// Words that deny, and the scheduled-run nouns they must not be attached to.
+/// The sentence this exists for is SECURITY.md's "Both ride every pull
+/// request; there is no cron workflow." — a security policy asserting the
+/// absence of a control, which nothing evaluated, and which stayed on the page
+/// for as long as it took somebody to notice.
+const NEGATIONS: &[&str] = &["no", "not", "never", "without", "neither"];
+const SCHEDULE_NOUNS: &[&str] = &[
+    "cron",
+    "crons",
+    "nightly",
+    "nightlies",
+    "scheduled",
+    "schedule",
+];
+
+/// How far after a negation a noun still belongs to it: "no cron workflow",
+/// "does not run on a schedule", "never runs a nightly". Four words, because
+/// three stops one short of the commonest phrasing of the claim.
+const NEGATION_REACH: usize = 4;
+
+/// The lowercase words of a line, hyphens kept so `pull-request` stays one.
+fn prose_words(line: &str) -> Vec<String> {
+    line.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Does this line deny that a scheduled run exists?
+fn denies_a_schedule(line: &str) -> bool {
+    let words = prose_words(line);
+    words.iter().enumerate().any(|(at, word)| {
+        NEGATIONS.contains(&word.as_str())
+            && words
+                .iter()
+                .skip(at + 1)
+                .take(NEGATION_REACH)
+                .any(|later| SCHEDULE_NOUNS.contains(&later.as_str()))
+    })
+}
+
+/// Every `.md` that describes this repo rather than recording its past.
+fn ci_prose_files() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    for directory in CI_PROSE_ROOTS {
+        let path = root.join(directory);
+        let mut entries: Vec<PathBuf> = fs::read_dir(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        entries.sort();
+        for file in entries {
+            let label = label_of(&file);
+            if CI_PROSE_HISTORY
+                .iter()
+                .any(|history| label.starts_with(history))
+            {
+                continue;
+            }
+            let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+            out.push((label, text));
+        }
+    }
+    out
+}
+
+#[test]
+fn no_document_denies_a_scheduled_run_this_repo_makes() {
+    let documents = ci_prose_files();
+    assert!(
+        documents.iter().any(|(label, _)| label == "SECURITY.md"),
+        "the reader is not finding the documents; it found {:?}",
+        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
+
+    let mut denials = Vec::new();
+    for (label, text) in &documents {
+        for (index, line) in text.lines().enumerate() {
+            if denies_a_schedule(line) {
+                denials.push(format!("  {label}:{}: {}", index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        denials.is_empty(),
+        "prose that denies a scheduled run:\n{}\n\
+         Every clock-driven workflow in this repo is one somebody reading these files is being \
+         told does not exist. A sentence about CI that nothing evaluates is a claim with the \
+         authority of policy and the lifespan of a guess.",
+        denials.join("\n")
+    );
+
+    // The other direction, because deleting the sentence is not the same as
+    // describing what replaced it: the document that discusses the advisory
+    // gates has to name the workflow that schedules them, or the reader is
+    // simply told less than before.
+    let security = read("SECURITY.md");
+    let scheduling: Vec<String> = read_workflows()
+        .into_iter()
+        .filter(|(_, text)| {
+            runs_on_a_cron(text)
+                && CLOCK_DEPENDENT_GATES
+                    .iter()
+                    .any(|&(gate, _)| recipes_invoked(text).contains(gate))
+        })
+        .map(|(label, _)| label)
+        .collect();
+    assert!(
+        scheduling
+            .iter()
+            .any(|label| security.contains(label.as_str())),
+        "SECURITY.md discusses `just audit` and `just deny` and names none of {scheduling:?}, the \
+         workflows that actually re-run them. It described the gap when the gap was real; it has \
+         to describe the control now that the control is."
+    );
+}
+
+/// Where the per-package licence waivers live, and where the watch over them
+/// does.
+const LICENCE_REVIEW: &str = ".github/workflows/dependency-review.yml";
+const LICENCE_WATCH: &str = ".github/workflows/audit.yml";
+
+/// The cargo packages `dependency-review.yml` waives the licence check for.
+/// The waiver is per PACKAGE, not per licence: it says "whatever this package
+/// declares is fine", for as long as the entry is there.
+fn exempted_packages(review: &str) -> BTreeSet<String> {
+    Regex::new(r"pkg:cargo/([A-Za-z0-9_.-]+)")
+        .expect("the purl pattern is a literal")
+        .captures_iter(review)
+        .map(|caught| caught[1].to_owned())
+        .collect()
+}
+
+/// What the watch holds each of them to: the bash table `[name]='licence'`.
+fn watched_licences(watch: &str) -> BTreeMap<String, String> {
+    Regex::new(r"(?m)^\s*\[([A-Za-z0-9_.-]+)\]='([^']*)'\s*$")
+        .expect("the table pattern is a literal")
+        .captures_iter(watch)
+        .map(|caught| (caught[1].to_owned(), caught[2].to_owned()))
+        .collect()
+}
+
+#[test]
+fn every_licence_exemption_is_pinned_to_the_licence_it_was_written_for() {
+    let review = read(LICENCE_REVIEW);
+    assert!(
+        repo_root().join(LICENCE_WATCH).is_file(),
+        "{LICENCE_REVIEW} waives the licence check per package and {LICENCE_WATCH} is gone, so \
+         nothing holds a waived package to what it declared when somebody decided to waive it"
+    );
+    let watch = read(LICENCE_WATCH);
+    let exempted = exempted_packages(&review);
+    let watched = watched_licences(&watch);
+
+    assert!(
+        exempted.len() >= 3,
+        "{LICENCE_REVIEW} parsed as {exempted:?}; the reader is not finding the \
+         `allow-dependencies-licenses` purls, so everything below passes by reading nothing"
+    );
+
+    let watched_names: BTreeSet<String> = watched.keys().cloned().collect();
+    assert_eq!(
+        watched_names, exempted,
+        "the cargo packages {LICENCE_REVIEW} exempts and the ones {LICENCE_WATCH} watches have \
+         come apart. An exemption with nothing watching it waives whatever the package declares \
+         next — a relicence would pass unremarked and the `Drop this entry once …` sentence \
+         beside it would never come due. A watch with no exemption left is a check against \
+         nothing. Neither drifts on its own; both drift when one file is edited."
+    );
+
+    // The expected string is a claim about the outside world, and only the
+    // nightly run can ask crates.io whether it still holds. What is decidable
+    // here is that the two files make the SAME claim: the prose in the review
+    // says what each package declares and why that is tolerable, and the watch
+    // is the executable copy of it.
+    let mismatched: Vec<String> = watched
+        .iter()
+        .filter(|(_, licence)| !review.contains(licence.as_str()))
+        .map(|(name, licence)| format!("  {name}: watched as `{licence}`"))
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "licences {LICENCE_WATCH} watches for that {LICENCE_REVIEW} never says the package \
+         declares:\n{}\n\
+         The reason an exemption exists is written as prose next to it; if the watch is holding \
+         the package to a different string, one of the two was edited and the other was not, and \
+         the nightly failure that follows will point at the wrong file.",
+        mismatched.join("\n")
+    );
+}
+
+/// Scheduled workflows whose only output is a red square, each with why it is
+/// still like that. Every entry is a LIVE DEFECT, not an exemption: a cron
+/// that blocks no merge and reports nowhere is a control only for whoever
+/// remembers to go and look at it, and nobody does.
+const CRON_WITHOUT_A_CHANNEL: &[(&str, &str)] = &[(
+    ".github/workflows/release-pins.yml",
+    "predates this rule. Its `freshness` job compares dist-workspace.toml's hand-maintained \
+     action pins against upstream and exits 1 into a workflow that blocks no merge, uploads \
+     nothing and files nothing — the exact shape audit.yml's `report` job exists to avoid. It \
+     needs the same treatment and that is its own change",
+)];
+
+/// How a workflow gets a finding off the runner and in front of somebody.
+fn reporting_channel(workflow: &str) -> Option<&'static str> {
+    let grants = |permission: &str| {
+        let wanted = format!("{permission}: write");
+        workflow
+            .lines()
+            .any(|line| strip_comment(line).trim() == wanted)
+    };
+    if grants("issues") {
+        return Some("opens an issue");
+    }
+    if grants("security-events") {
+        return Some("raises a code-scanning alert");
+    }
+    if jobs_block(workflow)
+        .iter()
+        .any(|line| strip_comment(line).contains("upload-artifact"))
+    {
+        return Some("uploads the evidence");
+    }
+    None
+}
+
+#[test]
+fn a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes() {
+    // The generalisation of the fuzz workflow's upload step and of audit.yml's
+    // `report` job. Neither is a required check — a fuzzer finding is a bug
+    // report, an advisory is somebody else's publication — so nothing about
+    // either failing stops a merge or lands in a pull request. Whatever
+    // reaches a human has to be arranged by the workflow itself.
+    //
+    // The rule is per WORKFLOW, which is where it stops short: audit.yml
+    // passes on the strength of its `report` job, and that job reports
+    // cargo-audit findings alone. Its `licences` job — the watch over the
+    // dependency-review waivers — fails into exactly the red square this test
+    // is about, one level below where the test can see it.
+    let mut silent = Vec::new();
+    let workflows = read_workflows();
+    let scheduled: Vec<&(String, String)> = workflows
+        .iter()
+        .filter(|(_, text)| runs_on_a_cron(text))
+        .collect();
+    assert!(
+        scheduled.len() >= 3,
+        "only {} workflow(s) read as running on a cron; the trigger reader has stopped finding \
+         them and everything below passes vacuously",
+        scheduled.len()
+    );
+
+    for (label, text) in &scheduled {
+        if CRON_WITHOUT_A_CHANNEL
+            .iter()
+            .any(|&(known, _)| known == label)
+        {
+            continue;
+        }
+        if reporting_channel(text).is_none() {
+            silent.push(format!(
+                "  {label}: runs on a cron, blocks no merge, and neither files an issue, raises a \
+                 code-scanning alert nor uploads an artifact. A red square on a workflow nobody \
+                 is required to read is not a control."
+            ));
+        }
+    }
+    assert!(
+        silent.is_empty(),
+        "scheduled runs whose findings reach nobody:\n{}",
+        silent.join("\n")
+    );
+
+    // A recorded defect that has been fixed is worse than an unrecorded one:
+    // it is a live entry vouching for a state that no longer exists.
+    for &(label, why) in CRON_WITHOUT_A_CHANNEL {
+        let text = read(label);
+        assert!(
+            runs_on_a_cron(&text),
+            "{label} no longer runs on a cron, so it is not in scope for this rule any more — \
+             drop its CRON_WITHOUT_A_CHANNEL entry ({why})"
+        );
+        assert!(
+            reporting_channel(&text).is_none(),
+            "{label} now {} — the defect its CRON_WITHOUT_A_CHANNEL entry describes is fixed, so \
+             delete the entry rather than leaving it to vouch for a state that is gone",
+            reporting_channel(&text).unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn a_trigger_is_read_off_the_on_block_and_a_job_named_alike_is_not() {
+    // The mistake a line-at-a-time reader makes here: `schedule` appearing
+    // anywhere in a workflow — a job called `schedule`, a `github.event_name
+    // == 'schedule'` expression, a comment about the cron — counting as the
+    // trigger. fuzz.yml has all three.
+    let workflow = concat!(
+        "name: probe\n",
+        "\n",
+        "on:\n",
+        "  push:\n",
+        "    branches: [main]\n",
+        "  schedule:\n",
+        "    # off the hour\n",
+        "    - cron: \"40 15 * * *\"\n",
+        "  workflow_dispatch:\n",
+        "\n",
+        "jobs:\n",
+        "  schedule:\n",
+        "    steps:\n",
+        "      - run: echo \"${{ github.event_name == 'schedule' }}\"\n",
+    );
+    assert_eq!(
+        triggers(workflow),
+        BTreeSet::from([
+            "push".to_owned(),
+            "schedule".to_owned(),
+            "workflow_dispatch".to_owned()
+        ]),
+        "the `on:` reader took a nested key or missed one"
+    );
+    assert!(
+        runs_on_a_cron(workflow),
+        "a `schedule:` with a `cron:` under it was not read as one"
+    );
+
+    let no_trigger = workflow.replace(
+        "  schedule:\n    # off the hour\n    - cron: \"40 15 * * *\"\n",
+        "",
+    );
+    assert!(
+        !runs_on_a_cron(&no_trigger),
+        "a job called `schedule` and an expression mentioning it were read as the trigger"
+    );
+
+    let empty_schedule = concat!(
+        "on:\n",
+        "  schedule:\n",
+        "  workflow_dispatch:\n",
+        "jobs:\n",
+        "  sweep:\n",
+        "    steps: []\n",
+    );
+    assert!(
+        !runs_on_a_cron(empty_schedule),
+        "a `schedule:` with no `cron:` under it fires never, and was read as a clock"
+    );
+}
+
+#[test]
+fn a_denial_of_a_schedule_is_read_and_a_description_of_one_is_not() {
+    for denial in [
+        "request; there is no cron workflow.",
+        "These do not run on a schedule.",
+        "The advisory scan never runs nightly.",
+    ] {
+        assert!(denies_a_schedule(denial), "a denial went unread: {denial}");
+    }
+    for description in [
+        "The schedule is not redundant with the pull request: an advisory is",
+        "That nightly run also files a GitHub issue per newly disclosed advisory,",
+        "published against a `Cargo.lock` nobody has touched, which is the one case",
+        "Not a PR gate: it depends on upstream release timing, so it must never redden",
+    ] {
+        assert!(
+            !denies_a_schedule(description),
+            "prose describing a schedule was read as denying one: {description}"
+        );
+    }
 }
