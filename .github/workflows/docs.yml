@@ -47,12 +47,24 @@ jobs:
         with:
           key: docs
 
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
+        with:
+          tool: just
+
+      # The `doc` gate's own recipe, RUSTDOCFLAGS included. This step used to
+      # spell the command out with its own `-D warnings`, which the PR gate did
+      # not have: two definitions of one build, differing in exactly the
+      # direction that lets a rustdoc regression merge and fail here instead.
+      #
+      # `AOZORA_MD_IN_CONTAINER=1` is what lets a workflow outside the dev image
+      # run a `just` recipe — the `_in` switch at the top of the Justfile then
+      # resolves rustdoc directly, so the build uses the stable toolchain
+      # installed above and writes `target/doc` where the Pages upload can find
+      # it. Same arrangement as ci.yml's two `[group('native')]` gates.
       - name: Build rustdoc
         env:
-          # Fail the deploy build on any rustdoc warning so a doc
-          # regression can't ship even if ci.yml's `doc` gate is weakened.
-          RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --locked --workspace --no-deps --document-private-items
+          AOZORA_MD_IN_CONTAINER: "1"
+        run: just doc
 
       - name: Install bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
