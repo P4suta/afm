@@ -56,6 +56,7 @@ const USES_FLOOR: &[(&str, usize)] = &[
     (".github/workflows/dependency-review.yml", 2),
     (".github/workflows/dev-image.yml", 5),
     (".github/workflows/docs.yml", 6),
+    (".github/workflows/fuzz.yml", 3),
     (".github/workflows/labeler.yml", 1),
     (".github/workflows/publish-crates.yml", 5),
     (".github/workflows/release-pins.yml", 1),

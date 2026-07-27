@@ -33,6 +33,11 @@ extend-exclude = [
     "spec/aozora/fixtures/", # Aozora Bunko source files
     "spec/sources/",         # vendored upstream spec sources (CommonMark/GFM)
     "spec/*.json",           # generated from spec/sources/
+    # Fuzz seeds: `just fuzz-seed` copies them out of the two excluded sources
+    # above, so a hit here is a typo in upstream's spec text reported at one
+    # remove. The rest of a corpus directory is libFuzzer's output — bytes
+    # chosen to break a parser, which is the opposite of prose.
+    "crates/*/fuzz/corpus/",
     "target/",
     "coverage/",
     "*.html",

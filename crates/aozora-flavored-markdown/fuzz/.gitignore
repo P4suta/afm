@@ -1,4 +1,17 @@
 target/
-corpus/
 artifacts/
-Cargo.lock
+
+# The seed half of the corpus is tracked; libFuzzer's own finds are not. See
+# the repo-root .gitignore for why this is written file-by-file rather than as
+# `corpus/`, and `just fuzz-seed` for what installs them.
+corpus/*/*
+!corpus/*/seed-*
+
+# `Cargo.lock` is NOT ignored here any more. This crate is its own workspace,
+# so it resolves its own graph — and cargo-fuzz has no `--locked` to bind that
+# resolution with, which left the fuzz targets free to build against a
+# different `aozora` / `comrak` than the library they exist to fuzz, with
+# nothing in the repo able to notice (DEV-293). Committing the lockfile is what
+# makes the resolution reviewable; `just fuzz-build` fails when a build
+# rewrites it, and `just verify-version-pins` compares what the two lockfiles
+# resolve to.

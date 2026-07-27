@@ -42,9 +42,16 @@ _fuzz := if _in == "1" { "" } else { "docker compose run --rm fuzz" }
 #   cargo fmt, cargo insta review/accept — never resolve the graph.
 #   cargo audit — Cargo.lock IS its input; it cannot read a different one.
 #   cargo semver-checks — no `--locked` in its CLI.
-#   cargo fuzz — the fuzz crate is its own workspace and its Cargo.lock is
-#     git-ignored on purpose (regenerated per build), so there is nothing to
-#     assert against.
+#   cargo fuzz — cargo-fuzz 0.13.2 has no `--locked`, and no way to hand one
+#     to the `cargo build` it shells out to (`cargo fuzz build --help`; the
+#     trailing args of `run` go to libFuzzer, which has no such flag either).
+#     The fuzz crate is its own workspace, so it resolves its own graph — and
+#     until DEV-293 that resolution was thrown away and redone per build, i.e.
+#     the targets could be fuzzing a different `aozora` / `comrak` than the
+#     library ships. `fuzz/Cargo.lock` is committed instead, `just fuzz-build`
+#     fails when a build rewrote it — which is what the flag would have
+#     refused up front — and `just verify-version-pins` compares the versions
+#     the two lockfiles resolve to.
 #
 # Two files spell cargo calls this one does not: `bacon.toml` (the jobs behind
 # `just watch`) and the `Dockerfile` (tool installs). They carry the same flag,
@@ -288,6 +295,55 @@ test-wasm:
 # replaces it is not a fuzz run on the host triple but no fuzz run at all.
 _FUZZ_TRIPLE := "x86_64-unknown-linux-gnu"
 
+# The one list of what the fuzz targets are. `cargo fuzz list` reads the
+# `[[bin]]` tables of `fuzz/Cargo.toml`, which is the same registry
+# `cargo fuzz run <name>` resolves against — so a target added there is added
+# to every sweep below at the same moment, and there is no second list to
+# forget. There were four of those lists, and DEV-230 was filed believing
+# there were three targets when there were already four.
+#
+# Not `+nightly`: `list` compiles nothing, it reads a manifest, and the
+# cargo-fuzz binary is toolchain-independent. Underscore-prefixed, so `just
+# --list` (hence `just gates`, hence the CI matrix) does not offer a query as
+# a task.
+_fuzz-targets:
+    @{{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo fuzz list'
+
+# Compile every fuzz target. The fuzz crate declares its own `[workspace]`
+# (correctly — libfuzzer-sys is nightly-only and must not join a stable
+# `--workspace` build), and the cost of that is total: `cargo check
+# --workspace` has never compiled one line of it. Four harnesses that call
+# this crate's public API by hand were outside every gate the repo has, so a
+# rename in `src/` broke them silently and stayed broken until somebody fuzzed
+# manually (DEV-270, DEV-291). This is the gate that closes it.
+#
+# Build rather than run: "the harnesses still match the API" is the question a
+# PR asks, and it is answered by a compile in seconds. Running them is
+# `fuzz.yml`'s job — `fuzz-all-quick` per PR, `fuzz-all-deep` on the nightly
+# cron.
+#
+# It is also where this crate's `[lints.rust]` is enforced: the levels in
+# `fuzz/Cargo.toml` reach rustc only when something compiles the crate, and
+# before this recipe nothing did.
+#
+# The `git diff` at the end is this repo's `--locked` (see the policy header
+# above): cargo-fuzz has no such flag, so a re-resolution is detected by the
+# file it rewrote instead of refused before it happened.
+[group('gate')]
+[group('fuzz')]
+fuzz-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lock="crates/aozora-flavored-markdown/fuzz/Cargo.lock"
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo +nightly fuzz build --target {{_FUZZ_TRIPLE}}'
+    if ! git diff --quiet -- "$lock"; then
+        printf 'fuzz-build: the build re-resolved %s\n' "$lock" >&2
+        printf '  The fuzz workspace is pinned by that lockfile the way the workspace is by\n' >&2
+        printf '  its own. Review the diff below and commit it, or restore the file.\n' >&2
+        git --no-pager diff -- "$lock" >&2
+        exit 1
+    fi
+
 # Run the named fuzz target with arbitrary args (escape hatch for advanced use).
 [group('fuzz')]
 fuzz *ARGS:
@@ -382,31 +438,37 @@ fuzz-promote TARGET ARTIFACT:
 
 # Run every registered fuzz target in turn for 60 s each. Smoke pass:
 # typically used after touching anything in `crates/aozora-flavored-markdown/src/`
-# or `crates/aozora-flavored-markdown-test-support/src/`.
+# or `crates/aozora-flavored-markdown-test-support/src/`. Also what `fuzz.yml`
+# runs per pull request.
 [group('fuzz')]
 fuzz-all-quick:
-    just fuzz-quick parse_render
-    just fuzz-quick render_blocks
-    just fuzz-quick serialize_round_trip
-    just fuzz-quick sjis_decode
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in $(just _fuzz-targets); do
+        just fuzz-quick "$target"
+    done
 
 # Run every registered fuzz target in turn for 5 min each. Release
-# pre-flight pass: a clean run is the gate before tagging a release.
+# pre-flight pass: a clean run is the gate before tagging a release, and
+# `fuzz.yml`'s nightly cron is what keeps that gate warm rather than
+# discovering it broken on release day.
 [group('fuzz')]
 fuzz-all-deep:
-    just fuzz-deep parse_render
-    just fuzz-deep render_blocks
-    just fuzz-deep serialize_round_trip
-    just fuzz-deep sjis_decode
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in $(just _fuzz-targets); do
+        just fuzz-deep "$target"
+    done
 
 # At-a-glance health check: how many crash artifacts are pending
-# triage, how many regression cases are pinned per target. Nothing
-# here invokes nightly, so it stays cheap and shell-friendly.
+# triage, how many regression cases are pinned per target. Everything it
+# counts is a `find` over the working tree; the one container hop is asking
+# `cargo fuzz list` what the targets are, which compiles nothing.
 [group('fuzz')]
 fuzz-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    targets=(parse_render render_blocks serialize_round_trip sjis_decode)
+    mapfile -t targets < <(just _fuzz-targets)
     printf "%-22s  %-10s  %-12s\n" target pending_crashes pinned_regressions
     printf "%-22s  %-10s  %-12s\n" ---------------------- ---------- ------------
     for t in "${targets[@]}"; do
@@ -419,6 +481,83 @@ fuzz-status:
             regressions=$(find "crates/aozora-flavored-markdown/tests/fuzz_regressions/${t}" -maxdepth 1 -type f ! -name '*.txt' ! -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
         fi
         printf "%-22s  %-10s  %-12s\n" "$t" "$crashes" "$regressions"
+    done
+
+# (Re)install the committed seed corpus. A fuzzer handed an empty corpus
+# spends its first minutes rediscovering that markdown has headings; handed
+# documents this repo already owns, it spends them where nobody has written a
+# test yet. Both sources are in-tree:
+#
+#   * `playground/examples/*.md` — the aozora directives (ruby, bouten,
+#     tate-chu-yoko, paired containers). No seed carried one, and that layer is
+#     the whole reason this crate exists rather than a comrak dependency.
+#   * `spec/sources/*.txt` — every CommonMark and GFM spec example, one seed
+#     per example. Split rather than copied whole for a reason that is easy to
+#     get backwards: given no `-max_len`, libFuzzer takes the length of the
+#     LARGEST corpus file as its maximum input size, so seeding with a 205 KiB
+#     spec document would make every generated input up to 205 KiB and the
+#     fuzzer slower than it is with no seeds at all. The spec writes tabs as
+#     `→`, so they are restored — the same substitution CommonMark's own
+#     `spec_tests.py` makes.
+#
+# Names are content-addressed: the examples the two spec documents share
+# collapse to one file, re-running is a no-op, and a source change shows up as
+# the seeds it added rather than as every seed shifting by one. The `seed-`
+# prefix is the half `.gitignore` tracks — everything else in a corpus
+# directory is libFuzzer's own output.
+#
+# Not a gate. The corpus is committed, so this is the tool that rebuilds it
+# when a source document changes, not something a PR has to re-run.
+[group('fuzz')]
+fuzz-seed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    corpus="crates/aozora-flavored-markdown/fuzz/corpus"
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    mkdir -p "$work/seeds"
+
+    for doc in playground/examples/*.md; do
+        cp "$doc" "$work/seeds/$(basename "$doc")"
+    done
+
+    # A spec example is: 32 backticks + ` example`, the markdown, a line
+    # holding one `.`, the expected HTML, 32 backticks. Only the markdown half
+    # is an input. The fence is built rather than typed so nobody has to count
+    # backticks to review this.
+    fence=$(head -c 32 /dev/zero | tr '\0' '`')
+    awk -v out="$work/seeds" -v fence="$fence" '
+        index($0, fence " example") == 1 { taking = 1; body = ""; next }
+        taking && $0 == "." {
+            taking = 0
+            n += 1
+            file = sprintf("%s/spec-%04d", out, n)
+            printf "%s", body > file
+            close(file)
+            next
+        }
+        taking { gsub(/→/, "\t"); body = body $0 "\n" }
+    ' spec/sources/*.txt
+
+    for target in $(just _fuzz-targets); do
+        dir="$corpus/$target"
+        mkdir -p "$dir"
+        rm -f "$dir"/seed-*
+        for seed in "$work"/seeds/*; do
+            # `sjis_decode` is the one target whose input is bytes rather than
+            # text: it hands them to `decode_sjis`, which rejects a UTF-8 seed
+            # at its first multi-byte character — so an unencoded seed would
+            # teach it nothing. What CP932 cannot represent (an em dash, say)
+            # is dropped rather than transliterated: a seed is worth having
+            # only if it is what the decoder would really be handed.
+            if [[ "$target" == sjis_decode ]]; then
+                iconv -f UTF-8 -t CP932 <"$seed" >"$work/encoded" 2>/dev/null || continue
+                seed="$work/encoded"
+            fi
+            cp "$seed" "$dir/seed-$(sha1sum <"$seed" | cut -c1-16)"
+        done
+        printf 'fuzz-seed: %-24s %4d seed(s)\n' "$target" \
+            "$(find "$dir" -maxdepth 1 -name 'seed-*' | wc -l)"
     done
 
 # Benchmarks (criterion)
@@ -886,6 +1025,43 @@ verify-version-pins:
         fail=1
     fi
 
+    # The same two crates, as RESOLVED rather than as declared. The block
+    # above compares two manifests; this compares two lockfiles, which is the
+    # half that was missing. The fuzz crate is its own workspace, `aozora` is
+    # pinned there with `=` but `comrak` is not pinned there at all (it arrives
+    # transitively), and cargo-fuzz has no `--locked` — so the targets could
+    # have been fuzzing a different parser than the library ships with both
+    # manifests still reading the same version (DEV-293). Committing
+    # `fuzz/Cargo.lock` is what makes the question answerable; this is what
+    # asks it.
+    locked() {
+        # The `version` under the first `[[package]]` whose `name` matches.
+        awk -v want="$2" '
+            BEGIN { quoted = "\"" want "\"" }
+            $1 == "name" && $3 == quoted { seen = 1; next }
+            seen && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+        ' "$1"
+    }
+    fuzz_lock="crates/aozora-flavored-markdown/fuzz/Cargo.lock"
+    if [[ ! -f "$fuzz_lock" ]]; then
+        printf '[!!] %s is missing — the fuzz workspace resolves unpinned again\n' \
+            "$fuzz_lock" >&2
+        fail=1
+    else
+        for dep in aozora comrak; do
+            dep_ws=$(locked Cargo.lock "$dep")
+            dep_fuzz=$(locked "$fuzz_lock" "$dep")
+            if [[ -n "$dep_ws" && "$dep_ws" == "$dep_fuzz" ]]; then
+                printf '[OK] %s resolved: %s (Cargo.lock / fuzz/Cargo.lock agree)\n' \
+                    "$dep" "$dep_ws"
+            else
+                printf '[!!] %s resolution drift: Cargo.lock=%s fuzz/Cargo.lock=%s\n' \
+                    "$dep" "$dep_ws" "$dep_fuzz" >&2
+                fail=1
+            fi
+        done
+    fi
+
     # No git source may reintroduce itself: a git dependency makes
     # `cargo publish` reject the crate (ADR-0015), and `aozora-bump` only
     # knows how to rewrite registry versions.
@@ -1177,6 +1353,11 @@ ci:
     #     (fmt-check/typos/strict-code/comment-discipline/zizmor/actionlint) run
     #     once on their own instead of a second time inside `lint`; only
     #     `clippy` is left to run from `lint`.
+    #   * fuzz-build compiles the fuzz crate, which is its own workspace with
+    #     its own target dir — so it takes no lock the compile lane holds, but
+    #     it does invoke rustc (and clang, for libFuzzer), so it stays in the
+    #     foreground rather than joining the background lane. It runs after
+    #     `udeps`, the other recipe that reaches for the nightly image.
     #   * test-wasm and playground-build are the two wasm-pack gates and run
     #     LAST in the foreground lane, in that order: wasm-pack invokes rustc
     #     and shares the target dir, so they cannot overlap anything — but they
@@ -1215,7 +1396,7 @@ ci:
               zizmor actionlint comment-discipline commitlint \
               msrv clippy build dist-assets-check \
               test test-doc prop spec doc doc-public coverage udeps \
-              test-wasm playground-build)
+              fuzz-build test-wasm playground-build)
 
     # --- manifest assert: these two lanes ARE the gate set -------------------
     # "`just ci` is a superset of CI" used to be a sentence, and a sentence is

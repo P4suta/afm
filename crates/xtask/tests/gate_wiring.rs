@@ -1954,7 +1954,239 @@ fn every_lint_this_workspace_declares_reaches_every_crate_it_builds() {
     );
 }
 
+/// A rustc lint level, ordered by how much it stops.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum LintLevel {
+    Allow,
+    Warn,
+    Deny,
+    Forbid,
+}
+
+/// The level a `[lints]` entry sets, in either spelling cargo takes: the bare
+/// `"warn"` and the table `{ level = "warn", priority = -1 }`. The priority is
+/// not read — it orders a group against its own members and says nothing about
+/// how much the entry stops.
+fn lint_level(value: &str) -> Option<LintLevel> {
+    quoted_items(value)
+        .iter()
+        .find_map(|item| match item.as_str() {
+            "allow" => Some(LintLevel::Allow),
+            "warn" => Some(LintLevel::Warn),
+            "deny" => Some(LintLevel::Deny),
+            "forbid" => Some(LintLevel::Forbid),
+            _ => None,
+        })
+}
+
+/// Every directory in the repo holding a `Cargo.toml` with a `[package]`
+/// table, repo-relative. Walked rather than listed: a crate this file has to
+/// see is by definition one the workspace manifest does not mention.
+fn crate_directories() -> BTreeSet<String> {
+    /// Directories nobody here authors a crate in.
+    const SKIPPED: &[&str] = &["target", ".git", "node_modules", "coverage", "dist"];
+
+    fn walk(dir: &Path, out: &mut BTreeSet<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if path.is_dir() {
+                if !SKIPPED.contains(&name) {
+                    walk(&path, out);
+                }
+                continue;
+            }
+            if name != "Cargo.toml" {
+                continue;
+            }
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            if text
+                .lines()
+                .any(|line| table_header(line) == Some("package"))
+            {
+                out.insert(label_of(dir));
+            }
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    walk(&repo_root(), &mut out);
+    out
+}
+
+/// Lints a crate outside the workspace may leave out of its own `[lints.rust]`
+/// table, each with the reason it is not worth re-typing there.
+///
+/// A table rather than a rule, because "which lints matter to a crate that
+/// publishes nothing and exposes nothing" is a judgement and judgements go
+/// where the next reader finds them. What it buys is the thing the manifest
+/// comment says cannot be bought: a lint ADDED to `[workspace.lints.rust]`
+/// from here on lands on this list as an unanswered question rather than
+/// silently skipping the one crate that cannot inherit it.
+const LINTS_A_NON_MEMBER_CRATE_MAY_SKIP: &[(&str, &str)] = &[
+    // Surface policy for a published library. This crate is four `#![no_main]`
+    // binaries whose whole body is one `fuzz_target!` invocation: it has no
+    // API, no types a consumer names, and no lifetimes written by hand.
+    ("missing_debug_implementations", SKIP_NO_SURFACE),
+    ("missing_copy_implementations", SKIP_NO_SURFACE),
+    ("unreachable_pub", SKIP_NO_SURFACE),
+    ("single_use_lifetimes", SKIP_NO_SURFACE),
+    ("elided_lifetimes_in_paths", SKIP_NO_SURFACE),
+    ("redundant_lifetimes", SKIP_NO_SURFACE),
+    ("explicit_outlives_requirements", SKIP_NO_SURFACE),
+    ("unused_lifetimes", SKIP_NO_SURFACE),
+    ("variant_size_differences", SKIP_NO_SURFACE),
+    // Style rules that are gates in the workspace only because `just clippy`
+    // passes `-D warnings`. `cargo fuzz build` has no such flag and no way to
+    // be given one that would not also apply to every dependency it compiles,
+    // so at warn level here they would print into a build log and fail nothing.
+    ("trivial_casts", SKIP_NO_DENY_CHANNEL),
+    ("trivial_numeric_casts", SKIP_NO_DENY_CHANNEL),
+    ("unused_import_braces", SKIP_NO_DENY_CHANNEL),
+    ("unused_qualifications", SKIP_NO_DENY_CHANNEL),
+    ("let_underscore_drop", SKIP_NO_DENY_CHANNEL),
+    ("ambiguous_negative_literals", SKIP_NO_DENY_CHANNEL),
+    // Edition drift, which is a warning about source that has to be carried
+    // forward. These harnesses are fifteen lines each and are rewritten
+    // whenever the API they call moves — which is what `just fuzz-build`
+    // exists to make somebody notice.
+    ("keyword_idents_2024", SKIP_EDITION_DRIFT),
+    ("rust_2024_compatibility", SKIP_EDITION_DRIFT),
+];
+
+const SKIP_NO_SURFACE: &str = "API-surface policy for a published crate; this one publishes nothing and \
+                       exposes nothing";
+const SKIP_NO_DENY_CHANNEL: &str = "style policy that is a gate only through `just clippy`'s `-D warnings`, a \
+                     channel `cargo fuzz build` does not have";
+const SKIP_EDITION_DRIFT: &str = "edition-drift warning for source that is carried forward; these harnesses \
+                       are rewritten whenever the API they call moves";
+
+#[test]
+fn every_lint_this_workspace_declares_reaches_the_crate_that_cannot_inherit_it() {
+    // The test above says every lint reaches "every crate it builds" and asks
+    // it of `workspace_members()`. The fuzz crate is not a member — it declares
+    // its own `[workspace]`, and it has to, because libfuzzer-sys is
+    // nightly-only — so it was the one crate in the repo that could not opt in
+    // and the one crate the net could not see. Nothing carried over: not the
+    // rustdoc denials, not `missing_docs`, not `unsafe_code = "forbid"`, which
+    // every other crate here forbids and which that one compiled without for as
+    // long as it existed (DEV-312).
+    //
+    // Discovered by walking rather than by naming the fuzz crate, because the
+    // property is about crates the members list does not mention, and a second
+    // one added tomorrow would be invisible to a check that spelled the first.
+    let members: BTreeSet<String> = workspace_members()
+        .into_iter()
+        .map(|member| member.path)
+        .collect();
+    let outsiders: Vec<String> = crate_directories()
+        .into_iter()
+        .filter(|dir| !members.contains(dir))
+        .collect();
+    assert!(
+        !outsiders.is_empty(),
+        "no crate outside the workspace members was found; the walk is not reading manifests, \
+         and this whole test is then vacuous"
+    );
+
+    let root = read("Cargo.toml");
+    let declared: BTreeMap<&str, LintLevel> = table_pairs(&root, "workspace.lints.rust")
+        .into_iter()
+        .filter_map(|(lint, value)| Some((lint, lint_level(value)?)))
+        .collect();
+    assert!(
+        declared.len() >= 15,
+        "[workspace.lints.rust] came out as {declared:?}; the reader is not finding the table or \
+         is not reading its levels"
+    );
+
+    for dir in &outsiders {
+        let manifest = read(&format!("{dir}/Cargo.toml"));
+        let own: BTreeMap<&str, LintLevel> = table_pairs(&manifest, "lints.rust")
+            .into_iter()
+            .filter_map(|(lint, value)| Some((lint, lint_level(value)?)))
+            .collect();
+        assert!(
+            !own.is_empty(),
+            "{dir}/Cargo.toml declares no `[lints.rust]` at all. It is outside the workspace, so \
+             `[lints] workspace = true` cannot reach it and there is nothing else that can: the \
+             crate compiles under no lint policy whatever, `unsafe_code` included."
+        );
+
+        for (&lint, &wanted) in &declared {
+            if let Some(&have) = own.get(lint) {
+                assert!(
+                    have >= wanted,
+                    "{dir}/Cargo.toml sets `{lint}` to {have:?} and the workspace sets it to \
+                     {wanted:?}. A crate outside the members list may be stricter than the \
+                     workspace — it has no `-D warnings` to lean on — but not looser."
+                );
+                continue;
+            }
+            let excused = LINTS_A_NON_MEMBER_CRATE_MAY_SKIP
+                .iter()
+                .any(|&(name, _)| name == lint);
+            assert!(
+                excused,
+                "[workspace.lints.rust] declares `{lint}` at {wanted:?} and {dir}/Cargo.toml does \
+                 not. That crate cannot write `[lints] workspace = true`, so the only way a lint \
+                 reaches it is by being re-typed there. Add it, or add it to \
+                 LINTS_A_NON_MEMBER_CRATE_MAY_SKIP with the reason it does not apply."
+            );
+        }
+    }
+
+    // A skip for a lint the workspace no longer declares is a sentence
+    // excusing nothing, and the next reader takes it for coverage.
+    for &(lint, why) in LINTS_A_NON_MEMBER_CRATE_MAY_SKIP {
+        assert!(
+            declared.contains_key(lint),
+            "`{lint}` is excused (\"{why}\") and [workspace.lints.rust] does not declare it"
+        );
+    }
+}
+
 // --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_lint_table_entry_reads_as_its_level_in_either_spelling() {
+    // The workspace writes one entry as a table so it can carry a priority,
+    // and a reader that only understood the bare string would call
+    // `rust_2024_compatibility` undeclared — i.e. would excuse the fuzz crate
+    // from a lint nobody had decided to excuse it from.
+    let manifest = concat!(
+        "[workspace.lints.rust]\n",
+        "unsafe_code = \"forbid\"\n",
+        "rust_2024_compatibility = { level = \"warn\", priority = -1 }\n",
+        "dead_code = \"deny\"\n",
+    );
+    let read_here: BTreeMap<&str, Option<LintLevel>> =
+        table_pairs(manifest, "workspace.lints.rust")
+            .into_iter()
+            .map(|(lint, value)| (lint, lint_level(value)))
+            .collect();
+    assert_eq!(
+        read_here.get("rust_2024_compatibility"),
+        Some(&Some(LintLevel::Warn)),
+        "a table-valued lint entry went unread: {read_here:?}"
+    );
+    assert_eq!(
+        read_here.get("unsafe_code"),
+        Some(&Some(LintLevel::Forbid)),
+        "a bare lint entry went unread: {read_here:?}"
+    );
+    // And the order the comparison depends on: "stricter is fine, looser is
+    // not" is only a rule if these sort.
+    assert!(
+        LintLevel::Forbid > LintLevel::Deny
+            && LintLevel::Deny > LintLevel::Warn
+            && LintLevel::Warn > LintLevel::Allow,
+        "the levels do not order, so `deny` where the workspace says `warn` would read as a \
+         downgrade"
+    );
+}
 
 #[test]
 fn a_dotted_key_does_not_answer_for_the_bare_key() {
@@ -3765,38 +3997,68 @@ fn registered_fuzz_targets() -> BTreeSet<String> {
         .collect()
 }
 
-/// The fuzz targets a sweep recipe runs: the argument of each `just fuzz-<…>
-/// <target>` in its body.
-fn swept_targets(justfile: &str, recipe: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for line in recipe_body(justfile, recipe) {
-        let mut previous = "";
-        let mut is_argument = false;
-        for word in words(strip_comment(line)) {
-            if is_argument {
-                out.insert(word.to_owned());
-            }
-            is_argument = previous == "just" && word.starts_with("fuzz-");
-            previous = word;
-        }
-    }
-    out
+/// Every word a recipe's body says, comments off.
+///
+/// The sweeps are read for what they do NOT say now: each derives its target
+/// list from `just _fuzz-targets` (`cargo fuzz list`), so a target name
+/// spelled anywhere in one of them is a hand-written copy of that list growing
+/// back.
+fn recipe_words(justfile: &str, recipe: &str) -> BTreeSet<String> {
+    recipe_body(justfile, recipe)
+        .iter()
+        .flat_map(|line| words(strip_comment(line)).map(str::to_owned))
+        .collect()
 }
 
-/// The fuzz targets `fuzz-status` reports on, out of the bash array that
-/// drives it.
-fn status_targets(justfile: &str) -> BTreeSet<String> {
-    for line in recipe_body(justfile, "fuzz-status") {
-        let Some(rest) = strip_comment(line).trim().strip_prefix("targets=(") else {
-            continue;
-        };
-        let Some((list, _)) = rest.split_once(')') else {
-            continue;
-        };
-        return words(list).map(str::to_owned).collect();
-    }
-    BTreeSet::new()
+/// The `[group('fuzz')]` recipes that take no argument, i.e. the ones that act
+/// on the whole target set rather than on the one target a caller named.
+/// `fuzz-quick TARGET` is asked nothing below; `fuzz-all-quick` is asked
+/// everything.
+///
+/// Derived rather than listed, because a list of which recipes must derive
+/// their targets is the same hand-written listing one level up: writing
+/// `fuzz-all-medium` with the four names in it would satisfy a check that only
+/// knew about today's three sweeps.
+fn whole_set_fuzz_recipes(justfile: &str) -> BTreeSet<String> {
+    recipes_in_group(justfile, "fuzz")
+        .into_iter()
+        .filter(|recipe| recipe_parameters(recipe_header(justfile, recipe)).is_empty())
+        .collect()
 }
+
+/// The sweeps: whole-set recipes that ask `just _fuzz-targets` what the set is.
+fn derived_sweeps(justfile: &str) -> BTreeSet<String> {
+    whole_set_fuzz_recipes(justfile)
+        .into_iter()
+        .filter(|recipe| runs_recipe(&recipe_body(justfile, recipe), "_fuzz-targets"))
+        .collect()
+}
+
+/// Whole-set fuzz recipes that read no target list, each with the reason the
+/// list is not theirs to read.
+const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[(
+    "fuzz-build",
+    "`cargo fuzz build` with no target argument compiles every `[[bin]]` the fuzz \
+     manifest declares. That enumeration is cargo-fuzz's own and is one step closer \
+     to the registry than `cargo fuzz list` is, so reading the list here would be a \
+     copy rather than a cure",
+)];
+
+/// Fuzz recipes that spell a target's name themselves, each with the reason.
+/// Every entry is a LIVE DEFECT rather than an exemption: the name is a
+/// hand-maintained copy of one line of `cargo fuzz list`, and the whole point
+/// of the derivation is that there are none of those.
+const FUZZ_RECIPES_THAT_NAME_A_TARGET: &[(&str, &str)] = &[(
+    "fuzz-seed",
+    "`sjis_decode` is the one target whose input is bytes rather than text: it hands \
+     them to `decode_sjis`, which rejects a UTF-8 seed at its first multi-byte \
+     character, so its seeds are transcoded to CP932 and every other target's are \
+     not. The encoding a target wants is a per-target fact with nowhere else in this \
+     repo to live — and that is the defect, not the workaround: a second \
+     byte-oriented `[[bin]]` would be seeded with UTF-8 it cannot read, `just \
+     fuzz-seed` would report its seed count as cheerfully as for the rest, and \
+     nothing here would say so",
+)];
 
 /// The fuzz targets the regression suite replays: the first argument of each
 /// `replay_each(…)` call. The definition of the function is not a call, and
@@ -3816,13 +4078,15 @@ fn replayed_targets(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_fuzz_target_the_crate_registers_is_one_every_sweep_actually_sweeps() {
-    // A fifth listing of the same four names, and the reason to check them:
-    // the sweeps that call themselves "every registered fuzz target" are four
-    // hand-written lists, and DEV-230 was filed believing there were three
-    // targets. Adding a `[[bin]]` and stopping there leaves a target that the
-    // release pre-flight does not run, that `fuzz-status` reports nothing
-    // about, and whose promoted artifacts nothing replays — each of them
-    // silently, with every list still internally consistent.
+    // There were four hand-written listings of the same four names, and
+    // DEV-230 was filed believing there were three targets. Three of the four
+    // are gone: `fuzz-all-quick`, `fuzz-all-deep` and `fuzz-status` loop over
+    // `just _fuzz-targets`, i.e. over `cargo fuzz list`, which reads the very
+    // `[[bin]]` tables `cargo fuzz run <name>` resolves against. So the
+    // question asked of them changed with them — not "do the copies still
+    // agree" but "is either of them a copy". A target name spelled in one of
+    // these bodies is the list growing back, and a list that agrees today is
+    // exactly what a list about to drift looks like.
     let justfile = read("Justfile");
     let registered = registered_fuzz_targets();
     assert!(
@@ -3831,33 +4095,77 @@ fn every_fuzz_target_the_crate_registers_is_one_every_sweep_actually_sweeps() {
          `[[bin]]` tables"
     );
 
-    let listings = [
-        (
-            "`just fuzz-all-quick`",
-            swept_targets(&justfile, "fuzz-all-quick"),
-        ),
-        (
-            "`just fuzz-all-deep`, the release pre-flight",
-            swept_targets(&justfile, "fuzz-all-deep"),
-        ),
-        ("`just fuzz-status`", status_targets(&justfile)),
-        (
-            "`tests/fuzz_regressions.rs`",
-            replayed_targets(&read(
-                "crates/aozora-flavored-markdown/tests/fuzz_regressions.rs",
-            )),
-        ),
-    ];
-    for (label, listed) in &listings {
-        assert_eq!(
-            *listed,
-            registered,
-            "{label} and the fuzz manifest disagree about what the fuzz targets are.\n  \
-             registered, not listed here: {:?}\n  listed here, not registered: {:?}",
-            registered.difference(listed).collect::<Vec<_>>(),
-            listed.difference(&registered).collect::<Vec<_>>()
+    // Over every recipe in the group rather than over the three that used to
+    // hold a list. Naming them would have left the check exactly as wide as
+    // the defect it was written for and no wider: `fuzz-seed` arrived after
+    // those three, whole-set like them, and a fourth hand-written listing in
+    // it would have passed a test that knew three names.
+    let fuzz_recipes = recipes_in_group(&justfile, "fuzz");
+    let whole_set = whole_set_fuzz_recipes(&justfile);
+    assert!(
+        fuzz_recipes.len() >= 8 && whole_set.len() >= 4,
+        "`[group('fuzz')]` came out as {fuzz_recipes:?}, of which {whole_set:?} take no \
+         argument; the reader is not finding the attribute or is not finding the headers"
+    );
+
+    for recipe in &whole_set {
+        let excused = FUZZ_RECIPES_THAT_ENUMERATE_NOTHING
+            .iter()
+            .any(|&(name, _)| name == recipe);
+        assert!(
+            excused || runs_recipe(&recipe_body(&justfile, recipe), "_fuzz-targets"),
+            "`just {recipe}` takes no argument, so it acts on every registered target, and it \
+             never asks `just _fuzz-targets` which those are. Read the registry, or add it to \
+             FUZZ_RECIPES_THAT_ENUMERATE_NOTHING with the reason the list is not its to read."
         );
     }
+
+    for recipe in &fuzz_recipes {
+        let spelled: Vec<String> = recipe_words(&justfile, recipe)
+            .intersection(&registered)
+            .cloned()
+            .collect();
+        let excused = FUZZ_RECIPES_THAT_NAME_A_TARGET
+            .iter()
+            .any(|&(name, _)| name == recipe);
+        assert!(
+            spelled.is_empty() || excused,
+            "`just {recipe}` names {spelled:?} itself. The list comes from `cargo fuzz list`; \
+             writing a target out here gives it a second, hand-maintained definition — the \
+             arrangement that let a fourth `[[bin]]` exist while three recipes swept three. \
+             If the name is unavoidable, put it in FUZZ_RECIPES_THAT_NAME_A_TARGET, where it \
+             is recorded as the defect it is."
+        );
+    }
+
+    // An excuse for a recipe that no longer exists is an excuse nobody reads,
+    // and it is how a table like this comes to bless a name that has since
+    // been given to something else.
+    for &(name, why) in FUZZ_RECIPES_THAT_ENUMERATE_NOTHING
+        .iter()
+        .chain(FUZZ_RECIPES_THAT_NAME_A_TARGET)
+    {
+        assert!(
+            fuzz_recipes.contains(name),
+            "`{name}` is excused (\"{why}\") and is not a `[group('fuzz')]` recipe any more"
+        );
+    }
+
+    // The one listing that cannot be derived, and therefore the one still
+    // checked by comparison: each target gets its own `#[test]` with its own
+    // assertions in `tests/fuzz_regressions.rs`, so the names are written out
+    // there and something has to hold them to the manifest.
+    let replayed = replayed_targets(&read(
+        "crates/aozora-flavored-markdown/tests/fuzz_regressions.rs",
+    ));
+    assert_eq!(
+        replayed,
+        registered,
+        "`tests/fuzz_regressions.rs` and the fuzz manifest disagree about what the fuzz targets \
+         are.\n  registered, not replayed: {:?}\n  replayed, not registered: {:?}",
+        registered.difference(&replayed).collect::<Vec<_>>(),
+        replayed.difference(&registered).collect::<Vec<_>>()
+    );
 }
 
 /// Where a triaged crash is pinned once it is promoted out of `fuzz/`.
@@ -3890,14 +4198,21 @@ fn every_pinned_regression_sits_under_a_target_the_suite_still_replays() {
             continue;
         };
         // The same filter the suite applies: a companion `.txt` / `.md` beside
-        // an artifact is archaeology, not an input.
+        // an artifact is archaeology, not an input, and a dotfile is neither —
+        // `.gitkeep` is how a target with nothing promoted yet still owns a
+        // directory, which is what makes a MISSING one a failure over there.
         let artifacts = fs::read_dir(&path)
             .into_iter()
             .flatten()
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| {
+                let hidden = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'));
                 path.is_file()
+                    && !hidden
                     && path
                         .extension()
                         .is_none_or(|ext| ext != "txt" && ext != "md")
@@ -3924,6 +4239,472 @@ fn every_pinned_regression_sits_under_a_target_the_suite_still_replays() {
         "no pinned regression artifact found under {REGRESSION_ROOT}; either every promoted \
          crash has been deleted, or this reader is looking in the wrong place — and a promoted \
          crash is never deleted."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// what has to exist before a fuzz gate can mean anything
+// ---------------------------------------------------------------------------
+//
+// The section above asks where the names are written. This one asks whether
+// the directories those names stand for are there at all, because both of the
+// suites that read them answer "not there" and "nothing in it" the same way,
+// and one of those two answers is a pass.
+
+/// Where `just fuzz-seed` installs the committed corpus.
+const CORPUS_ROOT: &str = "crates/aozora-flavored-markdown/fuzz/corpus";
+
+/// The lockfile the fuzz workspace resolves against. It is this repo's
+/// substitute for a `--locked` cargo-fuzz does not offer, so it has to be a
+/// file rather than a sentence.
+const FUZZ_LOCK: &str = "crates/aozora-flavored-markdown/fuzz/Cargo.lock";
+
+/// What tells a seed from libFuzzer's own output. The two live in one
+/// directory — a corpus is both the set you start from and the set the fuzzer
+/// grows — and only the first half is committed, so the prefix is what
+/// `.gitignore` re-includes and what this file counts.
+const SEED_PREFIX: &str = "seed-";
+
+/// The seed source that carries this crate's own dialect. The rest of the
+/// corpus is the CommonMark and GFM spec examples, which are exactly the input
+/// class comrak already handles: without these seven documents a fuzzer can
+/// mutate for an hour without ever emitting a ruby annotation, and the aozora
+/// layer is the whole reason this crate exists rather than a comrak dependency.
+const SEED_SOURCE: &str = "playground/examples";
+
+/// The files git would carry under `relative`: tracked ones, plus untracked
+/// ones that no ignore rule excludes.
+///
+/// Both halves, because this question has to give the same answer before and
+/// after the commit that adds the files — a check that only counted tracked
+/// files would fail on the branch that creates them, and one that only looked
+/// at the filesystem would pass on a tree where `.gitignore` guarantees the
+/// next clone gets nothing. That second state is not hypothetical: it is what
+/// `crates/*/fuzz/corpus/` was until this PR, with a populated corpus on the
+/// author's disk and an empty one on every runner.
+fn git_carried(relative: &str) -> BTreeSet<String> {
+    let out = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            relative,
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running `git ls-files -- {relative}`: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where git is installed and \
+                 the work tree is mounted."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`git ls-files -- {relative}` failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The last segment of a `/`-separated path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Every `.md` document under `SEED_SOURCE`, as (name, bytes).
+fn seed_source_documents() -> Vec<(String, Vec<u8>)> {
+    let dir = repo_root().join(SEED_SOURCE);
+    let mut out: Vec<(String, Vec<u8>)> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .map(|path| {
+            let bytes =
+                fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            (label_of(&path), bytes)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn every_registered_fuzz_target_owns_a_regression_directory_a_clone_would_get() {
+    // The other direction of `every_pinned_regression_sits_under_a_target_the
+    // _suite_still_replays`, and the one that was missing while that test's own
+    // comment described the failure exactly: "`replay_each` returns green when
+    // it finds no artifacts, and the walk it uses returns nothing for a
+    // directory that is not there". It then checked only that every directory
+    // present names a registered target — never that every registered target
+    // has a directory. Three of the four did not. `render_blocks`,
+    // `serialize_round_trip` and `sjis_decode` each had a `#[test]` that read
+    // no byte, asserted nothing and reported success, and every gate in this
+    // repo was green over it.
+    //
+    // The suite hard-fails on a missing directory now, so this is the same
+    // statement asked one step earlier and one step wider: earlier because it
+    // fails in the xtask suite rather than in three separate integration tests,
+    // and wider because a directory that exists only on the author's disk is
+    // the same nothing to a runner as one that does not exist at all.
+    let registered = registered_fuzz_targets();
+    assert!(
+        registered.len() >= 3,
+        "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
+         `[[bin]]` tables"
+    );
+
+    for target in &registered {
+        let relative = format!("{REGRESSION_ROOT}/{target}");
+        assert!(
+            repo_root().join(&relative).is_dir(),
+            "`{target}` is a registered fuzz target and {relative} does not exist. Its promoted \
+             crashes have nowhere to be, and until the suite started failing on this the test \
+             that replays them passed by replaying none."
+        );
+        let carried = git_carried(&relative);
+        assert!(
+            !carried.is_empty(),
+            "{relative} exists here and git carries nothing in it, so the next clone has no such \
+             directory — which is the state the replay suite fails on. Git stores no empty \
+             directory: commit the promoted artifacts, or the `.gitkeep` that stands in for them."
+        );
+    }
+}
+
+#[test]
+fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
+    // A fuzzer handed no corpus starts from one empty byte string, and the
+    // first minutes of every run go on rediscovering that markdown has
+    // headings. `crates/*/fuzz/corpus/` was in `.gitignore` wholesale, so that
+    // was the state of every CI run and every fresh checkout — while the author
+    // who ran `just fuzz-all-deep` locally had a corpus grown over previous
+    // runs and saw a completely different search.
+    //
+    // Nothing could have reported it. The corpus is an input to a workflow that
+    // is deliberately not a required check, so its absence does not fail
+    // anything; it just quietly makes the sweep worth much less than the
+    // 20 minutes it costs.
+    let registered = registered_fuzz_targets();
+    assert!(
+        registered.len() >= 3,
+        "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
+         `[[bin]]` tables"
+    );
+
+    let mut seeded: BTreeMap<String, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    for target in &registered {
+        let relative = format!("{CORPUS_ROOT}/{target}");
+        let all = git_carried(&relative);
+        // The control on the reader, and a rule in its own right: a corpus
+        // directory is also libFuzzer's scratch space, where every input it
+        // finds interesting lands under a SHA-1 name. Tens of thousands of
+        // those accumulate on a machine that fuzzes, and `git add -A` on a tree
+        // whose ignore rules had lapsed would commit the lot.
+        let strays: Vec<&String> = all
+            .iter()
+            .filter(|path| !file_name_of(path).starts_with(SEED_PREFIX))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "git would carry {} file(s) under {relative} that are not seeds, e.g. {:?}. \
+             Everything in a corpus directory except `{SEED_PREFIX}*` is libFuzzer's own output.",
+            strays.len(),
+            strays.iter().take(3).collect::<Vec<_>>()
+        );
+        let carried: Vec<String> = all
+            .into_iter()
+            .filter(|path| file_name_of(path).starts_with(SEED_PREFIX))
+            .collect();
+        assert!(
+            !carried.is_empty(),
+            "`{target}` is a registered fuzz target and git carries no `{SEED_PREFIX}*` file \
+             under {relative}. Every run of it on a runner therefore starts from an empty \
+             corpus. `just fuzz-seed` writes them; `.gitignore` decides whether a clone gets \
+             them."
+        );
+        let bytes = carried
+            .iter()
+            .map(|path| {
+                let full = repo_root().join(path);
+                fs::read(&full).unwrap_or_else(|e| panic!("reading {}: {e}", full.display()))
+            })
+            .collect();
+        seeded.insert(target.clone(), bytes);
+    }
+
+    // And what is IN them. A corpus of the right size made of the wrong
+    // documents is the failure this repo is most exposed to: the spec examples
+    // are pure CommonMark and GFM, i.e. precisely the input class comrak is
+    // already fuzzed on upstream, and a seed set of nothing else would leave
+    // the aozora layer — the reason this crate exists — unreached by every
+    // sweep while the counts above all looked healthy.
+    let documents = seed_source_documents();
+    assert!(
+        documents.len() >= 5,
+        "{SEED_SOURCE} came out holding {documents:?}; the reader is not finding the documents \
+         `just fuzz-seed` copies"
+    );
+    for (name, body) in &documents {
+        assert!(
+            seeded.values().any(|seeds| seeds.contains(body)),
+            "{name} is a seed source and no registered target's corpus holds it verbatim. These \
+             are the documents that carry ruby, bouten, tate-chu-yoko and the paired containers \
+             into the search; the spec examples that make up the rest of the corpus carry none \
+             of them."
+        );
+    }
+}
+
+#[test]
+fn the_lockfile_that_stands_in_for_the_missing_flag_is_one_a_clone_would_get() {
+    // cargo-fuzz has no `--locked` and no way to hand one to the `cargo build`
+    // it shells out to, so the fuzz workspace's resolution is bound by a
+    // committed lockfile instead, and `just fuzz-build` fails when a build
+    // rewrote it. That substitute is `git diff --quiet -- fuzz/Cargo.lock` —
+    // which says nothing at all about a file git is not tracking. An ignored
+    // or simply un-added lockfile makes the gate a silent no-op with every
+    // message in it still perfectly accurate, and `fuzz/.gitignore` listed
+    // `Cargo.lock` until this PR.
+    //
+    // What this asks is "would a clone get it", which covers the ignore rule
+    // and does not yet cover the index: on the branch that first adds the file,
+    // it is carried and still untracked, and `git diff` reports nothing about
+    // an untracked path either. That gap closes when the file is committed and
+    // stays closed — nothing can make a tracked file untracked by accident —
+    // but until then the recipe's check is the weaker of the two.
+    let carried = git_carried(FUZZ_LOCK);
+    assert!(
+        carried.contains(FUZZ_LOCK),
+        "git would not carry {FUZZ_LOCK} to the next clone. `just fuzz-build` detects a \
+         re-resolution with `git diff` against that file, and `git diff` over an untracked or \
+         ignored path reports nothing — so the check passes on every build, including the ones \
+         that resolved a different graph than the library ships."
+    );
+}
+
+#[test]
+fn a_gate_compiles_every_fuzz_target_the_crate_registers() {
+    // The fuzz crate declares its own `[workspace]` — correctly, since
+    // libfuzzer-sys is nightly-only and must not join a stable `--workspace`
+    // build — and the cost of that was total: `cargo check --workspace`,
+    // `cargo clippy --workspace` and `cargo build --workspace` have never
+    // compiled one line of it. Four harnesses calling this crate's public API
+    // by hand sat outside every gate in the repo, so a rename in `src/` broke
+    // them silently (DEV-270, DEV-291) and stayed broken until somebody fuzzed
+    // by hand.
+    //
+    // The section above this one already read every `cargo fuzz` invocation in
+    // the file — and asked each of them only which triple it names. Every one
+    // of them lived in a recipe nothing runs, which is the question it never
+    // put: a build flag is worth nothing on a build no gate performs.
+    let justfile = read("Justfile");
+    let manifest = recipes_in_group(&justfile, "gate");
+    let registered = registered_fuzz_targets();
+    let builds = fuzz_builds(&justfile);
+    assert!(
+        builds.len() >= 5 && registered.len() >= 3,
+        "{} fuzz build(s) and {registered:?} registered; a reader is not finding one of them",
+        builds.len()
+    );
+
+    let gated: Vec<&FuzzBuild> = builds
+        .iter()
+        .filter(|build| manifest.contains(&build.recipe))
+        .collect();
+    assert!(
+        !gated.is_empty(),
+        "no `[group('gate')]` recipe compiles the fuzz crate: cargo-fuzz is invoked only by {:?}, \
+         and none of those is a gate. The crate is then compiled by nothing a PR runs, which is \
+         how four harnesses came to be broken by a rename with every gate green.",
+        builds
+            .iter()
+            .map(|build| &build.recipe)
+            .collect::<BTreeSet<_>>()
+    );
+
+    for build in gated {
+        let tokens = shell_tokens(&build.line);
+        let at = fuzz_build_at(&tokens).unwrap_or_else(|| {
+            panic!(
+                "`just {}`: {} is no longer a fuzz build",
+                build.recipe,
+                build.line.trim()
+            )
+        });
+        assert_eq!(
+            tokens[at], "build",
+            "`just {}` gates on `cargo fuzz {}`, which searches rather than compiles. What a PR \
+             owes is that the harnesses still match the API they call, and that is a compile; a \
+             search belongs in fuzz.yml, where a finding is a bug report rather than a blocked \
+             merge.",
+            build.recipe, tokens[at]
+        );
+        let named: Vec<&String> = tokens
+            .iter()
+            .filter(|token| registered.contains(token.as_str()))
+            .collect();
+        assert!(
+            named.is_empty(),
+            "`just {}` gates on a build of {named:?} alone. `cargo fuzz build` with no target \
+             argument compiles every `[[bin]]` in the manifest; naming one leaves the others \
+             exactly where they were — compiled by nothing.",
+            build.recipe
+        );
+    }
+}
+
+/// The workflow that runs the fuzz targets, as opposed to compiling them.
+const FUZZ_WORKFLOW: &str = ".github/workflows/fuzz.yml";
+
+/// Where libFuzzer writes an input that broke something, relative to the fuzz
+/// crate. Spelled once here and asserted to be what both the recipes and the
+/// workflow say.
+const FUZZ_ARTIFACT_DIR: &str = "fuzz/artifacts";
+
+/// The workflow step holding line `at`: from the `- ` that opens it to the one
+/// that opens the next. A `with:` value belongs to the step above it, and
+/// nothing in YAML's indentation says so to a reader that took a fixed window.
+fn step_around<'a>(lines: &[&'a str], at: usize) -> Vec<&'a str> {
+    let opens = |line: &str| strip_comment(line).trim_start().starts_with("- ");
+    let from = lines[..=at]
+        .iter()
+        .rposition(|line| opens(line))
+        .unwrap_or(at);
+    let to = lines[at + 1..]
+        .iter()
+        .position(|line| opens(line))
+        .map_or(lines.len(), |offset| at + 1 + offset);
+    lines[from..to].to_vec()
+}
+
+#[test]
+fn the_fuzz_workflow_runs_a_sweep_that_exists_on_each_of_its_events() {
+    // `fuzz-all-deep`'s comment has called it "the gate before tagging a
+    // release" since it was written, and until DEV-230 gave the recipes a
+    // triple they could build for, it had never once run. Nothing scheduled
+    // it; a release pre-flight that is only ever invoked by a human on release
+    // day is discovered broken on release day.
+    //
+    // The workflow that fixes that is deliberately NOT a required check — a
+    // fuzzer is a search, and a finding is a bug report rather than a reason to
+    // block an unrelated PR. Which is exactly why it needs a test: nothing goes
+    // red when this file stops working. Rename a sweep, drop the `schedule:`
+    // trigger, delete the upload step, and the only symptom is a workflow that
+    // keeps passing while searching nothing or keeping nothing.
+    let justfile = read("Justfile");
+    let workflow = read(FUZZ_WORKFLOW);
+    let sweeps = derived_sweeps(&justfile);
+    assert!(
+        sweeps.len() >= 3,
+        "the derived sweeps came out as {sweeps:?}; the reader is not finding the `[group('fuzz')]` \
+         recipes that loop over `_fuzz-targets`"
+    );
+
+    // What it dispatches has to BE one of those recipes. The sweep arrives
+    // through an env var rather than a `run:` argument (zizmor's
+    // template-injection rule), so `recipes_invoked` cannot see it and the name
+    // is checked against the Justfile here instead of by the first runner to
+    // hit `error: Justfile does not contain recipe`.
+    let dispatched: BTreeSet<String> = workflow_vocabulary(&workflow)
+        .intersection(&sweeps)
+        .cloned()
+        .collect();
+    assert!(
+        dispatched.len() >= 2,
+        "{FUZZ_WORKFLOW} names {dispatched:?} of the sweeps {sweeps:?}. It runs one per event — a \
+         short one per pull request, the release pre-flight on the cron — and a name here that is \
+         not a recipe there fails on the runner, in a workflow whose failures block nothing."
+    );
+
+    // The deep sweep is the one that runs the release pre-flight, and it is the
+    // one the schedule exists for. Which recipe that is, is read off the
+    // Justfile rather than spelled here.
+    let deep = sweeps
+        .iter()
+        .find(|sweep| runs_recipe(&recipe_body(&justfile, sweep), "fuzz-deep"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no `[group('fuzz')]` sweep runs `just fuzz-deep` any more; the release \
+                    pre-flight has no sweep to be"
+            )
+        });
+    assert!(
+        jobs_block(&workflow).iter().any(|line| {
+            strip_comment(line).contains("schedule") && strip_comment(line).contains(deep.as_str())
+        }),
+        "{FUZZ_WORKFLOW} does not pick `{deep}` on `schedule`. The cron is what keeps the release \
+         pre-flight warm; a schedule that runs the 60-second sweep instead proves only that the \
+         harnesses start."
+    );
+    for trigger in ["pull_request:", "schedule:"] {
+        assert!(
+            workflow
+                .lines()
+                .any(|line| strip_comment(line).trim() == trigger),
+            "{FUZZ_WORKFLOW} has no `{trigger}` trigger. Both halves are load-bearing and they are \
+             different halves: the pull_request run catches an invariant a change broke on the \
+             first mutation of a seed, the cron is the only thing that ever runs the deep sweep."
+        );
+    }
+    assert!(
+        workflow
+            .lines()
+            .any(|line| strip_comment(line).trim().starts_with("- cron:")),
+        "{FUZZ_WORKFLOW} declares a `schedule:` with no `cron:` under it"
+    );
+}
+
+#[test]
+fn the_fuzz_workflow_keeps_the_input_a_failing_sweep_found() {
+    // The other half of a workflow that blocks nothing: a finding has to
+    // survive the runner. libFuzzer writes the input that broke something into
+    // `fuzz/artifacts/` and the machine is then destroyed, so without the
+    // upload all that reaches a human is a red square on a workflow nobody is
+    // required to read — and the crash has to be re-found rather than replayed.
+    let justfile = read("Justfile");
+    let workflow = read(FUZZ_WORKFLOW);
+    let jobs = jobs_block(&workflow);
+    assert!(
+        jobs.len() >= 10,
+        "{FUZZ_WORKFLOW} came out with {} line(s) under `jobs:`; the reader is not finding the \
+         mapping",
+        jobs.len()
+    );
+    let uploads = jobs
+        .iter()
+        .position(|line| strip_comment(line).contains("upload-artifact"))
+        .unwrap_or_else(|| {
+            panic!(
+                "{FUZZ_WORKFLOW} uploads nothing: a crashing input found on a runner is lost \
+                 with the runner, and all that is left of it is that something failed"
+            )
+        });
+    let step = step_around(&jobs, uploads);
+    assert!(
+        step.iter()
+            .any(|line| strip_comment(line).contains("failure()")),
+        "{FUZZ_WORKFLOW}'s upload step is not conditioned on `failure()`, so it either runs on \
+         every green sweep or does not run when there is something to keep:\n{}",
+        step.join("\n")
+    );
+    assert!(
+        step.iter()
+            .any(|line| strip_comment(line).contains(FUZZ_ARTIFACT_DIR)),
+        "{FUZZ_WORKFLOW}'s upload step does not name `{FUZZ_ARTIFACT_DIR}`, which is where \
+         libFuzzer writes what it found:\n{}",
+        step.join("\n")
+    );
+    assert!(
+        justfile.contains(FUZZ_ARTIFACT_DIR),
+        "the Justfile no longer names `{FUZZ_ARTIFACT_DIR}`, so the directory the workflow \
+         collects and the directory `just fuzz-triage` replays have drifted apart"
     );
 }
 
@@ -3993,22 +4774,40 @@ fn a_triple_only_libfuzzer_can_see_is_not_the_triple_cargo_fuzz_builds_for() {
 
 #[test]
 fn a_sweep_reads_its_targets_and_a_definition_is_not_a_call() {
-    let justfile = concat!(
+    // The two shapes the derivation check has to tell apart: a loop over the
+    // registry, and the hand-written list it replaced. Prose about the old
+    // shape has to read as the new one, or the check fails on the comment that
+    // explains it — which is how a gate gets its explanation deleted.
+    let derived = concat!(
+        "fuzz-all-quick:\n",
+        "    #!/usr/bin/env bash\n",
+        "    # was: just fuzz-quick parse_render\n",
+        "    for target in $(just _fuzz-targets); do\n",
+        "        just fuzz-quick \"$target\"\n",
+        "    done\n",
+    );
+    let read_here = recipe_words(derived, "fuzz-all-quick");
+    assert!(
+        read_here.contains("target"),
+        "a recipe body came out as {read_here:?}; the reader is not finding its lines"
+    );
+    assert!(
+        !read_here.contains("parse_render"),
+        "a target named in a COMMENT counted as the recipe naming it"
+    );
+    assert!(
+        runs_recipe(&recipe_body(derived, "fuzz-all-quick"), "_fuzz-targets"),
+        "the call that fetches the list went unread inside `$( … )`"
+    );
+
+    let hand_written = concat!(
         "fuzz-all-quick:\n",
         "    just fuzz-quick parse_render\n",
         "    just fuzz-quick sjis_decode\n",
-        "\n",
-        "fuzz-status:\n",
-        "    #!/usr/bin/env bash\n",
-        "    targets=(parse_render sjis_decode)\n",
-        "    printf \"%-22s\\n\" target\n",
     );
-    let expected = BTreeSet::from(["parse_render".to_owned(), "sjis_decode".to_owned()]);
-    assert_eq!(swept_targets(justfile, "fuzz-all-quick"), expected);
-    assert_eq!(
-        status_targets(justfile),
-        expected,
-        "the bash array `fuzz-status` iterates went unread, so its list could drift unchecked"
+    assert!(
+        recipe_words(hand_written, "fuzz-all-quick").contains("parse_render"),
+        "a target spelled in a recipe body went unread, so a hand-written list would pass"
     );
 
     let suite = concat!(
