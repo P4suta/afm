@@ -51,6 +51,14 @@ twox-hash      = { version = "2", default-features = false, features = ["xxhash3
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys        = { version = "0.3", features = ["Performance", "Window"] }
 
+# `tests/wasm.rs` runs every export on the target it ships to, under
+# `just test-wasm`. Target-gated for the same reason `web-sys` is: that file is
+# `#![cfg(target_arch = "wasm32")]`, so on the host this would be a declared
+# dependency no target in the graph uses — which `just udeps` reports, and is
+# right to.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
 [features]
 default = ["panic-hook"]
 panic-hook = ["dep:console_error_panic_hook"]

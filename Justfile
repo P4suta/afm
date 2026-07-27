@@ -208,6 +208,33 @@ invariants:
 spec:
     {{_dev}} cargo nextest run --locked --package aozora-flavored-markdown --lib -E 'test(conformance::)'
 
+# The wasm exports, run on the target they ship to.
+#
+# This recipe is what `_COV_IGNORE` defers to. That exclusion has cited a
+# `wasm-pack test` step since it was written, and until this recipe there was
+# none anywhere in the repo — so ten of the crate's fourteen exports
+# (`initPanicHook`, `slugsJson` and every `AozoraDocument` method) were covered
+# by nothing at all. `crates/aozora-flavored-markdown-wasm/tests/wasm.rs` is
+# the harness; the two native test files beside it carry the opposite `cfg`, so
+# each half runs where it means something.
+#
+# `--node` rather than a headless browser: nothing under test touches the DOM,
+# and node is already in the dev image for the playground. `web_sys::window()`
+# is `None` there, which is the documented host-agnostic path through `now_ms`.
+#
+# `RUSTC_WRAPPER=` for the reason `wasm-build` clears it — wasm-pack shells out
+# to `rustup target add`, which corrupts the sccache server.
+#
+# `--locked` is a trailing positional here, NOT a `-- --locked` passthrough the
+# way `wasm-build` spells it: `wasm-pack test` takes cargo's own flags as
+# `PATH_AND_EXTRA_OPTIONS` and forwards a `--` to the test binary instead, where
+# `--locked` is not an argument at all. `lock_binding.rs` knows both shapes.
+[group('gate')]
+[group('test')]
+test-wasm:
+    {{_dev}} bash -c 'RUSTC_WRAPPER= wasm-pack test --node \
+        crates/aozora-flavored-markdown-wasm --locked'
+
 # Aozora-layer fixtures (annotation cases, golden 56656, corpus sweep)
 # now live in the sibling `aozora` repo; run `just spec-aozora`
 # / `just spec-golden-56656` / `just corpus-sweep` from there.
@@ -401,7 +428,8 @@ samply-render REPEAT="200":
 #
 # Excludes (`_COV_IGNORE`): build artefacts, CLI
 # `main.rs` entrypoints, xtask tooling, test-support, and aozora-flavored-markdown-wasm (exercised
-# by `wasm-pack test`, which native llvm-cov can't reach). Also the EPUB
+# by `just test-wasm`, a gate of its own — llvm-cov instruments the host build
+# and every one of those exports runs on wasm32). Also the EPUB
 # generator's XML/ZIP serialisation files (compose.rs / package.rs): they
 # write to an in-memory `Cursor<Vec<u8>>` sink whose `io::Write` is infallible,
 # so the per-call `.map_err(…)` error arms are dead defensive regions that can't
@@ -1067,11 +1095,15 @@ ci:
     #     (fmt-check/typos/strict-code/comment-discipline/zizmor/actionlint) run
     #     once on their own instead of a second time inside `lint`; only
     #     `clippy` is left to run from `lint`.
-    #   * playground-build (wasm-pack + the in-repo playground's tsc/vite) runs
-    #     LAST in the foreground lane: wasm-pack invokes rustc and shares the
-    #     target dir, and it pulls `wasm-build` in as a dependency — so a wasm /
-    #     IR / diagnostic type change can no longer pass `just ci` while
-    #     silently breaking the playground's TypeScript.
+    #   * test-wasm and playground-build are the two wasm-pack gates and run
+    #     LAST in the foreground lane, in that order: wasm-pack invokes rustc
+    #     and shares the target dir, so they cannot overlap anything — but they
+    #     compile the same graph for wasm32, and the second finds it warm.
+    #     test-wasm leads because it fails on a broken export where
+    #     playground-build fails on a broken consumer of one. playground-build
+    #     stays last: it pulls `wasm-build` in as a dependency, so a wasm / IR /
+    #     diagnostic type change can no longer pass `just ci` while silently
+    #     breaking the playground's TypeScript.
     #
     # `nektos/act` — running ci.yml itself locally — was considered for this and
     # rejected. Every recipe reaches its tool through `docker compose run`, so a
@@ -1101,7 +1133,7 @@ ci:
               zizmor actionlint comment-discipline commitlint \
               msrv clippy build dist-assets-check \
               test test-doc prop spec doc doc-public coverage udeps \
-              playground-build)
+              test-wasm playground-build)
 
     # --- manifest assert: these two lanes ARE the gate set -------------------
     # "`just ci` is a superset of CI" used to be a sentence, and a sentence is

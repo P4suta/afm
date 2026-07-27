@@ -47,6 +47,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1976,4 +1977,289 @@ fn a_flag_pair_counts_only_where_it_arrives_whole_and_in_order() {
     assert!(!contains_run("docsrs --cfg", &wanted));
     // A crate asking for no rustdoc-args constrains nothing.
     assert!(contains_run("-D warnings", &[]));
+}
+
+// ---------------------------------------------------------------------------
+// what a gate is excused from
+// ---------------------------------------------------------------------------
+//
+// A fourth way a check can check nothing, and the one this file did not
+// cover: the check runs, and something is exempted from it on the strength of
+// a sentence. `_COV_IGNORE` drops whole directories out of the coverage
+// denominator, and each is written down with a reason. Prose counting as
+// enforcement is what the header of this file rejects, and an exemption is
+// where it costs the most — the gate goes green faster for it.
+//
+// One of those reasons is checkable, because it names another step: a crate
+// compiled for a target `cargo llvm-cov` cannot instrument is genuinely
+// invisible to the coverage gate, and the exclusion is honest exactly when
+// something else runs that crate's tests on that target. That is the shape
+// read below. The remaining exclusions do not defer to a step at all
+// (`target/` is not source, `/main\.rs$` and the epub serialisation files are
+// policy about regions), so there is nothing for a reader to resolve.
+
+/// Split a regex alternation at the top level. `_COV_IGNORE` holds one nested
+/// group (`(compose|package)`), and the `|` inside it separates two file names
+/// rather than two exclusions.
+fn split_alternatives(regex: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (at, ch) in regex.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                out.push(&regex[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&regex[start..]);
+    out
+}
+
+/// What the coverage gate tells llvm-cov to leave out of the denominator.
+///
+/// Read off the flag the gate hands the tool rather than off the variable
+/// holding it: a `_COV_IGNORE` that nothing interpolates excuses nothing, and
+/// the question here is what is actually excused.
+fn coverage_exclusions(justfile: &str) -> Vec<String> {
+    let variables = plain_variables(justfile);
+    for line in recipe_body(justfile, "coverage") {
+        let expanded = expand(strip_comment(line), &variables);
+        let Some((_, after)) = expanded.split_once("--ignore-filename-regex") else {
+            continue;
+        };
+        let argument = after.trim();
+        let regex = match argument.chars().next() {
+            Some(quote @ ('\'' | '"')) => argument[1..].split(quote).next().unwrap_or_default(),
+            _ => argument.split_whitespace().next().unwrap_or_default(),
+        };
+        let body = regex
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or(regex);
+        return split_alternatives(body)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The directory one exclusion drops wholesale, or `None` when it is a pattern
+/// over files inside a crate that is otherwise still counted. A plain path
+/// fragment ending in `/` is the first; anything carrying regex punctuation
+/// (`/main\.rs$`, the epub group) is the second.
+fn excluded_directory(alternative: &str) -> Option<&str> {
+    let plain = alternative
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/'));
+    (plain && alternative.len() > 1 && alternative.ends_with('/')).then_some(alternative)
+}
+
+/// A recipe's body with backslash continuations folded into single lines.
+/// `test-wasm` names its sub-command on one line and the crate it points at on
+/// the next, and a per-line reader would see a `wasm-pack test` aimed at
+/// nothing.
+fn joined_body(justfile: &str, recipe: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending = String::new();
+    for line in recipe_body(justfile, recipe) {
+        let text = strip_comment(line).trim();
+        if let Some(head) = text.strip_suffix('\\') {
+            pending.push_str(head);
+            pending.push(' ');
+            continue;
+        }
+        pending.push_str(text);
+        out.push(mem::take(&mut pending));
+    }
+    if !pending.is_empty() {
+        out.push(pending);
+    }
+    out
+}
+
+/// The crate directories one command line hands `wasm-pack <sub>`. A directory
+/// that exists is the test, rather than a `crates/` prefix: `--target bundler`
+/// and `--out-dir pkg` sit in the same argument list and neither is a path
+/// into this repo.
+fn wasm_pack_targets(line: &str, sub: &str) -> Vec<String> {
+    let tokens = shell_tokens(line);
+    let mut out = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        if token != "wasm-pack" {
+            continue;
+        }
+        let mut next = at + 1;
+        while tokens.get(next).is_some_and(|token| token.starts_with('+')) {
+            next += 1;
+        }
+        if tokens.get(next).map(String::as_str) != Some(sub) {
+            continue;
+        }
+        out.extend(
+            tokens[next + 1..]
+                .iter()
+                .filter(|token| !token.starts_with('-') && repo_root().join(token).is_dir())
+                .cloned(),
+        );
+    }
+    out
+}
+
+/// Every crate a gate hands `wasm-pack <sub>`, transitively through the
+/// recipes it depends on — `playground-build` reaches `wasm-pack build` two
+/// dependencies away, and a build is a build however far from the gate it is
+/// written.
+fn wasm_pack_paths(justfile: &str, sub: &str) -> BTreeSet<String> {
+    let variables = plain_variables(justfile);
+    let mut out = BTreeSet::new();
+    for gate in recipes_in_group(justfile, "gate") {
+        let mut pending = vec![gate];
+        let mut seen = BTreeSet::new();
+        while let Some(recipe) = pending.pop() {
+            if !seen.insert(recipe.clone()) {
+                continue;
+            }
+            pending.extend(header_dependencies(recipe_header(justfile, &recipe)));
+            for line in joined_body(justfile, &recipe) {
+                out.extend(wasm_pack_targets(&expand(&line, &variables), sub));
+            }
+        }
+    }
+    out
+}
+
+/// Every crate this repo compiles for wasm32 and excuses from the coverage
+/// denominator without testing it there. Each one is a hole in the shape of
+/// the exemption: llvm-cov instruments the host build, the exclusion says so,
+/// and then no step reaches the code the exclusion is about.
+fn coverage_debts(justfile: &str) -> Vec<String> {
+    let excluded: Vec<String> = coverage_exclusions(justfile)
+        .iter()
+        .filter_map(|alternative| excluded_directory(alternative))
+        .map(ToOwned::to_owned)
+        .collect();
+    let tested = wasm_pack_paths(justfile, "test");
+    wasm_pack_paths(justfile, "build")
+        .into_iter()
+        .filter(|path| {
+            let inside = format!("{path}/");
+            excluded.iter().any(|dir| inside.contains(dir.as_str())) && !tested.contains(path)
+        })
+        .collect()
+}
+
+#[test]
+fn a_crate_excused_from_coverage_for_shipping_to_wasm_is_tested_on_wasm() {
+    let justfile = read("Justfile");
+    assert!(
+        !wasm_pack_paths(&justfile, "build").is_empty(),
+        "no gate reaches `wasm-pack build` any more; this reader must be retargeted, not left \
+         passing over an empty set"
+    );
+    assert!(
+        coverage_debts(&justfile).is_empty(),
+        "{:?} is compiled for wasm32 by a gate and dropped from the coverage denominator, and \
+         nothing runs its tests on wasm32. The exclusion buys silence rather than deferring to a \
+         step: llvm-cov never sees the crate, and neither does anything else. Either point a \
+         `[group('gate')]` recipe at `wasm-pack test <crate>`, or stop excluding it and let the \
+         host build carry the floor",
+        coverage_debts(&justfile)
+    );
+}
+
+#[test]
+fn the_arrangement_that_stood_before_test_wasm_reads_as_a_debt() {
+    // The `Justfile` as it was: a gate compiles the crate for wasm32,
+    // `_COV_IGNORE` drops it, and the comment above the exclusion defers to a
+    // `wasm-pack test` step that is written nowhere. Every assertion in this
+    // file passed on that, because every one of them is about a recipe that
+    // exists rather than one that was promised.
+    let before = concat!(
+        "_COV_IGNORE := \"(target/|aozora-flavored-markdown-wasm/)\"\n",
+        "\n",
+        "[group('gate')]\n",
+        "coverage:\n",
+        "    cargo llvm-cov nextest --ignore-filename-regex '{{_COV_IGNORE}}'\n",
+        "\n",
+        "[group('gate')]\n",
+        "playground-build: wasm-build\n",
+        "    bun run build\n",
+        "\n",
+        "wasm-build:\n",
+        "    bash -c 'wasm-pack build crates/aozora-flavored-markdown-wasm \\\n",
+        "        --target bundler --out-dir pkg -- --locked'\n",
+    );
+    assert_eq!(
+        coverage_debts(before),
+        vec!["crates/aozora-flavored-markdown-wasm".to_owned()],
+        "the reader no longer sees the defect it was written for"
+    );
+
+    let after = format!(
+        "{before}\n\
+         [group('gate')]\n\
+         test-wasm:\n    \
+         bash -c 'wasm-pack test --node \\\n        \
+         crates/aozora-flavored-markdown-wasm --locked'\n"
+    );
+    assert!(
+        coverage_debts(&after).is_empty(),
+        "a gate that tests the crate on the target it ships to settles the exemption: {:?}",
+        coverage_debts(&after)
+    );
+}
+
+#[test]
+fn an_exclusion_naming_files_inside_a_crate_is_not_the_crate() {
+    // The two shapes `_COV_IGNORE` mixes. Reading the second as a directory
+    // would have this file demand a wasm test for the epub generator, and
+    // reading the first as a file would let a whole crate out unexamined.
+    assert_eq!(excluded_directory("xtask/"), Some("xtask/"));
+    assert_eq!(
+        excluded_directory("aozora-md-wasm/"),
+        Some("aozora-md-wasm/")
+    );
+    assert_eq!(excluded_directory("/main\\.rs$"), None);
+    assert_eq!(excluded_directory("epub/src/(compose|package)\\.rs"), None);
+    // A fragment naming no directory at all.
+    assert_eq!(excluded_directory("/"), None);
+}
+
+#[test]
+fn a_nested_group_is_one_exclusion_and_not_two() {
+    assert_eq!(
+        split_alternatives("target/|epub/src/(compose|package)\\.rs|xtask/"),
+        vec!["target/", "epub/src/(compose|package)\\.rs", "xtask/"]
+    );
+    assert_eq!(split_alternatives("only/"), vec!["only/"]);
+}
+
+#[test]
+fn a_crate_named_on_the_line_after_its_sub_command_is_still_the_target() {
+    // `test-wasm` is written across two lines and `wasm-build` on one. The
+    // reader has to answer the same for both, or a continuation would be a
+    // place to hide an untested build.
+    let justfile = read("Justfile");
+    assert!(
+        wasm_pack_paths(&justfile, "test").contains("crates/aozora-flavored-markdown-wasm"),
+        "the `wasm-pack test` reader found {:?}",
+        wasm_pack_paths(&justfile, "test")
+    );
+    // A flag's value is not a path, however much a bare word looks like one.
+    assert_eq!(
+        wasm_pack_targets(
+            "wasm-pack build crates --target bundler --out-dir pkg",
+            "build"
+        ),
+        vec!["crates".to_owned()],
+        "a flag's value was read as the crate under build"
+    );
+    // And the sub-command has to match: a build is not a test run.
+    assert!(wasm_pack_targets("wasm-pack build crates", "test").is_empty());
 }

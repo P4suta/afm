@@ -62,9 +62,17 @@ jobs:
           #   is a parser limitation, not a policy exception. cargo-deny, the
           #   source of truth, reads the same field and passes. Drop this
           #   entry once upstream switches to `MIT OR Apache-2.0`.
+          #
+          # - minicov (transitive: wasm-bindgen-test -> minicov), the same
+          #   parser limitation with the halves the other way round: it
+          #   declares `Apache-2.0/MIT` and is reported as
+          #   `LicenseRef-bad-apache-2.0mit`. Dev-dependency of the wasm
+          #   crate only, reached solely by `just test-wasm`, and never
+          #   linked into a published artefact. Same removal condition.
           allow-dependencies-licenses: >-
             pkg:githubactions/Swatinem/rust-cache,
-            pkg:cargo/rustc-demangle
+            pkg:cargo/rustc-demangle,
+            pkg:cargo/minicov
 
           # Comment only on failure so clean PRs aren't spammed.
           comment-summary-in-pr: on-failure

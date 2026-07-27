@@ -23,10 +23,23 @@
 //! the sealed half of `public_type_contract` does: `#[wasm_bindgen]` renames
 //! happen in an attribute, and an attribute is not something a `#[test]` can
 //! observe at runtime.
+//!
+//! Host-only, and not merely by habit: it reads its own source off the disk,
+//! and on `wasm32-unknown-unknown` there is no disk to read it from. The wasm
+//! half of this crate's suite is `tests/wasm.rs`.
+//!
+//! The last section reads the same source for a second census. The `.d.ts`
+//! answers what the ABI *declares*; `tests/wasm.rs` answers what the ABI is
+//! *run* through, and until `just test-wasm` existed the answer was four of
+//! fourteen. Both questions are about a list nobody maintains by hand, and
+//! both are answerable only from the source text — so they are asked in one
+//! place, off one read.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aozora_flavored_markdown::ir::{
     Block, Document, Inline, ListItem, Position, Range, Span, TableAlign, TableRow,
@@ -343,4 +356,320 @@ fn the_ts_union_members_are_exactly_the_tags_the_renderer_emits() {
          renamed on one side and not the other type-checks and then misses every `switch` arm \
          at runtime. If a variant was added, extend `EVERY_VARIANT` until it appears"
     );
+}
+
+// ---------------------------------------------------------------------------
+// every export the ABI declares is run on the target it crosses to
+// ---------------------------------------------------------------------------
+//
+// The census above is of names. This one is of the functions behind them, and
+// it is the check the coverage exclusion has always assumed: this crate is out
+// of the llvm-cov denominator because `just test-wasm` runs it on wasm32
+// instead, so "runs it" has to be a fact about the file rather than about the
+// sentence. It was not, twice over — the step did not exist, and ten of the
+// fourteen exports were named by no test on any target.
+//
+// A count would not have caught that and does not catch the next one: exports
+// are added one at a time, and the failure is always the one nobody listed.
+// The list is therefore taken from `src/lib.rs` itself, for the reason the
+// class census is: `#[wasm_bindgen]` and its `js_name` live in an attribute,
+// and an attribute is not something a `#[test]` can observe at runtime.
+
+/// One `#[wasm_bindgen]` export: the Rust item a test calls, the name it
+/// crosses the ABI under, and — for a method — the type it hangs off.
+#[derive(Debug)]
+struct Export {
+    rust: String,
+    js: String,
+    owner: Option<String>,
+    constructor: bool,
+}
+
+/// Every function this crate exports. A `pub fn` is one when it carries its
+/// own `#[wasm_bindgen]`, and *also* when it merely sits in a `#[wasm_bindgen]
+/// impl` — wasm-bindgen exports those under their Rust name whether or not
+/// anybody wrote an attribute, which is exactly the export a census of
+/// attributes would miss.
+fn wasm_bindgen_exports(src: &str) -> Vec<Export> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut owner: Option<String> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(rest) = line.strip_prefix("impl ") {
+            owner = attributes_above(&lines, idx)
+                .iter()
+                .any(|a| a.starts_with("#[wasm_bindgen"))
+                .then(|| ident_at(rest));
+            continue;
+        }
+        if *line == "}" {
+            owner = None;
+            continue;
+        }
+        let Some(tail) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let attributes = attributes_above(&lines, idx);
+        let tagged = attributes.iter().any(|a| a.starts_with("#[wasm_bindgen"));
+        if !tagged && owner.is_none() {
+            continue;
+        }
+        let rust = ident_at(tail);
+        let js = js_name_in(&attributes).unwrap_or_else(|| rust.clone());
+        let constructor = attributes.iter().any(|a| a.contains("constructor"));
+        out.push(Export {
+            rust,
+            js,
+            owner: owner.clone(),
+            constructor,
+        });
+    }
+    out
+}
+
+fn wasm_harness() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wasm.rs");
+    fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "reading {}: {e}. This is the file `just test-wasm` runs and the file the coverage \
+             exclusion defers to; without it the exclusion is a sentence again",
+            path.display()
+        )
+    })
+}
+
+/// Everything the `#[wasm_bindgen_test]` functions execute. Only those: a call
+/// from a helper nothing invokes, an export named in a doc comment, or a
+/// plain `#[test]` the wasm runner does not collect are all mentions rather
+/// than runs, and a census that counted them would re-open the hole it closes.
+fn wasm_test_bodies(src: &str) -> String {
+    let mut out = String::new();
+    let mut lines = src.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "#[wasm_bindgen_test]" {
+            continue;
+        }
+        for body in lines.by_ref() {
+            if body == "}" {
+                break;
+            }
+            // The signature carries the test's own name, which is prose about
+            // an export rather than a call to one.
+            if !body.trim_start().starts_with("fn ") {
+                out.push_str(without_line_comment(body));
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+fn without_line_comment(line: &str) -> &str {
+    line.split_once("//").map_or(line, |(before, _)| before)
+}
+
+/// Does this text call the export? A method is reached through a receiver and
+/// a constructor through its type, because the bare identifier is not
+/// distinctive: `new(` occurs in `Vec::new()`, and matching it would let the
+/// one export nothing constructs pass on somebody else's allocation.
+fn reached(text: &str, export: &Export) -> bool {
+    let call = format!("{}(", export.rust);
+    text.match_indices(&call).any(|(at, _)| {
+        let before = &text[..at];
+        match (&export.owner, export.constructor) {
+            (Some(owner), true) => before.ends_with(&format!("{owner}::")),
+            (Some(_), false) => before.ends_with('.'),
+            (None, _) => before
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_'),
+        }
+    })
+}
+
+#[test]
+fn every_export_this_crate_declares_is_called_by_a_wasm_test() {
+    let exports = wasm_bindgen_exports(&wasm_source());
+    assert!(
+        exports.len() >= 14,
+        "only {} exports found; the reader must be retargeted, not deleted. Found: {:?}",
+        exports.len(),
+        exports.iter().map(|e| &e.js).collect::<Vec<_>>()
+    );
+
+    let harness = wasm_harness();
+    assert!(
+        harness.contains("#![cfg(target_arch = \"wasm32\")]"),
+        "`tests/wasm.rs` is the wasm half of this suite and has to be gated to wasm32; a \
+         `#[wasm_bindgen_test]` compiled for the host is collected by nothing"
+    );
+    let bodies = wasm_test_bodies(&harness);
+
+    let missed: Vec<&str> = exports
+        .iter()
+        .filter(|export| !reached(&bodies, export))
+        .map(|export| export.js.as_str())
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "{missed:?} cross the ABI and no `#[wasm_bindgen_test]` calls them. This crate is out of \
+         the coverage denominator (`_COV_IGNORE`) precisely because `just test-wasm` is supposed \
+         to be reaching it, so an export missing here is covered by nothing anywhere — which is \
+         the state this file was written to end. Add a case to `tests/wasm.rs`"
+    );
+}
+
+/// Every integration test this crate ships, with its source.
+fn test_files() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let src = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            (name, src)
+        })
+        .collect()
+}
+
+#[test]
+fn every_test_file_in_this_crate_declares_which_target_it_runs_on() {
+    // This crate's suite is compiled twice — once by `just test`, once by
+    // `just test-wasm` — and the two runners collect different attributes.
+    // A `#[test]` built for wasm32 is a function wasm-bindgen's runner never
+    // calls, and a `#[wasm_bindgen_test]` built for the host is the same
+    // silence from the other side. Neither reports anything: the file is
+    // compiled, the run is green, and nothing in it executed. So each file
+    // says which half it belongs to, and this asserts that it said so.
+    let files = test_files();
+    assert!(
+        files.len() >= 3,
+        "only {} test file(s) found; the reader is looking in the wrong directory",
+        files.len()
+    );
+    for (name, src) in files {
+        let wasm = src.contains("#![cfg(target_arch = \"wasm32\")]");
+        let host = src.contains("#![cfg(not(target_arch = \"wasm32\"))]");
+        assert!(
+            wasm ^ host,
+            "`tests/{name}` declares neither target gate, or both. Exactly one of \
+             `#![cfg(target_arch = \"wasm32\")]` and `#![cfg(not(target_arch = \"wasm32\"))]` \
+             has to open the file, or its tests are collected by one runner and silently \
+             dropped by the other"
+        );
+    }
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_method_with_no_attribute_of_its_own_is_still_an_export() {
+    // The shape a census of `#[wasm_bindgen]` attributes would walk past:
+    // inside a `#[wasm_bindgen] impl`, the attribute on the block is what
+    // exports the method, and wasm-bindgen needs nothing on the method itself.
+    let src = concat!(
+        "#[wasm_bindgen]\n",
+        "impl Handle {\n",
+        "    pub fn bare(&self) -> u32 {\n",
+        "        0\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "impl Handle {\n",
+        "    pub fn internal(&self) -> u32 {\n",
+        "        0\n",
+        "    }\n",
+        "}\n",
+    );
+    let exports = wasm_bindgen_exports(src);
+    assert_eq!(
+        exports.iter().map(|e| e.js.as_str()).collect::<Vec<_>>(),
+        vec!["bare"],
+        "an un-attributed method in a `#[wasm_bindgen] impl` is exported and one in a plain \
+         `impl` is not"
+    );
+}
+
+#[test]
+fn a_mention_outside_a_wasm_test_is_not_a_call() {
+    // Each of these is how the pre-`test-wasm` crate would have looked to a
+    // laxer reader: the export appears in the file, and nothing runs it.
+    let export = Export {
+        rust: "slugs_json".to_owned(),
+        js: "slugsJson".to_owned(),
+        owner: None,
+        constructor: false,
+    };
+    let harness = concat!(
+        "#[test]\n",
+        "fn a_plain_test_the_wasm_runner_never_collects() {\n",
+        "    slugs_json();\n",
+        "}\n",
+        "\n",
+        "#[wasm_bindgen_test]\n",
+        "fn only_talks_about_it() {\n",
+        "    // slugs_json() is what the completion menu reads.\n",
+        "    assert!(true);\n",
+        "}\n",
+    );
+    assert!(!reached(&wasm_test_bodies(harness), &export));
+
+    let calling = concat!(
+        "#[wasm_bindgen_test]\n",
+        "fn calls_it() {\n",
+        "    assert!(!slugs_json().is_empty());\n",
+        "}\n",
+    );
+    assert!(reached(&wasm_test_bodies(calling), &export));
+}
+
+#[test]
+fn a_constructor_is_not_reached_by_somebody_elses_new() {
+    let export = Export {
+        rust: "new".to_owned(),
+        js: "new".to_owned(),
+        owner: Some("AozoraDocument".to_owned()),
+        constructor: true,
+    };
+    assert!(!reached("    let v: Vec<u8> = Vec::new();\n", &export));
+    assert!(reached(
+        "    let doc = AozoraDocument::new(src);\n",
+        &export
+    ));
+
+    // A method is reached through a receiver, not by the bare name.
+    let method = Export {
+        rust: "pairs_json".to_owned(),
+        js: "pairsJson".to_owned(),
+        owner: Some("AozoraDocument".to_owned()),
+        constructor: false,
+    };
+    assert!(!reached("    let pairs_json = 1;\n", &method));
+    assert!(reached("    let out = doc.pairs_json();\n", &method));
+}
+
+#[test]
+fn a_free_function_is_not_matched_inside_a_longer_name() {
+    let export = Export {
+        rust: "render".to_owned(),
+        js: "render".to_owned(),
+        owner: None,
+        constructor: false,
+    };
+    assert!(!reached(
+        "    let b = render_blocks(SOURCE, None);\n",
+        &export
+    ));
+    assert!(!reached("    let b = pre_render(SOURCE);\n", &export));
+    assert!(reached("    let r = render(SOURCE, None);\n", &export));
 }
