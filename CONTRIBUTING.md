@@ -33,6 +33,13 @@ automatically.
    `uses:` on a 40-hex commit rather than a mutable tag above all — live in
    [`zizmor.yml`](zizmor.yml), and `just zizmor` / `just actionlint` are
    gates. The `# vX.Y.Z` beside a ref is a comment for humans and Dependabot.
+8. **A gate is declared once.** `[group('gate')]` on a `Justfile` recipe is
+   the whole declaration: `just gates` prints the set, `ci.yml` builds its job
+   matrix from it, and `just ci` refuses to start when its own lanes disagree.
+   Adding a check means adding the attribute and a lane — never a job in the
+   workflow. The two `[group('native')]` gates (`msrv`, `commitlint`) keep a
+   dedicated CI job because they need a toolchain or a commit range the dev
+   image has not got, and they run the same recipe there.
 
 ## Setup and the development loop
 
@@ -41,6 +48,7 @@ just setup                     # build the dev image, install hooks, run tests
 just watch                     # bacon watcher inside the container
 just lint                      # fmt + clippy + typos + strict-code + comments + workflows
 just test                      # full workspace nextest
+just gates                     # the gate manifest, as CI reads it
 just ci                        # exactly the gate CI runs
 ```
 

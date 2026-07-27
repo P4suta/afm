@@ -13,6 +13,12 @@ set dotenv-load := false
 # Codespace — it is "1", so recipes run the tool DIRECTLY rather than nesting a
 # second container (there is no Docker daemon in there). One Justfile, both
 # worlds; no docker-in-docker.
+#
+# ci.yml's two `[group('native')]` jobs set it by hand on a bare runner, which
+# is the same instruction — resolve the tool where you are — asked of the one
+# place where "where you are" is deliberately not the dev image. It is what
+# lets those jobs run the same recipe `just ci` does instead of a second copy
+# of the command.
 _in := env_var_or_default("AOZORA_MD_IN_CONTAINER", "0")
 
 # Default run prefix for the interactive dev container (TTY attached)
@@ -64,12 +70,14 @@ check:
     {{_dev}} cargo check --locked --workspace --all-targets
 
 # Build all workspace crates
+[group('gate')]
 [group('build')]
 build:
     {{_dev}} cargo build --locked --workspace --all-targets
 
 # Build rustdoc for every crate — the only gate that runs the
 # `broken_intra_doc_links = "deny"` rustdoc lint (check / clippy skip it).
+[group('gate')]
 [group('build')]
 doc:
     {{_dev}} cargo doc --locked --workspace --no-deps --document-private-items
@@ -92,11 +100,13 @@ run *ARGS:
 # --- tests --------------------------------------------------------------------
 
 # Run the full test suite (unit + integration + snapshot)
+[group('gate')]
 [group('test')]
 test *ARGS:
     {{_dev}} cargo nextest run --locked --workspace --all-targets {{ARGS}}
 
 # Run doctests (nextest skips these by design)
+[group('gate')]
 [group('test')]
 test-doc:
     {{_dev}} cargo test --locked --workspace --doc
@@ -120,6 +130,7 @@ snapshot-accept:
 # `options_surface_contract` is named alongside the glob because it carries
 # the one property quantified over the whole Options space; the rest of that
 # binary is deterministic and costs milliseconds.
+[group('gate')]
 [group('test')]
 prop:
     {{_dev}} cargo nextest run --locked --workspace --all-features --test 'property_*' --test options_surface_contract --run-ignored default
@@ -147,6 +158,7 @@ invariants:
 # CommonMark 0.31.2 (652 cases, pass = 652/652) + GFM extension compliance.
 # A `#[cfg(test)] mod` of the library, not an integration test: the spec's
 # expected output needs raw-HTML passthrough, which has no public switch.
+[group('gate')]
 [group('test')]
 spec:
     {{_dev}} cargo nextest run --locked --package aozora-flavored-markdown --lib -E 'test(conformance::)'
@@ -353,6 +365,7 @@ samply-render REPEAT="200":
 _COV_FLOOR := "97"
 _COV_IGNORE := "(target/|/main\\.rs$|xtask/|aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/|aozora-flavored-markdown-epub/src/(compose|package)\\.rs)"
 
+[group('gate')]
 [group('coverage')]
 coverage:
     {{_dev}} cargo llvm-cov nextest \
@@ -395,6 +408,7 @@ lint: fmt-check clippy typos strict-code comment-discipline zizmor actionlint
 # catches the same drift in *code*; comments rot silently, so they get their
 # own gate. The banned list lives in `crates/xtask/src/main.rs`
 # (RETIRED_UPSTREAM_PATHS).
+[group('gate')]
 [group('lint')]
 comment-discipline:
     {{_dev}} cargo run --locked --package xtask --quiet -- comment-discipline
@@ -403,6 +417,7 @@ comment-discipline:
 # own crates. Every check is defensive — each represents a pattern we have
 # decided IS a bug-source and want rejected at the gate rather than fought
 # later in code review.
+[group('gate')]
 [group('lint')]
 strict-code:
     #!/usr/bin/env bash
@@ -592,6 +607,7 @@ strict-code:
     echo "strict-code: clean (expect-count $expect_count / baseline $expect_baseline)"
 
 # Format check (no-write)
+[group('gate')]
 [group('lint')]
 fmt-check:
     {{_dev}} cargo fmt --all -- --check
@@ -604,11 +620,13 @@ fmt:
 # Clippy. Lint groups and carve-outs live entirely in `[workspace.lints]`;
 # passing `-W clippy::<group>` here would override the per-lint allow carve-outs,
 # so keep the CLI surface to `-D warnings` only.
+[group('gate')]
 [group('lint')]
 clippy:
     {{_dev}} cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 # Typo check
+[group('gate')]
 [group('lint')]
 typos:
     {{_dev}} typos
@@ -630,6 +648,7 @@ typos:
 # and use share one container because `docker compose run --rm` keeps nothing.
 # The version is read back out of the Dockerfile ARG that pins it, so the
 # bridge cannot install a build the image would not have had.
+[group('gate')]
 [group('lint')]
 zizmor:
     #!/usr/bin/env bash
@@ -650,6 +669,7 @@ zizmor:
 # gate mean one thing in the dev image (which ships neither) and another in a
 # shell that happens to have them. Same Dockerfile-pinned bootstrap as
 # `just zizmor` above, for the same one merge.
+[group('gate')]
 [group('lint')]
 actionlint:
     #!/usr/bin/env bash
@@ -663,6 +683,7 @@ actionlint:
 # Assert tool-version pins agree across files: bun (Dockerfile /
 # playground/package.json / docs.yml) and wasm-pack (Dockerfile / docs.yml).
 # Fails if any pair disagrees.
+[group('gate')]
 [group('lint')]
 verify-version-pins:
     #!/usr/bin/env bash
@@ -729,6 +750,7 @@ verify-version-pins:
     fi
 
 # Dependency linting (licenses, advisories, bans)
+[group('gate')]
 [group('lint')]
 deny:
     {{_dev}} cargo deny --locked check
@@ -745,6 +767,7 @@ deny:
 # one merge, so the gate binstalls the tool into the pulled image until the
 # image republishes. A local dev image already ships it, so the bootstrap is
 # a no-op there.
+[group('gate')]
 [group('lint')]
 shear:
     {{_dev}} bash -c 'command -v cargo-shear >/dev/null 2>&1 \
@@ -754,11 +777,13 @@ shear:
 # comrak resolves from the registry like every other dependency (ADR-0024),
 # so the lockfile graph is the whole graph — no shim needed to reach it.
 # RustSec advisory scan over `Cargo.lock`.
+[group('gate')]
 [group('lint')]
 audit:
     {{_dev}} cargo audit
 
 # Unused dependency scan (requires nightly)
+[group('gate')]
 [group('lint')]
 udeps:
     {{_fuzz}} cargo +nightly udeps --locked --workspace --all-targets
@@ -825,6 +850,7 @@ dist-assets:
 
 # Drift gate: fail if the committed dist assets differ from fresh generation.
 # Wired into `just ci` (mirrors `types-check`); run `just dist-assets` to fix.
+[group('gate')]
 [group('release')]
 dist-assets-check:
     {{_dev}} cargo build --locked --package aozora-flavored-markdown-cli --quiet
@@ -899,6 +925,7 @@ playground-dev-fast: wasm-build-dev
 
 # Production build → playground/dist/ (consumed by .github/workflows/docs.yml)
 # Also runs inside `playground` service to share the `node_modules` volume.
+[group('gate')]
 [group('playground')]
 playground-build: playground-install
     {{_pg_install}} bash -c 'bun run build'
@@ -908,32 +935,104 @@ playground-build: playground-install
 playground-serve: playground-build
     {{_pg}} bash -c 'bun run preview -- --host 0.0.0.0 --port 5173'
 
+# --- native gates -------------------------------------------------------------
+#
+# Two gates cannot be answered from inside the dev image, and both are tagged
+# `[group('native')]` on top of `[group('gate')]` so ci.yml gives them a
+# hand-written job instead of a matrix leg. What they are NOT is a second
+# definition: the job runs this recipe, with `AOZORA_MD_IN_CONTAINER=1` set so
+# the `_in` switch at the top of this file resolves the tool directly rather
+# than nesting it in `docker compose run` — which is exactly right there, since
+# the point of both jobs is the tool the runner installed natively.
+#
+# Run from a laptop the same recipes go through the dev image, where they still
+# mean something: the image pins the MSRV toolchain, and the commit range just
+# defaults to the local branch instead of the PR's.
+
+# MSRV gate: the pinned minimum still compiles the whole workspace.
+#
+# `rust-toolchain.toml` pins 1.96.0, so inside the dev image this is `just
+# check` by another name. Its value is on the CI side, where the job installs
+# a clean 1.96.0 with no dev-image layer under it and this recipe is what
+# proves the declared minimum builds against it.
+[group('gate')]
+[group('native')]
+msrv:
+    {{_dev}} cargo check --locked --workspace --all-targets
+
+# Conventional-Commits gate over a commit range (`committed`, config in
+# `committed.toml`). CI passes the PR's base..head; the default covers the
+# local branch, which is the same question asked before the PR exists.
+#
+# No self-bootstrap, unlike `just shear`: that bridge exists because CI runs
+# shear inside the published dev image, which lags a Dockerfile tool addition
+# by one merge. This gate's CI job installs `committed` on the runner and never
+# enters the image, so the only reader of the Dockerfile copy is a laptop —
+# where a non-root container cannot write /usr/local and `--rm` would discard
+# the download anyway. So: say what is missing, and rebuild.
+[group('gate')]
+[group('native')]
+commitlint RANGE="origin/main..HEAD":
+    {{_dev}} bash -c 'command -v committed >/dev/null 2>&1 || { \
+        echo "commitlint: no committed in the dev image — docker compose build dev" >&2; \
+        exit 1; }; \
+        committed --no-merge-commit "{{RANGE}}"'
+
 # --- aggregate ----------------------------------------------------------------
 
+# The gate manifest: every recipe tagged `[group('gate')]`, one per line,
+# sorted. This is the ONE list of what a gate is. `just ci` asserts its own
+# lanes against it before running anything and ci.yml generates its job matrix
+# from the same command, so tagging a recipe adds it to both and there is no
+# second list to keep in step. Pass a GROUP to ask a narrower question —
+# `just gates native` is what ci.yml subtracts to get its matrix.
+#
+# `--list --group` rather than `--dump --dump-format json`: both read the same
+# attribute (verified identical on the Dockerfile-pinned just and on latest),
+# but the JSON form needs a JSON parser and neither the dev image nor a bare
+# host is guaranteed to ship one. This form needs awk, so the manifest reads
+# the same on a laptop, in the container and on a runner.
+[group('meta')]
+gates GROUP="gate":
+    @just --list --group {{GROUP}} --list-heading '' --list-prefix '' \
+        | awk '/^\[/ { next } NF { print $1 }' \
+        | sort
+
 # Local CI replica — every gate the workflow runs, slow non-compile gates overlapped to cut wall-clock.
-[group('gates')]
+[group('aggregate')]
 ci:
     #!/usr/bin/env bash
     set -uo pipefail
 
     # Why this shape (no gate is weakened vs. the old sequential loop):
-    #   * The compile gates (clippy/build/test/prop/spec/doc/coverage/udeps) all
-    #     share ONE cargo target dir, so they contend on its build lock and
+    #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/coverage/udeps)
+    #     all share ONE cargo target dir, so they contend on its build lock and
     #     CANNOT truly run in parallel — they stay sequential, ordered
-    #     cheap-to-expensive so a failure surfaces fast.
+    #     cheap-to-expensive so a failure surfaces fast. `msrv` leads: inside the
+    #     dev image it is a bare `cargo check`, so it is also the cheapest
+    #     possible "does it still compile".
     #   * deny / shear / audit invoke NO rustc and take no build lock (and
     #     spawn no sccache server, so no multi-server churn on the shared cache),
     #     so a BACKGROUND lane overlaps them onto the compile lane for free.
-    #   * `check` is dropped: clippy + build both compile --all-targets, so the
-    #     bare `cargo check` pass was redundant. The gates `lint` bundles
+    #   * `check` is not a gate and is not run here: clippy + build both compile
+    #     --all-targets, so a bare `cargo check` pass adds no coverage. ci.yml
+    #     still runs it, as the fast precondition the gate matrix waits on —
+    #     scheduling, not a gate. The gates `lint` bundles
     #     (fmt-check/typos/strict-code/comment-discipline/zizmor/actionlint) run
     #     once on their own instead of a second time inside `lint`; only
     #     `clippy` is left to run from `lint`.
     #   * playground-build (wasm-pack + the in-repo playground's tsc/vite) runs
     #     LAST in the foreground lane: wasm-pack invokes rustc and shares the
-    #     target dir. It mirrors CI's `wasm-build` job, so a wasm / IR /
-    #     diagnostic type change can no longer pass `just ci` while silently
-    #     breaking the playground's TypeScript — `just ci` is a superset of CI.
+    #     target dir, and it pulls `wasm-build` in as a dependency — so a wasm /
+    #     IR / diagnostic type change can no longer pass `just ci` while
+    #     silently breaking the playground's TypeScript.
+    #
+    # `nektos/act` — running ci.yml itself locally — was considered for this and
+    # rejected. Every recipe reaches its tool through `docker compose run`, so a
+    # workflow replayed inside act's own container needs a Docker daemon in
+    # there: docker-in-docker, which is the arrangement ADR-0002 exists to
+    # avoid. The manifest assert below buys the property act would have bought
+    # (local run and CI run the same set) without the nesting.
 
     pipeline_start=$(date +%s)
     rc=0
@@ -949,6 +1048,35 @@ ci:
     # log and only replayed on failure so the terminal stays readable.
     # (shear is syn-based, so it takes no cargo build lock either.)
     bg_steps=(deny shear audit)
+
+    # --- foreground lane: instant text gates first (fail-fast in seconds),
+    # --- then the compile pipeline (sequential — shared target dir). ---------
+    fg_steps=(typos fmt-check strict-code verify-version-pins \
+              zizmor actionlint comment-discipline commitlint \
+              msrv clippy build dist-assets-check \
+              test test-doc prop spec doc coverage udeps \
+              playground-build)
+
+    # --- manifest assert: these two lanes ARE the gate set -------------------
+    # "`just ci` is a superset of CI" used to be a sentence, and a sentence is
+    # a claim nothing evaluates — it was false for months (msrv and commitlint
+    # ran only in CI, prop only here). `[group('gate')]` is now the single
+    # declaration; `just gates` reads it, ci.yml builds its matrix from the same
+    # command, and the lanes above have to equal it or nothing runs. A gate
+    # added to the Justfile and forgotten here fails in the first second.
+    manifest=$(just gates)
+    declared=$(printf '%s\n' "${bg_steps[@]}" "${fg_steps[@]}" | sort)
+    if [[ "$manifest" != "$declared" ]]; then
+        printf '\033[1;31m%s\033[0m\n' "just ci: lanes disagree with [group('gate')]" >&2
+        printf '  tagged gate, not run here: %s\n' \
+            "$(comm -23 <(printf '%s\n' "$manifest") <(printf '%s\n' "$declared") | tr '\n' ' ')" >&2
+        printf '  run here, not tagged gate: %s\n' \
+            "$(comm -13 <(printf '%s\n' "$manifest") <(printf '%s\n' "$declared") | tr '\n' ' ')" >&2
+        printf '  Fix the lane list above, or the attribute on the recipe.\n' >&2
+        rm -rf "$bg_dir"
+        exit 1
+    fi
+
     declare -A bg_pid
     for step in "${bg_steps[@]}"; do
         # Each job records its own (exit-code, duration) so the reap below can
@@ -961,13 +1089,6 @@ ci:
     printf '\033[1;36m[%s] ⟳ background (concurrent): %s\033[0m\n' \
         "$(date +%T)" "${bg_steps[*]}"
 
-    # --- foreground lane: instant text gates first (fail-fast in seconds),
-    # --- then the compile pipeline (sequential — shared target dir). ---------
-    fg_steps=(typos fmt-check strict-code verify-version-pins \
-              zizmor actionlint comment-discipline clippy \
-              build dist-assets-check \
-              test test-doc prop spec doc coverage udeps \
-              playground-build)
     halted=""
     for step in "${fg_steps[@]}"; do
         start=$(date +%s)

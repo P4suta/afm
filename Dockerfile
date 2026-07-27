@@ -102,6 +102,12 @@ RUN cargo binstall --no-confirm --locked --root /usr/local git-cliff
 # busts the cache for the heavier tool tiers above.
 RUN cargo binstall --no-confirm --locked --root /usr/local cargo-shear
 
+# committed — Conventional-Commits linter behind `just commitlint`. That gate
+# ran only inside CI until the gate list became one manifest; running it from
+# `just ci` means the tool has to exist in the image too. Same late-layer
+# placement as cargo-shear above, for the same cache reason.
+RUN cargo binstall --no-confirm --locked --root /usr/local committed
+
 # zizmor — GitHub Actions static analysis (`just zizmor`). Ships a prebuilt
 # release archive, so no cargo layer is spent on it. This is the tool that
 # holds the repo's action-pinning policy; the policy itself is `zizmor.yml`.

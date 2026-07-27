@@ -357,7 +357,10 @@ const RESOLUTION_FLOOR: &[(&str, usize)] = &[
     ("Justfile", 30),
     ("bacon.toml", 3),
     ("Dockerfile", 8),
-    (".github/workflows/ci.yml", 1),
+    // ci.yml is absent on purpose: it no longer spells a cargo call at all.
+    // Its one bare `cargo check` was the msrv job's, and that job now runs
+    // `just msrv` — the same recipe `just ci` runs — so the flag it needs is
+    // the Justfile's, where the floor above already covers it.
     (".github/workflows/docs.yml", 3),
     (".github/workflows/publish-crates.yml", 2),
 ];
