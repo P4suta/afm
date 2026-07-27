@@ -88,12 +88,25 @@ jobs:
       - name: Build playground
         run: cd playground && bun run build
 
+      # `cargo doc` writes no entry page for a workspace of several crates —
+      # the rustdoc flag that would (`--enable-index-page`) is nightly-only and
+      # this repo ships on stable — so `api/` held every crate's directory and
+      # no `index.html` of its own. That is the URL `[workspace.package]
+      # documentation` gives every reader of every published crate, and the one
+      # the site root redirects to below: both were a 404 for as long as the
+      # site has existed. It redirects on to the library the site is about.
+      # `the_documentation_url_this_workspace_advertises_lands_on_the_library`
+      # in `crates/xtask/tests/gate_wiring.rs` walks these hops and fails if one
+      # of them stops landing on a page exactly one documented target writes.
       - name: Assemble site
         run: |
           set -euo pipefail
           mkdir -p site/api site/playground
           cp -r target/doc/. site/api/
           cp -r playground/dist/. site/playground/
+          printf '%s\n' \
+            '<!doctype html><meta http-equiv="refresh" content="0; url=aozora_flavored_markdown/">' \
+            > site/api/index.html
           printf '%s\n' \
             '<!doctype html><meta http-equiv="refresh" content="0; url=api/">' \
             > site/index.html

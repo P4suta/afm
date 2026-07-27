@@ -96,6 +96,27 @@ build:
 # already under a gate instead of being discovered on the published page.
 _DOC_DENY := "-D warnings --cfg docsrs"
 
+# The other warning a doc build can print, and the one `_DOC_DENY` cannot
+# reach. `output filename collision` is CARGO's, not rustdoc's: two targets in
+# one `--workspace` pass resolve to the same `target/doc/<name>/`, so the unit
+# that finishes last overwrites the other and cargo says so and carries on
+# exiting 0. RUSTDOCFLAGS is handed to rustdoc, which never sees this — the
+# `-D warnings` that made the doc recipes gates could not have caught it, and
+# did not: both CLI bins were overwriting their libraries' pages, and the API
+# site `docs.yml` copies out of `target/doc` was serving a CLI page at the
+# library's URL, nondeterministically, for as long as both crates have existed.
+#
+# Cargo has no `-D` of its own for it, so it is read back off the build's own
+# output. Both recipes below `tee` into a log and end with this check, which
+# expects `$log` (that output) and `$rc` (the build's exit status, captured
+# under `pipefail`) in scope — one definition, because a check written twice is
+# a check that gets fixed once.
+#
+# The clash itself is settled in the two CLI manifests (`doc = false` on each
+# `[[bin]]`, with the reasoning); this is the part that fails if a third target
+# ever resolves onto a second one's output path.
+_NO_COLLISION := 'if grep -qF "output filename collision" "$log"; then printf "%s\n" "doc: two targets wrote one rustdoc output path (the collision warning above). The later unit overwrites the earlier, so what lands in target/doc — and on the Pages API site — is whichever finished last. Give the losing target doc = false in its manifest, or rename it." >&2; exit 1; fi; exit $rc'
+
 # Build rustdoc for every crate, private items included — the wider of the two
 # doc gates, and the only one that resolves a link written inside a private
 # item. check / clippy run no rustdoc lint at all.
@@ -106,7 +127,7 @@ _DOC_DENY := "-D warnings --cfg docsrs"
 [group('gate')]
 [group('build')]
 doc:
-    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps --document-private-items'
+    {{_dev}} bash -c 'set -o pipefail; log=$(mktemp); RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps --document-private-items 2>&1 | tee "$log"; rc=$?; {{_NO_COLLISION}}'
 
 # The build docs.rs performs: the public surface, no `--document-private-items`.
 # Not a subset of `doc` — documenting private items also SILENCES
@@ -125,7 +146,7 @@ doc:
 [group('gate')]
 [group('build')]
 doc-public:
-    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps'
+    {{_dev}} bash -c 'set -o pipefail; log=$(mktemp); RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --all-features --no-deps 2>&1 | tee "$log"; rc=$?; {{_NO_COLLISION}}'
 
 # Build release binaries
 [group('build')]

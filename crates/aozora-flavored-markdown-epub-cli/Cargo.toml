@@ -18,7 +18,9 @@ categories    = ["command-line-utilities"]
 [package.metadata.dist]
 dist = false
 
-# Same docs.rs build as the library (see its manifest for why).
+# Same docs.rs build as the library (see its manifest for why), and inert for
+# the same reason as the other CLI's: docs.rs documents no crate without a lib
+# target.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -29,6 +31,12 @@ workspace = true
 [[bin]]
 name = "aozora-flavored-markdown-epub"
 path = "src/main.rs"
+# The same collision as the other CLI, one crate over: this bin and the
+# `aozora-flavored-markdown-epub` library both document into
+# `target/doc/aozora_flavored_markdown_epub/`, so the Pages API site served
+# whichever unit finished last. See that manifest for why `doc = false` rather
+# than a separate output directory.
+doc = false
 
 [dependencies]
 aozora-flavored-markdown-epub = { version = "0.1.0", path = "../aozora-flavored-markdown-epub" }
