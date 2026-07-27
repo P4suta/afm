@@ -29,9 +29,12 @@ automatically.
 5. **No unused dependencies.** `just shear` rejects them. For a macro- or
    `cfg`-only use its `syn` pass cannot see, record a documented
    `[workspace.metadata.cargo-shear] ignored = [...]`.
-6. **Comments earn their place.** `just comment-discipline` fails on doc
-   comments naming retired upstream paths, and on a doc-comment ratio above
-   the pinned ceiling. Write down *why*, not what the code already says.
+6. **Prose earns its place, and it rots like code.** `just vale` fails on a
+   retired upstream path named in a document or a comment — `.vale.ini` says
+   what it reads, [`styles/Aozora/RetiredPaths.yml`](styles/Aozora/RetiredPaths.yml)
+   says what is banned. `just comment-discipline` fails on a line naming a
+   repo path that no longer exists, and on a doc-comment count above the
+   pinned ceiling. Write down *why*, not what the code already says.
 7. **Workflows are linted, not reviewed by eye.** The rules they answer to —
    `uses:` on a 40-hex commit rather than a mutable tag above all — live in
    [`zizmor.yml`](zizmor.yml), and `just zizmor` / `just actionlint` are
@@ -49,7 +52,7 @@ automatically.
 ```sh
 just setup                     # build the dev image, install hooks, run tests
 just watch                     # bacon watcher inside the container
-just lint                      # fmt + clippy + typos + strict-code + comments + workflows
+just lint                      # fmt + clippy + typos + strict-code + comments + prose + workflows
 just test                      # full workspace nextest
 just gates                     # the gate manifest, as CI reads it
 just ci                        # exactly the gate CI runs

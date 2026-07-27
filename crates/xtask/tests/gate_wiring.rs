@@ -808,7 +808,18 @@ fn the_workflow_linters_are_wired_and_not_merely_available() {
     // The failure this file is about, stated as a fact rather than a property:
     // `actionlint` was declared in mise.toml and called nowhere.
     let executed = executed_words(&read("Justfile"), &read("lefthook.yml"));
-    for tool in ["zizmor", "actionlint", "typos", "lefthook", "committed"] {
+    // `vale` joins them for the same reason and with the same exposure: it is
+    // discussed at length in prose two recipes apart, and a `vale` recipe that
+    // stopped running the binary would leave every prose assertion in this
+    // file checking a configuration nothing reads.
+    for tool in [
+        "zizmor",
+        "actionlint",
+        "typos",
+        "lefthook",
+        "committed",
+        "vale",
+    ] {
         assert!(executed.contains(tool), "`{tool}` is invoked nowhere");
     }
 }
@@ -6290,4 +6301,676 @@ fn a_denial_of_a_schedule_is_read_and_a_description_of_one_is_not() {
             "prose describing a schedule was read as denying one: {description}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// the net a prose gate casts
+// ---------------------------------------------------------------------------
+//
+// The fifth way a gate checks nothing, and the one this repo keeps rebuilding:
+// the gate runs, is strict, is asked at the right moment, and reads a list of
+// file kinds that is not the list of file kinds the defect appears in.
+//
+// `comment-discipline` was the case. It existed to catch a retired upstream
+// path written in prose, and its file list was `[("rs", "//"), ("toml", "#")]`
+// — so `UPSTREAM_DIFF.md` described a vendored tree that no longer existed,
+// in full, with every gate green, because no gate in this repo could open a
+// `.md` file. Vale replaces it (DEV-221).
+//
+// A tool swap does not close that by itself. The replacement was first written
+// as `git ls-files -- '*.md' '*.rs' '*.toml'`, which is the same hand-written
+// list of kinds one language over, and it had the same hole in a different
+// place: the first run over every tracked file found a retired crate named in
+// the `Justfile`, a file with no extension for a pathspec to match. The rule
+// itself had the third version of it — Vale's default scope drops what
+// Markdown calls code, and a crate name in a document is written in backticks,
+// so the file kind the gate was added for hid the drift in its usual spelling.
+//
+// So the rules below are about the net rather than the tool: what it is handed,
+// what it looks at inside that, whether what it finds can fail, whether an
+// exemption is wider than the record it was written for, and whether CI ever
+// reaches it on a diff that touches only what it reads.
+
+/// The files `git ls-files` lists for `pathspec`, as repo-relative paths.
+///
+/// Shelling out to git rather than walking: what this repo authors is what git
+/// tracks, and a second definition of that is the thing the gate below exists
+/// to keep from being written.
+fn git_tracked(pathspec: &[String]) -> BTreeSet<String> {
+    let out = Command::new("git")
+        .arg("ls-files")
+        .arg("-z")
+        .args(pathspec)
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("running `git ls-files {pathspec:?}`: {e}"));
+    assert!(
+        out.status.success(),
+        "`git ls-files {pathspec:?}` failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The arguments the `vale` recipe hands `git ls-files`, read off the recipe
+/// itself.
+///
+/// Read rather than assumed, because the whole assertion is about what the
+/// gate reaches: a pathspec added back here has to show up as files the gate
+/// no longer sees, not as a comment nobody compares against anything.
+fn prose_gate_pathspec(justfile: &str) -> Vec<String> {
+    let body = recipe_body(justfile, "vale").join("\n");
+    let at = body
+        .find("git ls-files")
+        .unwrap_or_else(|| panic!("`just vale` no longer lists its files with `git ls-files`"));
+    let rest = &body[at..];
+    let end = rest.find(')').unwrap_or(rest.len());
+    shell_tokens(&rest[..end])
+        .into_iter()
+        .skip_while(|token| token != "ls-files")
+        .skip(1)
+        .filter(|token| token != "-z" && token != "--")
+        .collect()
+}
+
+#[test]
+fn every_file_this_repo_tracks_is_one_the_prose_gate_reads() {
+    // The invariant the replaced scan failed, stated about the net instead of
+    // about the tool. `SCANNED_FILES` was two kinds; `'*.md' '*.rs' '*.toml'`
+    // was three; the answer that does not have to be maintained is "all of
+    // them", because a retired name rots identically in a `Justfile` comment,
+    // a workflow comment, a completion script and a Markdown paragraph, and
+    // nothing about the file's extension makes the sentence more or less true.
+    let justfile = read("Justfile");
+    assert!(
+        recipes_in_group(&justfile, "gate").contains("vale"),
+        "`vale` is not in the gate manifest, so nothing below is a gate at all"
+    );
+
+    let tracked = git_tracked(&[]);
+    assert!(
+        tracked.len() > 1_000,
+        "`git ls-files` came back with {} files; the reader is not seeing the tree",
+        tracked.len()
+    );
+
+    let pathspec = prose_gate_pathspec(&justfile);
+    let reached = git_tracked(&pathspec);
+    let mut missed: Vec<&String> = tracked.difference(&reached).collect();
+    missed.sort();
+    let shown: Vec<&&String> = missed.iter().take(12).collect();
+    assert!(
+        missed.is_empty(),
+        "`just vale` narrows its file list to {pathspec:?}, which leaves {} tracked file(s) \
+         outside every prose gate this repo has, among them {shown:?}.\n\
+         That is the defect the gate replaced, rebuilt: a hand-written list of file kinds is \
+         always shorter than the list of places a sentence can rot. Hand Vale `git ls-files` \
+         with no pathspec.",
+        missed.len()
+    );
+}
+
+/// The banned tokens, read out of the rule file.
+///
+/// Every probe below draws its needle from here rather than spelling one, for
+/// two reasons: this file is itself scanned by the gate, and a rule file
+/// emptied of tokens would otherwise leave every probe passing against a rule
+/// that bans nothing.
+fn retired_tokens() -> Vec<String> {
+    let rule = read("styles/Aozora/RetiredPaths.yml");
+    let mut out = Vec::new();
+    let mut in_tokens = false;
+    for line in rule.lines() {
+        if !line.starts_with([' ', '\t', '-']) {
+            in_tokens = line.trim_end() == "tokens:";
+            continue;
+        }
+        let Some(item) = line.trim().strip_prefix("- ").filter(|_| in_tokens) else {
+            continue;
+        };
+        let token = item.trim();
+        let token = quoted_literal(token, '\'')
+            .or_else(|| quoted_literal(token, '"'))
+            .unwrap_or(token);
+        out.push(token.to_owned());
+    }
+    out
+}
+
+/// A banned name written both ways: hyphenated as a manifest spells it,
+/// underscored as an intra-doc link spells it.
+///
+/// The rule writes the pair as one `[-_]` token, and an intra-doc link to a
+/// crate that has gone away is where this drift actually accumulates, so a
+/// probe that only ever tries one spelling would pass on half a rule.
+fn retired_name_in_both_spellings() -> (String, String) {
+    let token = retired_tokens()
+        .into_iter()
+        .find(|token| token.contains("[-_]"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the rule bans no name whose two spellings differ, so nothing here can check \
+                 that both are banned"
+            )
+        });
+    (token.replace("[-_]", "-"), token.replace("[-_]", "_"))
+}
+
+/// `vale`, or `None` when this image is inside the one-merge window the
+/// recipe's `command -v vale || curl` bridge exists for.
+///
+/// CI runs `just test` inside a published dev image that predates the
+/// Dockerfile adding a tool, so the two probes below cannot insist on the
+/// binary without going red on the merge that installs it. What they can
+/// insist on is that an absence is still that window: the version is pinned
+/// and the recipe knows how to fetch it. Anything measured past this point is
+/// unmeasured for exactly one merge.
+fn vale_or_the_bridge_that_installs_it() -> Option<PathBuf> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let found = env::split_paths(&path)
+        .map(|dir| dir.join("vale"))
+        .find(|candidate| candidate.is_file());
+    if found.is_some() {
+        return found;
+    }
+    assert!(
+        read("Dockerfile").contains("VALE_VERSION="),
+        "vale is neither installed nor pinned in the Dockerfile, so `just vale` runs nothing"
+    );
+    assert!(
+        recipe_body(&read("Justfile"), "vale")
+            .join("\n")
+            .contains("command -v vale"),
+        "vale is not in this image and the recipe carries no way to get it"
+    );
+    None
+}
+
+/// A directory holding this repo's real Vale configuration and nothing else.
+///
+/// The section headers in `.vale.ini` are globs over paths relative to the
+/// config, so a fixture has to sit at a path relative to a config to be read
+/// the way the gate would read it. Copying the config to a scratch root is
+/// what lets `CHANGELOG.md` be probed without writing to the repo's own.
+fn vale_probe_root(label: &str) -> PathBuf {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap_or_else(|e| panic!("creating {}: {e}", to.display()));
+        let entries =
+            fs::read_dir(from).unwrap_or_else(|e| panic!("reading {}: {e}", from.display()));
+        for entry in entries.flatten() {
+            let source = entry.path();
+            let target = to.join(entry.file_name());
+            if source.is_dir() {
+                copy_tree(&source, &target);
+            } else {
+                fs::copy(&source, &target)
+                    .unwrap_or_else(|e| panic!("copying {}: {e}", source.display()));
+            }
+        }
+    }
+
+    let root = scratch(label);
+    let config = root.join(".vale.ini");
+    fs::write(&config, read(".vale.ini"))
+        .unwrap_or_else(|e| panic!("writing {}: {e}", config.display()));
+    copy_tree(&repo_root().join("styles"), &root.join("styles"));
+    root
+}
+
+/// Run the repo's Vale configuration over one fixture written at `relative`,
+/// and report whether the gate would fail on it.
+fn vale_rejects(vale: &Path, root: &Path, relative: &str, content: &str) -> bool {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| panic!("creating {}: {e}", parent.display()));
+    }
+    fs::write(&path, content).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    let out = Command::new(vale)
+        .arg("--output=line")
+        .arg(relative)
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|e| panic!("running vale on {relative}: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.trim().is_empty(),
+        "vale could not read {relative}, so its verdict means nothing:\n{stderr}"
+    );
+    !out.status.success()
+}
+
+#[test]
+fn the_prose_gate_fails_on_a_retired_name_in_a_document() {
+    // The hole the change was made for, measured rather than spelled: a
+    // configuration file saying `.md` is read is not the same claim as Vale
+    // failing on one, and every static assertion in this section would pass on
+    // a rule that never fires.
+    let Some(vale) = vale_or_the_bridge_that_installs_it() else {
+        return;
+    };
+    let (hyphen, underscore) = retired_name_in_both_spellings();
+    let root = vale_probe_root("vale-documents");
+    let rejected = |relative: &str, content: String| vale_rejects(&vale, &root, relative, &content);
+
+    assert!(
+        rejected("README.md", format!("# Title\n\nDelegates to {hyphen}.\n")),
+        "a retired name in a Markdown paragraph is not a finding — the gate has the hole it \
+         replaced"
+    );
+    assert!(
+        rejected(
+            "docs/note.md",
+            format!("# Title\n\nLinks [`{underscore}`].\n")
+        ),
+        "a crate name in backticks is not a finding. That is how a crate name is written in a \
+         Markdown document essentially always, and the underscored spelling is the one an \
+         intra-doc link that outlived its crate uses — so the gate would be blind to its own \
+         subject in the file kind it was added for"
+    );
+    assert!(
+        rejected(
+            "fenced.md",
+            format!("# Title\n\n```rust\nuse {underscore}::thing;\n```\n"),
+        ),
+        "a fenced example is not a finding; an example that cannot compile is exactly the \
+         rotted teaching material this rule is about, and no compiler will ever read it"
+    );
+    assert!(
+        rejected(
+            "Justfile",
+            format!("# Mirrors {hyphen}'s tripwire.\nr:\n    :\n")
+        ),
+        "a comment in a file with no extension is not a finding; it is what the first run over \
+         every tracked file turned up in the real Justfile"
+    );
+    assert!(
+        rejected(
+            ".github/workflows/ci.yml",
+            format!("# was {hyphen}\non: push\n")
+        ),
+        "a workflow comment is not a finding"
+    );
+
+    // The control. Every row above passes on a rule that matches everything,
+    // and a rule that matches everything is what a hurried fix for a false
+    // positive turns this into.
+    assert!(
+        !rejected(
+            "clean.md",
+            "# Title\n\nDelegates to the sibling parser's public API.\n".to_owned(),
+        ),
+        "prose naming nothing retired is a finding, so the rule is not reading its token list"
+    );
+}
+
+#[test]
+fn the_prose_gate_still_fails_on_a_retired_name_in_a_comment() {
+    // The coverage the deleted `scan_comments` tests held, asked of the tool
+    // that replaced them. A move is only lossless if someone checks, and the
+    // 13 unit tests that checked went with the code.
+    let Some(vale) = vale_or_the_bridge_that_installs_it() else {
+        return;
+    };
+    let (hyphen, underscore) = retired_name_in_both_spellings();
+    let root = vale_probe_root("vale-comments");
+    let rejected = |relative: &str, content: String| vale_rejects(&vale, &root, relative, &content);
+
+    assert!(
+        rejected("inner.rs", format!("//! Layers {hyphen} onto comrak.\n")),
+        "an inner doc comment is not a finding"
+    );
+    assert!(
+        rejected(
+            "outer.rs",
+            format!("    /// Delegates to [`{underscore}`].\n")
+        ),
+        "an outer doc comment is not a finding"
+    );
+    assert!(
+        rejected("trailing.rs", format!("fn f() {{}} // was {hyphen}\n")),
+        "a comment trailing code is not a finding, and that is where a rule records the reason \
+         it is set the way it is"
+    );
+    assert!(
+        rejected("probe.toml", format!("# a note about {hyphen}\n")),
+        "a manifest comment is not a finding"
+    );
+
+    // `scope: raw` is what buys the Markdown rows in the probe above, and this
+    // is the rest of what it buys. The deleted scanner left all of it alone on
+    // the grounds that code which stops compiling is the compiler's business —
+    // true of an `use` line, and of neither of these.
+    assert!(
+        rejected(
+            "code.rs",
+            format!("fn f() {{\n    let s = \"{hyphen}\";\n    // was {underscore}\n}}\n"),
+        ),
+        "a retired name in a string literal is not a finding, and no compiler is going to \
+         object to it either"
+    );
+}
+
+/// The globs `.vale.ini` switches the retired-path rule off for.
+fn prose_gate_exemptions(config: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut section: Option<&str> = None;
+    for line in config.lines() {
+        let body = line.split('#').next().unwrap_or(line).trim();
+        if let Some(header) = body.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            section = Some(header);
+            continue;
+        }
+        let Some((key, value)) = body.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "Aozora.RetiredPaths" || !value.trim().eq_ignore_ascii_case("NO") {
+            continue;
+        }
+        out.push(
+            section
+                .unwrap_or_else(|| panic!("`{body}` sits under no section"))
+                .to_owned(),
+        );
+    }
+    out
+}
+
+/// The paths `crates/xtask/src/main.rs` calls records rather than drift.
+fn history_paths() -> Vec<String> {
+    let source = read("crates/xtask/src/main.rs");
+    let line = source
+        .lines()
+        .find(|line| line.starts_with("const HISTORY_PATHS"))
+        .unwrap_or_else(|| panic!("`HISTORY_PATHS` is gone; the path gate excuses nothing now"));
+    // The last `[` on the line, not the first: `&[&str]` is the type and
+    // `&[...]` is the value, and a reader that stopped at the type would read
+    // the exemption list as empty and pass on anything.
+    let Some((items, _)) = line
+        .rsplit_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+    else {
+        panic!("`HISTORY_PATHS` is not a list any more: {line}")
+    };
+    quoted_items(items)
+}
+
+#[test]
+fn the_documents_the_prose_gate_excuses_are_the_ones_the_path_gate_excuses() {
+    // Two exemption lists, in two languages, written for one reason: a dated
+    // document names what was removed, and rewriting it to keep a lint quiet
+    // would delete the account of the decision. Nothing compares them, and an
+    // exemption is the cheapest possible way to make a gate green — a
+    // `docs/**` where `docs/adr/*` was meant takes the index and every future
+    // design note out of the gate, and every other assertion here still
+    // passes.
+    let config = read(".vale.ini");
+    let exemptions = prose_gate_exemptions(&config);
+    assert!(
+        !exemptions.is_empty(),
+        "`.vale.ini` excuses nothing, so `CHANGELOG.md` cannot say what was removed"
+    );
+
+    // The rule file spells every token it bans, so it cannot be held to its
+    // own rule; `RETIRED_PATH_LIST_FILE` is the same exclusion on the same
+    // grounds. It is accounted for here and compared as a record nowhere.
+    let styles: BTreeSet<String> = git_tracked(&["styles".to_owned()]);
+    let excused: BTreeSet<String> = git_tracked(&[])
+        .into_iter()
+        .filter(|path| {
+            exemptions
+                .iter()
+                .any(|glob| glob_to_regex(glob).is_match(path))
+        })
+        .filter(|path| !styles.contains(path))
+        .collect();
+
+    let records: BTreeSet<String> = git_tracked(&[])
+        .into_iter()
+        .filter(|path| {
+            history_paths()
+                .iter()
+                .any(|history| path == history || path.starts_with(&format!("{history}/")))
+        })
+        .collect();
+
+    assert!(
+        records.len() > 5,
+        "`HISTORY_PATHS` came out covering {records:?}; the reader is not finding the records"
+    );
+    assert_eq!(
+        excused, records,
+        "`.vale.ini` and `HISTORY_PATHS` in `crates/xtask/src/main.rs` excuse different \
+         documents. The two gates split one question — a retired name in a record is not drift \
+         — so a document either is a record for both of them or is drift for both of them."
+    );
+}
+
+/// Vale's alert levels, weakest first. A rule reported below `MinAlertLevel`
+/// is a rule the run does not fail on.
+const ALERT_LEVELS: &[&str] = &["suggestion", "warning", "error"];
+
+fn alert_rank(level: &str) -> usize {
+    ALERT_LEVELS
+        .iter()
+        .position(|known| *known == level)
+        .unwrap_or_else(|| panic!("`{level}` is not a Vale alert level"))
+}
+
+/// The `key = value` on a line of an INI file outside any section.
+fn ini_preamble_value(config: &str, key: &str) -> Option<String> {
+    for line in config.lines() {
+        let body = line.split('#').next().unwrap_or(line).trim();
+        if body.starts_with('[') {
+            return None;
+        }
+        if let Some((name, value)) = body.split_once('=')
+            && name.trim() == key
+        {
+            return Some(value.trim().to_owned());
+        }
+    }
+    None
+}
+
+#[test]
+fn the_prose_rule_is_written_at_a_level_that_makes_the_gate_exit_non_zero() {
+    // The `doc` gate's defect, in the file where it is one edit away: Vale
+    // exits 0 when every alert it raised is below `MinAlertLevel`. A rule
+    // demoted to `warning` still prints, still looks like a gate in the log,
+    // and fails nothing — and the demotion is exactly what a hurried fix for a
+    // false positive looks like. `just vale` would go on passing, and so would
+    // every assertion above, which all ask what Vale reads and none of which
+    // asks what Vale does about it.
+    let config = read(".vale.ini");
+    let floor = ini_preamble_value(&config, "MinAlertLevel")
+        .unwrap_or_else(|| panic!("`.vale.ini` sets no `MinAlertLevel`"));
+
+    let dir = repo_root().join("styles").join("Aozora");
+    let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+    let mut rules = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let rule =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let Some(declared) = rule.lines().find_map(|line| line.strip_prefix("level:")) else {
+            panic!("{} declares no `level:`", path.display())
+        };
+        let level = declared.trim();
+        rules += 1;
+        assert!(
+            alert_rank(level) >= alert_rank(&floor),
+            "{} reports at `{level}`, which is under this configuration's `MinAlertLevel = \
+             {floor}`. Vale prints the alert and exits 0, so `just vale` passes on the finding \
+             it was written to make.",
+            path.display()
+        );
+    }
+    assert!(rules > 0, "there is no rule in `styles/Aozora` to run");
+}
+
+/// The globs the `changes` job classifies a diff with. A skipped `rust` means
+/// no gate in the matrix runs at all.
+fn change_filter_globs(workflow: &str) -> Vec<String> {
+    let lines = job_lines(workflow, "changes")
+        .unwrap_or_else(|| panic!("ci.yml has no `changes` job to read"));
+    let mut out = Vec::new();
+    let mut in_rust = false;
+    for line in lines {
+        let body = line.trim();
+        if let Some(glob) = body.strip_prefix("- ") {
+            let glob = glob.trim();
+            if let Some(literal) = quoted_literal(glob, '\'').filter(|_| in_rust) {
+                out.push(literal.to_owned());
+            }
+            continue;
+        }
+        if body.ends_with(':') {
+            in_rust = body == "rust:";
+        }
+    }
+    out
+}
+
+#[test]
+fn the_change_filter_watches_the_files_the_prose_gate_was_added_to_read() {
+    // A gate that cannot be reached is a gate that does not exist, and this
+    // filter is the only thing in the repo that can decide a gate is not
+    // reached. It classified a Markdown-only diff as "not rust" and skipped
+    // the whole matrix — so the gate added because no gate could open a `.md`
+    // file would not have run on a change to one. `just ci` would have been
+    // green locally for a reason CI never checked.
+    //
+    // The filter was already wrong before Vale: `typos` and
+    // `comment-discipline` both read `.md`, and a docs-only diff skipped both.
+    let workflow = read(".github/workflows/ci.yml");
+    let globs = change_filter_globs(&workflow);
+    assert!(
+        globs.len() > 5,
+        "the `changes` filter came out as {globs:?}; the reader is not finding it"
+    );
+    let watched = |path: &str| globs.iter().any(|glob| glob_to_regex(glob).is_match(path));
+
+    // The policy: what the gate bans, and what says which files it reads.
+    for policy in [".vale.ini", "styles/Aozora/RetiredPaths.yml"] {
+        assert!(
+            watched(policy),
+            "a change to `{policy}` does not set the `rust` filter, so editing the prose gate's \
+             own policy skips every gate — the rule `zizmor.yml` is in the filter for."
+        );
+    }
+
+    // And the documents, which is the part no other entry covers.
+    let mut unwatched: Vec<String> = git_tracked(&["*.md".to_owned()])
+        .into_iter()
+        .filter(|path| !watched(path))
+        .collect();
+    unwatched.sort();
+    assert!(
+        unwatched.is_empty(),
+        "a change to these Markdown files skips the entire gate matrix: {unwatched:?}\n\
+         `just vale`, `just typos` and `just comment-discipline` all read them, so all three \
+         can fail on a diff CI never runs them over."
+    );
+}
+
+/// Tracked paths the `changes` filter does not watch, each with the gate that
+/// reads it anyway.
+///
+/// Every row is a live hole, not an exemption: a diff touching only these
+/// files skips the whole gate matrix, and the gate named beside it is one
+/// `just ci` would fail on locally. They are pinned so the set cannot grow
+/// while nobody is looking, and so removing one is a visible edit rather than
+/// an accident.
+const UNWATCHED_BY_THE_CHANGE_FILTER: &[(&str, &str)] = &[
+    (
+        "spec/**",
+        "`just spec` reads the conformance sources and the expectation JSON",
+    ),
+    (
+        "dist/**",
+        "`just dist-assets-check` regenerates the completions and man page and diffs them",
+    ),
+    (
+        "{_typos,bacon,cliff,committed,dist-workspace,mise}.toml",
+        "a gate's own configuration: `just typos` reads one of these, `just commitlint` another",
+    ),
+    (
+        "lefthook.yml",
+        "the hook manifest `gate_wiring` reads to decide a tool is executed",
+    ),
+    (
+        ".config/**",
+        "the second half of the mise declaration `just setup` installs from",
+    ),
+    ("bin/**", "the wrappers a contributor runs the CLI through"),
+    (
+        ".devcontainer/**",
+        "the container definition ADR-0002 makes the only place code runs",
+    ),
+    (
+        "{.editorconfig,.gitattributes,.gitignore,LICENSE-APACHE,LICENSE-MIT,NOTICE}",
+        "read by `just vale` and by `comment-discipline`'s repo-path scan, which was written \
+         for `.gitattributes` and CODEOWNERS in the first place",
+    ),
+];
+
+#[test]
+fn the_files_a_diff_can_hide_behind_are_the_ones_measured_here() {
+    // The debt the rule above stops short of. Widening the filter to `.md`
+    // fixed the file kind Vale was added for and left the shape intact: three
+    // gates read every tracked file, and the filter watches a hand-written
+    // subset of them, so there is still a diff that skips every gate in the
+    // repo. The sharpest of them is `.gitattributes` — `comment-discipline`'s
+    // repo-path scan exists *because* a retired path survived there, and a
+    // change to it skips the matrix that runs the scan.
+    //
+    // Pinned rather than fixed: the correct filter for three whole-worktree
+    // gates is one that never skips, and deleting change-gating is a decision
+    // about CI cost rather than a test's to make. What this holds is the
+    // direction — the set below may shrink, and may not grow.
+    let workflow = read(".github/workflows/ci.yml");
+    let globs = change_filter_globs(&workflow);
+    let unwatched: BTreeSet<String> = git_tracked(&[])
+        .into_iter()
+        .filter(|path| !globs.iter().any(|glob| glob_to_regex(glob).is_match(path)))
+        .collect();
+
+    let known: Vec<Regex> = UNWATCHED_BY_THE_CHANGE_FILTER
+        .iter()
+        .map(|(glob, _)| glob_to_regex(glob))
+        .collect();
+    let mut fresh: Vec<&String> = unwatched
+        .iter()
+        .filter(|path| !known.iter().any(|known| known.is_match(path)))
+        .collect();
+    fresh.sort();
+    assert!(
+        fresh.is_empty(),
+        "these tracked files joined the set a diff can hide behind: {fresh:?}\n\
+         A change to one of them skips the entire gate matrix while `just ci` still reads it. \
+         Add the path to ci.yml's `changes` filter, or to UNWATCHED_BY_THE_CHANGE_FILTER with \
+         the gate that reads it."
+    );
+
+    let dead: Vec<&str> = UNWATCHED_BY_THE_CHANGE_FILTER
+        .iter()
+        .map(|(glob, _)| *glob)
+        .filter(|glob| {
+            let pattern = glob_to_regex(glob);
+            !unwatched.iter().any(|path| pattern.is_match(path))
+        })
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "these are recorded as unwatched and are not: {dead:?}\n\
+         The filter caught up with them; drop the row so the list stays the measurement it \
+         claims to be."
+    );
 }

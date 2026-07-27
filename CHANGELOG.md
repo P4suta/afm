@@ -117,6 +117,21 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Changed
 
+- **Retired upstream paths are gated in prose, by Vale.** `just vale` is a
+  gate; `.vale.ini` says what it reads and `styles/Aozora/RetiredPaths.yml`
+  holds the banned names. It replaces the `.rs` + `.toml` comment scan inside
+  `cargo xtask comment-discipline`, whose file list could not open a Markdown
+  document at all — so `UPSTREAM_DIFF.md` went stale in full with every gate
+  green. The gate is handed every file git tracks, with no pathspec and no
+  list of file kinds, because a list of file kinds is what the replaced scan
+  got wrong; the first full-tree run found a retired crate named in the
+  `Justfile`, which has no extension to match. The rule reads raw markup for
+  the same reason: a crate name in a document is written in backticks, which
+  is what a prose linter skips by default. `CHANGELOG.md` and `docs/adr/` are
+  exempt, history being a record rather than drift. What stayed in xtask is
+  what a prose linter cannot answer: the retired *repo* path scan, which reads
+  whole lines of files that have no comments at all, and the doc-comment
+  volume ratchet, which is a count.
 - **Sentinel substitution moved into this crate, in one coordinate
   space.** `src/sentinel_stream.rs` is replaced by `src/constructs.rs`:
   the masked source is tiled here — bytes between constructs copied

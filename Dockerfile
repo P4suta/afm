@@ -158,6 +158,18 @@ RUN curl -fsSL \
     && chmod +x /usr/local/bin/bun \
     && rm -rf /tmp/bun.zip /tmp/bun-linux-x64
 
+# vale — prose lint (`just vale`). Same shape as zizmor / actionlint above: a
+# prebuilt release archive, and the policy lives beside the tool rather than in
+# the recipe — `.vale.ini` says what is read, `styles/Aozora/RetiredPaths.yml`
+# says what is banned. It is what replaced the retired-upstream-path half of
+# `cargo xtask comment-discipline`, whose file list was `.rs` and `.toml`, so a
+# Markdown document was outside every gate this repo has. Last in the stage,
+# like cargo-shear and committed, so adding it busts no heavier layer's cache.
+ARG VALE_VERSION=3.15.2
+RUN curl -fsSL \
+    "https://github.com/vale-cli/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz" \
+    | tar -xz -C /usr/local/bin vale
+
 ########################################################################
 # Stage: node — Node.js 22, the JS runtime the dev image builds on
 ########################################################################
