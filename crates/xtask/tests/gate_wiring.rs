@@ -53,6 +53,7 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use regex::Regex;
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // reading a command out of a config file
@@ -911,6 +912,12 @@ const BUILD_TOOLS: &[&str] = &["cargo", "wasm-pack", "bun"];
 /// `NAME := "value"` assignments whose right-hand side is one string literal.
 /// `_dev` and its siblings are `if` expressions and stay unresolved on
 /// purpose: nothing here asks what they expand to, only what they wrap.
+///
+/// Either quote, because `just` takes either and the choice is forced by the
+/// value: `_NO_COLLISION` holds the `"…"` a `grep` and a `printf` need, so it
+/// can only be written in `'…'`. A reader that took double quotes alone would
+/// hand `{{_NO_COLLISION}}` on to a shell as text and read a guarded recipe as
+/// unguarded.
 fn plain_variables(justfile: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for line in justfile.lines() {
@@ -920,16 +927,22 @@ fn plain_variables(justfile: &str) -> BTreeMap<String, String> {
         let Some((name, value)) = line.split_once(":=") else {
             continue;
         };
-        let Some(literal) = value
-            .trim()
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
+        let value = value.trim();
+        let Some(literal) = quoted_literal(value, '"').or_else(|| quoted_literal(value, '\''))
         else {
             continue;
         };
         out.insert(name.trim().to_owned(), literal.to_owned());
     }
     out
+}
+
+/// The inside of `value`, when the whole of it is one `quote`-delimited
+/// literal.
+fn quoted_literal(value: &str, quote: char) -> Option<&str> {
+    value
+        .strip_prefix(quote)
+        .and_then(|rest| rest.strip_suffix(quote))
 }
 
 /// One `{{VAR}}` substitution pass. The deny flag is held in a variable, and a
@@ -1311,17 +1324,23 @@ fn a_gate_builds_the_documentation_docs_rs_will_publish() {
 /// (`invalid_html_tags`) and nothing else.
 const PROBE_SOURCE: &str = "//! probe: <div>\n";
 
-/// Numbers the probe directories so two of these can run side by side.
+/// Numbers the scratch directories so two probes can run side by side.
 static PROBE_RUNS: AtomicU32 = AtomicU32::new(0);
+
+/// A fresh directory to build something throwaway in.
+fn scratch(label: &str) -> PathBuf {
+    let run = PROBE_RUNS.fetch_add(1, Ordering::Relaxed);
+    let dir = env::temp_dir().join(format!("aozora-md-{label}-{}-{run}", process::id()));
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("creating {}: {e}", dir.display()));
+    dir
+}
 
 /// Does rustdoc accept [`PROBE_SOURCE`] when given these flags? Run rather
 /// than read: "`-D warnings` denies" is a claim about a tool, and every other
 /// assertion in this file could pass on a Justfile whose flags were a typo.
 fn rustdoc_accepts_the_probe(flags: &[&str]) -> bool {
-    let run = PROBE_RUNS.fetch_add(1, Ordering::Relaxed);
-    let dir = env::temp_dir().join(format!("aozora-md-doc-probe-{}-{run}", process::id()));
+    let dir = scratch("doc-probe");
     let source = dir.join("probe.rs");
-    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("creating {}: {e}", dir.display()));
     fs::write(&source, PROBE_SOURCE)
         .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
     let out = Command::new("rustdoc")
@@ -2648,4 +2667,793 @@ fn a_crate_named_on_the_line_after_its_sub_command_is_still_the_target() {
     );
     // And the sub-command has to match: a build is not a test run.
     assert!(wasm_pack_targets("wasm-pack build crates", "test").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// the warning the flags cannot reach
+// ---------------------------------------------------------------------------
+//
+// A fifth way a check can check nothing, and the only one of the five that was
+// live on a published page rather than merely available. Everything in the doc
+// section above measures RUSTDOCFLAGS, and RUSTDOCFLAGS is handed to rustdoc.
+// `output filename collision` is CARGO's: two documentation units resolving to
+// one `target/doc/<name>/`, the later of them overwriting the other's page,
+// reported and exited 0 on. `-D warnings` never sees it, the probe that
+// measures `-D warnings` never sees it, and neither could have.
+//
+// Both CLI binaries were named after their libraries — a binary's name is the
+// shipped command, so `aozora-flavored-markdown` the bin and
+// `aozora_flavored_markdown` the lib are one directory — and `docs.yml` copies
+// `target/doc` to the API site that `[workspace.package] documentation` gives
+// every reader of every published crate. The library's own URL served whichever
+// unit finished last.
+//
+// The defect has two halves and they are read two ways. Whether this workspace
+// still holds a pair that clashes is decidable from `cargo metadata`, which is
+// cargo's own answer to "what will you document, and what is each one called".
+// Whether the GATE would notice a pair introduced some other way is decidable
+// from no file at all: it is answered by running a recipe's own script against
+// a `cargo` that prints what cargo prints — captured from a workspace built to
+// clash, so the gate is held to the tool's wording rather than to a wording
+// written down twice.
+
+/// The shell script a recipe hands `bash -c '…'`. The doc recipes wrap their
+/// build in one because the collision check has to run after it and see what
+/// it printed; it is also the only form in which that check can be exercised
+/// here without building anything.
+fn bash_script(line: &str) -> Option<&str> {
+    let (_, after) = line.split_once("bash -c '")?;
+    let end = after.rfind('\'')?;
+    Some(&after[..end])
+}
+
+/// What a stubbed `cargo` says, and how it exits.
+struct StubbedBuild<'a> {
+    output: &'a str,
+    status: i32,
+}
+
+/// Run a doc recipe's own script with `cargo` replaced by a stub that prints
+/// `build.output` on STDERR — where cargo says everything it says, so a recipe
+/// that reads its build back has to redirect that stream first — and exits
+/// `build.status`. The answer is the exit code the recipe would give CI.
+fn doc_script_exit(script: &str, build: &StubbedBuild<'_>) -> i32 {
+    let dir = scratch("doc-script");
+    let said = dir.join("cargo-said");
+    fs::write(&said, build.output).unwrap_or_else(|e| panic!("writing {}: {e}", said.display()));
+    let stub = dir.join("cargo");
+    let status = build.status;
+    let source = format!("#!/bin/sh\ncat '{}' >&2\nexit {status}\n", said.display());
+    fs::write(&stub, source).unwrap_or_else(|e| panic!("writing {}: {e}", stub.display()));
+    let marked = Command::new("chmod")
+        .arg("+x")
+        .arg(&stub)
+        .status()
+        .unwrap_or_else(|e| panic!("running chmod: {e}"));
+    assert!(marked.success(), "chmod could not mark the stub executable");
+
+    let path = format!("{}:{}", dir.display(), env::var("PATH").unwrap_or_default());
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .current_dir(&dir)
+        // PATH so `cargo` is the stub and every other command is the real one;
+        // TMPDIR so the `mktemp` the script runs lands in here and leaves with
+        // it rather than in the image's `/tmp`.
+        .env("PATH", path)
+        .env("TMPDIR", &dir)
+        .output()
+        .unwrap_or_else(|e| panic!("running the recipe's own script: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    drop(fs::remove_dir_all(&dir));
+    // A script that cannot find a command exits non-zero for a reason that has
+    // nothing to do with the check under test, and every "this fails" assertion
+    // below would hold on it.
+    assert!(
+        !stderr.contains("command not found"),
+        "the recipe's script could not find a command it runs:\n{stderr}"
+    );
+    out.status.code().unwrap_or(-1)
+}
+
+/// One `cargo doc` over a generated workspace, and what it left behind.
+struct ProbeDocs {
+    /// Did cargo exit 0? That answer is what puts a collision out of reach of
+    /// every check that reads an exit status — which is every check this repo
+    /// had.
+    succeeded: bool,
+    /// Everything cargo said, its two streams merged as the recipes merge them.
+    output: String,
+    /// Did the build write an entry page — `doc/index.html` — of its own?
+    entry_page: bool,
+    /// The page at the first library's own URL, whichever unit wrote it.
+    library_page: Option<String>,
+}
+
+/// Document a workspace shaped like this one: two libraries, and a CLI crate
+/// whose binary carries the first library's name.
+///
+/// Run rather than written down. "cargo warns and carries on", "the warning
+/// reads like this" and "`doc = false` leaves the library's page in place" are
+/// claims about cargo, and a file that spelled them out would go on asserting
+/// them after they stopped being true — which is the failure this whole file
+/// is about, one layer down.
+fn probe_documentation(document_the_binary: bool) -> ProbeDocs {
+    let dir = scratch("doc-collision");
+    let doc = if document_the_binary { "true" } else { "false" };
+    let files = [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"alpha\", \"beta\", \"cli\"]\nresolver = \"2\"\n".to_owned(),
+        ),
+        (
+            "alpha/Cargo.toml",
+            probe_package("probe-alpha", "[lib]\npath = \"lib.rs\"\n"),
+        ),
+        (
+            "alpha/lib.rs",
+            "pub fn alpha_library_marker() {}\n".to_owned(),
+        ),
+        (
+            "beta/Cargo.toml",
+            probe_package("probe-beta", "[lib]\npath = \"lib.rs\"\n"),
+        ),
+        (
+            "beta/lib.rs",
+            "pub fn beta_library_marker() {}\n".to_owned(),
+        ),
+        (
+            "cli/Cargo.toml",
+            probe_package(
+                "probe-alpha-cli",
+                &format!("[[bin]]\nname = \"probe-alpha\"\npath = \"main.rs\"\ndoc = {doc}\n"),
+            ),
+        ),
+        ("cli/main.rs", "fn main() {}\n".to_owned()),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("creating {}: {e}", parent.display()));
+        }
+        fs::write(&path, text).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    }
+
+    let out = Command::new("cargo")
+        // `--offline`, and no `--locked`: this workspace has no dependencies
+        // and no lockfile of record, so there is nothing to fetch and nothing
+        // to bind it to.
+        .args(["doc", "--offline", "--no-deps", "--workspace"])
+        .current_dir(&dir)
+        // The dev image points CARGO_TARGET_DIR at a shared directory, which is
+        // where THIS repo's `target/doc` lives. A probe that inherited it would
+        // write its pages over the ones under test.
+        .env("CARGO_TARGET_DIR", dir.join("target"))
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running cargo doc: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where the toolchain is installed."
+            )
+        });
+    let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&out.stderr));
+    let docs = dir.join("target/doc");
+    let probe = ProbeDocs {
+        succeeded: out.status.success(),
+        output,
+        entry_page: docs.join("index.html").is_file(),
+        library_page: fs::read_to_string(docs.join("probe_alpha/index.html")).ok(),
+    };
+    drop(fs::remove_dir_all(&dir));
+    probe
+}
+
+/// One manifest of the probe workspace.
+fn probe_package(name: &str, target: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{target}")
+}
+
+/// One target `cargo doc` will document.
+#[derive(Debug, PartialEq, Eq)]
+struct DocTarget {
+    package: String,
+    name: String,
+    kind: String,
+}
+
+impl DocTarget {
+    /// The target as a failure message has to name it.
+    fn label(&self) -> String {
+        let Self {
+            package,
+            name,
+            kind,
+        } = self;
+        format!("the {kind} target `{name}` in {package}")
+    }
+}
+
+/// Every target `cargo doc` documents, keyed by the directory rustdoc writes it
+/// to. That directory is the target's name with `-` turned into `_`, so a
+/// binary called `aozora-flavored-markdown` and a library called
+/// `aozora_flavored_markdown` are one key — which is the whole defect.
+///
+/// The `doc` flag is cargo's own, and reading it is what keeps the key space
+/// honest in both directions: a reader that took every target would collide on
+/// the two `cli_integration` test binaries this workspace has always had, and a
+/// reader that took none would find nothing to collide at all.
+fn documented_targets(metadata: &str) -> BTreeMap<String, Vec<DocTarget>> {
+    let parsed: Value = serde_json::from_str(metadata)
+        .unwrap_or_else(|e| panic!("`cargo metadata` did not answer with JSON: {e}"));
+    let packages = parsed["packages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`cargo metadata` answered with no `packages` array"));
+    let mut out: BTreeMap<String, Vec<DocTarget>> = BTreeMap::new();
+    for package in packages {
+        let package_name = json_string(package, "name");
+        for target in package["targets"]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{package_name}` came back with no `targets` array"))
+        {
+            let name = json_string(target, "name");
+            let documented = target["doc"].as_bool().unwrap_or_else(|| {
+                panic!(
+                    "`cargo metadata` no longer says whether it documents `{name}`. Without that \
+                     flag every target reads the same way, and both answers are wrong: one \
+                     collides the test binaries, the other collides nothing ever again."
+                )
+            });
+            if !documented {
+                continue;
+            }
+            let kind = target["kind"]
+                .as_array()
+                .and_then(|kinds| kinds.first())
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("`{name}` came back with no `kind`"))
+                .to_owned();
+            out.entry(name.replace('-', "_"))
+                .or_default()
+                .push(DocTarget {
+                    package: package_name.clone(),
+                    name,
+                    kind,
+                });
+        }
+    }
+    out
+}
+
+/// One string field of a `cargo metadata` object.
+fn json_string(value: &Value, key: &str) -> String {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("`cargo metadata` answered with no `{key}`: {value}"))
+        .to_owned()
+}
+
+/// The rustdoc output directories more than one documented target writes.
+fn colliding_documentation(metadata: &str) -> Vec<String> {
+    documented_targets(metadata)
+        .into_iter()
+        .filter(|(_, writers)| writers.len() > 1)
+        .map(|(output, writers)| {
+            let names: Vec<String> = writers.iter().map(DocTarget::label).collect();
+            format!("target/doc/{output}/ is written by {}", names.join(" and "))
+        })
+        .collect()
+}
+
+/// What cargo says the targets of this workspace are.
+///
+/// Asked of cargo rather than derived from the manifests: which targets exist
+/// and which of them get documented is cargo's rule, not a rule — an explicit
+/// `[[bin]]`, an inferred `src/main.rs`, a `[lib] name`, a `doc = false` — and
+/// a second model of it here would be a second answer waiting to disagree with
+/// the one that builds the site.
+fn workspace_metadata() -> String {
+    let out = Command::new("cargo")
+        .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running cargo metadata: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where the toolchain is installed."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`cargo metadata` failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn every_doc_gate_fails_on_the_collision_cargo_reports() {
+    // The widening of `every_rustdoc_build_this_repo_drives_denies_warnings`
+    // from rustdoc's warnings to the BUILD's. That test, and the probe that
+    // measures its flags, are both about lints rustdoc emits; the warning that
+    // decided what the API site served came from cargo, on the same stderr, and
+    // passed both.
+    //
+    // Over every documentation build the Justfile defines, for the reason the
+    // deny assertion is: a third recipe added without the check is this hole
+    // reopened, and naming today's two would not see it.
+    let justfile = read("Justfile");
+    let builds = doc_builds(&justfile);
+    assert!(
+        !builds.is_empty(),
+        "the Justfile came out with no rustdoc build at all; the reader is not finding \
+         `cargo doc` in a recipe body"
+    );
+
+    let clash = probe_documentation(true);
+    assert!(
+        clash.output.contains("output filename collision"),
+        "the probe workspace no longer makes cargo report a collision, so this test would pass \
+         over any recipe at all. Retarget it rather than leaving it green:\n{}",
+        clash.output
+    );
+    let clean = probe_documentation(false);
+
+    for build in &builds {
+        let script = bash_script(&build.line).unwrap_or_else(|| {
+            panic!(
+                "`just {}` no longer hands its build to `bash -c '…'`, so this test cannot run \
+                 what the gate runs. Teach it the new shape:\n      {}",
+                build.recipe,
+                build.line.trim()
+            )
+        });
+        // The control. Without it, "the recipe exits non-zero" would hold just
+        // as well on a recipe that fails for every build there is.
+        assert_eq!(
+            doc_script_exit(
+                script,
+                &StubbedBuild {
+                    output: &clean.output,
+                    status: 0
+                }
+            ),
+            0,
+            "`just {}` fails on a documentation build that produced no warning at all:\n      {}",
+            build.recipe,
+            build.line.trim()
+        );
+        assert_ne!(
+            doc_script_exit(
+                script,
+                &StubbedBuild {
+                    output: &clash.output,
+                    status: 0
+                }
+            ),
+            0,
+            "`just {}` exits 0 on the build cargo reported an output filename collision over. \
+             The two units wrote one `target/doc/<name>/`, so the page that survives is whichever \
+             finished last — and `docs.yml` copies that directory to the API site. RUSTDOCFLAGS \
+             cannot reach this: cargo said it, not rustdoc.\n      {}",
+            build.recipe,
+            build.line.trim()
+        );
+    }
+}
+
+#[test]
+fn reading_the_builds_output_did_not_cost_a_doc_gate_its_exit_status() {
+    // The regression the fix itself could introduce. Reading what the build
+    // printed means running it in a pipeline, and a pipeline reports the exit
+    // status of its LAST command — `tee`, which always succeeds. So a recipe
+    // that grew the collision check without `set -o pipefail`, or that ended on
+    // the check rather than on the build's own status, would swallow every
+    // rustdoc failure the section above exists to produce: `-D warnings` still
+    // handed over, rustdoc still failing, the gate still green.
+    let justfile = read("Justfile");
+    let builds = doc_builds(&justfile);
+    assert!(!builds.is_empty(), "no rustdoc build found in the Justfile");
+    for build in &builds {
+        let Some(script) = bash_script(&build.line) else {
+            panic!(
+                "`just {}` no longer hands its build to `bash -c '…'`",
+                build.recipe
+            )
+        };
+        assert_ne!(
+            doc_script_exit(
+                script,
+                &StubbedBuild {
+                    output: "error: unclosed HTML tag `div`\nerror: aborting due to 1 error\n",
+                    status: 1,
+                }
+            ),
+            0,
+            "`just {}` exits 0 on a documentation build that FAILED. Whatever it does with the \
+             build's output, the build's own status has to survive it.\n      {}",
+            build.recipe,
+            build.line.trim()
+        );
+    }
+}
+
+#[test]
+fn no_two_targets_this_workspace_documents_write_one_rustdoc_directory() {
+    // The state, rather than the gate that would catch it changing. Two reasons
+    // it is worth asserting separately from the recipes above: the recipes only
+    // answer while something runs them, and a clash does not always survive to
+    // be reported — two rustdoc units racing on one output directory can also
+    // remove a file the other is still writing, which fails the doc build with
+    // a path in the message and no mention of the cause.
+    let metadata = workspace_metadata();
+    let documented = documented_targets(&metadata);
+    assert!(
+        documented.len() >= 4,
+        "cargo came back documenting {documented:?}; the reader is not finding the targets"
+    );
+    let clashes = colliding_documentation(&metadata);
+    assert!(
+        clashes.is_empty(),
+        "{clashes:?}\n\
+         One `cargo doc --workspace` pass writes them all into one `target/doc`, so the later unit \
+         overwrites the earlier and the page a URL serves is whichever finished last. `docs.yml` \
+         copies that directory to the API site `[workspace.package] documentation` sends every \
+         reader to. Give whichever target is not the published page `doc = false` in its manifest."
+    );
+}
+
+/// `cargo metadata` as it answered before the two `[[bin]] doc = false` lines:
+/// each CLI's binary is named after the library it drives, because that name is
+/// the shipped command.
+const METADATA_BEFORE: &str = r#"{"packages":[
+  {"name":"aozora-flavored-markdown","targets":[
+    {"name":"aozora_flavored_markdown","kind":["lib"],"doc":true},
+    {"name":"ast-walk","kind":["example"],"doc":false}]},
+  {"name":"aozora-flavored-markdown-cli","targets":[
+    {"name":"aozora-flavored-markdown","kind":["bin"],"doc":true},
+    {"name":"cli_integration","kind":["test"],"doc":false}]},
+  {"name":"aozora-flavored-markdown-epub","targets":[
+    {"name":"aozora_flavored_markdown_epub","kind":["lib"],"doc":true}]},
+  {"name":"aozora-flavored-markdown-epub-cli","targets":[
+    {"name":"aozora-flavored-markdown-epub","kind":["bin"],"doc":true},
+    {"name":"cli_integration","kind":["test"],"doc":false}]}]}"#;
+
+#[test]
+fn the_pair_this_repo_shipped_with_is_what_the_collision_reader_reports() {
+    assert_eq!(
+        colliding_documentation(METADATA_BEFORE),
+        vec![
+            "target/doc/aozora_flavored_markdown/ is written by the lib target \
+             `aozora_flavored_markdown` in aozora-flavored-markdown and the bin target \
+             `aozora-flavored-markdown` in aozora-flavored-markdown-cli"
+                .to_owned(),
+            "target/doc/aozora_flavored_markdown_epub/ is written by the lib target \
+             `aozora_flavored_markdown_epub` in aozora-flavored-markdown-epub and the bin target \
+             `aozora-flavored-markdown-epub` in aozora-flavored-markdown-epub-cli"
+                .to_owned(),
+        ],
+        "the reader no longer sees the defect it was written for"
+    );
+    // And the trap inside the same answer: both CLI crates carry a test target
+    // called `cli_integration`. They share a name and share nothing else — cargo
+    // documents neither — so a reader that skipped the `doc` flag would report a
+    // clash that has never existed and miss the two that did.
+    assert!(
+        !colliding_documentation(METADATA_BEFORE)
+            .iter()
+            .any(|clash| clash.contains("cli_integration")),
+        "two targets cargo does not document were read as writing one page"
+    );
+}
+
+#[test]
+fn cargo_calls_one_page_overwriting_another_a_warning_and_exits_zero() {
+    // Why no gate here could have caught this by watching an exit status, and
+    // why `doc = false` is the remedy the manifests apply. Which of the two
+    // pages survives is a race and is not asserted; that it is a race is the
+    // defect.
+    let clash = probe_documentation(true);
+    assert!(
+        clash.succeeded,
+        "cargo now FAILS a build whose targets collide. That is the stronger behaviour and the \
+         recipes' check becomes redundant — but check it deliberately rather than by this test \
+         going quiet:\n{}",
+        clash.output
+    );
+    assert!(
+        clash.output.contains("output filename collision"),
+        "the probe workspace no longer reproduces the collision; retarget it:\n{}",
+        clash.output
+    );
+
+    let settled = probe_documentation(false);
+    assert!(
+        settled.succeeded && !settled.output.contains("output filename collision"),
+        "`doc = false` on the binary did not settle the clash:\n{}",
+        settled.output
+    );
+    let page = settled.library_page.unwrap_or_else(|| {
+        panic!(
+            "nothing was written at the library's own URL:\n{}",
+            settled.output
+        )
+    });
+    assert!(
+        page.contains("alpha_library_marker"),
+        "with the binary undocumented, the page at the library's URL is still not the library's"
+    );
+}
+
+#[test]
+fn a_documentation_build_of_this_shape_writes_no_entry_page_of_its_own() {
+    // What makes the assertion below about `api/` load-bearing. rustdoc writes
+    // an index over several crates only behind `--enable-index-page`, which is
+    // nightly-only and therefore not available here, so `target/doc` has no
+    // `index.html` — and the directory the site serves at the documentation URL
+    // has no page at all unless the assembly writes one.
+    let docs = probe_documentation(false);
+    assert!(
+        docs.library_page.is_some(),
+        "the probe documented nothing, so it cannot answer this:\n{}",
+        docs.output
+    );
+    assert!(
+        !docs.entry_page,
+        "`cargo doc` now writes a `target/doc/index.html` of its own. The site assembly writes one \
+         too and the copy would land on top of it — decide which page the API root serves rather \
+         than shipping both."
+    );
+}
+
+// --- the entry point the site advertises ------------------------------------
+
+/// A URL the workspace manifest advertises.
+fn workspace_url(root: &str, key: &str) -> String {
+    let value = manifest_value(root, "workspace.package", key)
+        .unwrap_or_else(|| panic!("[workspace.package] no longer sets `{key}`"));
+    value.trim().trim_matches('"').to_owned()
+}
+
+/// Where the docs workflow copies the documentation build into the site it
+/// assembles, as a site-relative directory.
+fn documentation_root(workflow: &str) -> String {
+    workflow
+        .lines()
+        .map(strip_comment)
+        .filter(|body| body.contains("target/doc"))
+        .find_map(|body| {
+            body.split_whitespace()
+                .find_map(|word| word.strip_prefix("site/"))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| {
+            panic!("docs.yml no longer copies `target/doc` into the site it uploads")
+        })
+}
+
+/// The pages the docs workflow writes into that site, as the site-relative path
+/// of each → the URL its `<meta http-equiv="refresh">` sends a reader to.
+fn site_redirects(workflow: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut destination: Option<String> = None;
+    for line in workflow.lines() {
+        let body = strip_comment(line);
+        if let Some((_, after)) = body.split_once("url=") {
+            destination = after.split(['"', '\'', '>', ' ']).next().map(str::to_owned);
+        }
+        let Some((_, after)) = body.split_once("> site/") else {
+            continue;
+        };
+        let Some(page) = after.split_whitespace().next() else {
+            continue;
+        };
+        if let Some(url) = destination.take() {
+            out.insert(page.to_owned(), url);
+        }
+    }
+    out
+}
+
+/// The file a site path is served by. A path naming a directory is served by
+/// the `index.html` inside it — which is how `api/` could 404 while every page
+/// under it was present and correct.
+fn served_file(path: &str) -> String {
+    if path.is_empty() || path.ends_with('/') {
+        format!("{path}index.html")
+    } else {
+        path.to_owned()
+    }
+}
+
+/// The trail a reader walks from a site path, hop by hop, through the redirects
+/// the assembly writes. The last entry is where they land.
+fn redirect_trail(redirects: &BTreeMap<String, String>, start: &str) -> Vec<String> {
+    let mut at = served_file(start);
+    let mut trail = vec![at.clone()];
+    while let Some(url) = redirects.get(&at) {
+        assert!(
+            !url.starts_with('/') && !url.contains("://") && !url.contains(".."),
+            "`{at}` redirects to `{url}`; this reader follows site-relative hops only"
+        );
+        let next = {
+            let parent = at.rfind('/').map_or("", |slash| &at[..=slash]);
+            served_file(&format!("{parent}{url}"))
+        };
+        assert!(
+            !trail.contains(&next),
+            "the site's redirects loop: {trail:?} → {next}"
+        );
+        at = next;
+        trail.push(at.clone());
+    }
+    trail
+}
+
+/// The names of the packages that reach crates.io.
+fn published_package_names() -> BTreeSet<String> {
+    workspace_members()
+        .iter()
+        .filter(|member| is_published(&member.manifest))
+        .filter_map(|member| {
+            manifest_value(&member.manifest, "package", "name")
+                .map(|name| name.trim_matches('"').to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn the_documentation_url_this_workspace_advertises_lands_on_the_library() {
+    // The acceptance the collision is about, stated as a property rather than
+    // as a click: a reader who opens the URL every published crate advertises
+    // reaches the LIBRARY's page, and reaches it because exactly one documented
+    // target writes the directory they land in.
+    //
+    // Both halves have been false on the live site. The directory was written
+    // by two targets, which is the rest of this section; and `api/` itself had
+    // no page — cargo writes no entry page for a workspace of several crates
+    // (measured next door), so the URL printed on every crates.io page here,
+    // and the one the site root's own redirect points at, resolved to nothing.
+    let root = read("Cargo.toml");
+    let site = workspace_url(&root, "homepage");
+    let advertised = workspace_url(&root, "documentation");
+    let path = advertised.strip_prefix(&site).unwrap_or_else(|| {
+        panic!(
+            "`documentation` is `{advertised}` and the site docs.yml assembles is `{site}`. A \
+             documentation URL outside that site is a page nothing in this repo can answer for."
+        )
+    });
+
+    let workflow = read(".github/workflows/docs.yml");
+    let redirects = site_redirects(&workflow);
+    assert!(
+        !redirects.is_empty(),
+        "docs.yml writes no page of its own into the site; the reader is not finding the assembly"
+    );
+    let root_directory = documentation_root(&workflow);
+    let documented = documented_targets(&workspace_metadata());
+
+    for start in ["", path] {
+        let trail = redirect_trail(&redirects, start);
+        let landed = trail.last().expect("a trail holds where it started");
+        let directory = landed
+            .strip_prefix(&root_directory)
+            .and_then(|rest| rest.strip_suffix("/index.html"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "a reader opening `{site}{start}` walks {trail:?} and stops at `{landed}`, \
+                     which is not a crate page under `{root_directory}`. Every hop has to be a page \
+                     something writes, and `cargo doc` writes none at the root of a multi-crate \
+                     build: a directory with no `index.html` and nothing redirecting out of it is \
+                     a 404."
+                )
+            });
+        let writers = documented.get(directory).unwrap_or_else(|| {
+            panic!(
+                "`{landed}` is where the documentation URL lands, and no target this workspace \
+                 documents writes `{directory}/`. Renaming the crate, or dropping it out of the \
+                 doc build, moves the page and leaves the redirect pointing at nothing."
+            )
+        });
+        assert_eq!(
+            writers.len(),
+            1,
+            "the documentation URL lands on a page {} targets write: {writers:?}. Which one a \
+             reader gets is whichever finished last.",
+            writers.len()
+        );
+        assert_eq!(
+            writers[0].kind,
+            "lib",
+            "the documentation URL lands on {}. The published API is the library's page.",
+            writers[0].label()
+        );
+        assert!(
+            published_package_names().contains(&writers[0].package),
+            "the documentation URL lands on {}, and that crate does not reach crates.io — the \
+             readers this URL is printed for cannot depend on it.",
+            writers[0].label()
+        );
+    }
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_script_a_recipe_hands_bash_is_read_whole() {
+    assert_eq!(
+        bash_script("docker compose run --rm dev bash -c 'a; b'"),
+        Some("a; b")
+    );
+    assert_eq!(bash_script("    cargo doc --locked --workspace"), None);
+    // To the LAST quote. The recipes' scripts hold `'`-free double-quoted
+    // arguments, and a reader stopping at the first quote inside one would run
+    // half a gate and call it green.
+    assert_eq!(
+        bash_script("x bash -c 'cargo doc | tee f; grep -qF \"x\" f && exit 1'"),
+        Some("cargo doc | tee f; grep -qF \"x\" f && exit 1")
+    );
+}
+
+#[test]
+fn a_single_quoted_recipe_variable_resolves_like_a_double_quoted_one() {
+    let justfile = concat!(
+        "_A := \"x\"\n",
+        "_B := 'y'\n",
+        "_dev := if _in == \"1\" { \"\" } else { \"docker compose run --rm dev\" }\n",
+    );
+    let variables = plain_variables(justfile);
+    assert_eq!(variables.get("_A").map(String::as_str), Some("x"));
+    assert_eq!(
+        variables.get("_B").map(String::as_str),
+        Some("y"),
+        "a `'…'` value went unresolved, so a recipe interpolating it would read as unguarded"
+    );
+    assert!(
+        !variables.contains_key("_dev"),
+        "an `if` expression was resolved to one of its branches"
+    );
+}
+
+#[test]
+fn a_redirect_the_site_writes_is_followed_and_one_it_does_not_ends_the_trail() {
+    let workflow = concat!(
+        "jobs:\n",
+        "  build:\n",
+        "    steps:\n",
+        "      # url=not-a-redirect/ in a comment, and > site/not-a-page.html\n",
+        "      - run: |\n",
+        "          mkdir -p site/api\n",
+        "          cp -r target/doc/. site/api/\n",
+        "          printf '%s\\n' \\\n",
+        "            '<!doctype html><meta http-equiv=\"refresh\" content=\"0; url=api/\">' \\\n",
+        "            > site/index.html\n",
+        "          printf '%s\\n' \\\n",
+        "            '<!doctype html><meta http-equiv=\"refresh\" content=\"0; url=lib_crate/\">' \\\n",
+        "            > site/api/index.html\n",
+    );
+    assert_eq!(documentation_root(workflow), "api/");
+    let redirects = site_redirects(workflow);
+    assert_eq!(
+        redirect_trail(&redirects, ""),
+        vec![
+            "index.html".to_owned(),
+            "api/index.html".to_owned(),
+            "api/lib_crate/index.html".to_owned(),
+        ],
+        "the walk from the site root did not follow both hops to a crate page"
+    );
+    assert!(
+        !redirects.contains_key("not-a-page.html"),
+        "a `> site/…` written in a comment counted as a page the site serves"
+    );
+    // The state this file was written on: `api/` with no page of its own is
+    // where the walk stops, one hop short of any crate.
+    let without = BTreeMap::from([("index.html".to_owned(), "api/".to_owned())]);
+    assert_eq!(
+        redirect_trail(&without, ""),
+        vec!["index.html".to_owned(), "api/index.html".to_owned()],
+        "a hop to a page nothing writes has to end the trail there, not silently continue"
+    );
 }
