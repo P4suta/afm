@@ -1054,8 +1054,13 @@ struct DocBuild {
     arguments: Vec<String>,
 }
 
-/// Every documentation build in the `Justfile`, attributed to its recipe.
-fn doc_builds(justfile: &str) -> Vec<DocBuild> {
+/// Every command line the `Justfile` runs — comments off, `{{VAR}}`
+/// resolved — paired with the recipe it belongs to.
+///
+/// One walk for both readers below. "What does this recipe hand its tool" is
+/// asked here of `cargo doc` and of `cargo fuzz`, and two walks would be two
+/// answers to the same question about the same file.
+fn expanded_recipe_lines(justfile: &str) -> Vec<(String, String)> {
     let variables = plain_variables(justfile);
     let mut recipe = String::new();
     let mut out = Vec::new();
@@ -1070,13 +1075,21 @@ fn doc_builds(justfile: &str) -> Vec<DocBuild> {
             }
             continue;
         }
-        let expanded = expand(strip_comment(line), &variables);
+        out.push((recipe.clone(), expand(strip_comment(line), &variables)));
+    }
+    out
+}
+
+/// Every documentation build in the `Justfile`, attributed to its recipe.
+fn doc_builds(justfile: &str) -> Vec<DocBuild> {
+    let mut out = Vec::new();
+    for (recipe, expanded) in expanded_recipe_lines(justfile) {
         if !builds_rustdoc(&expanded) {
             continue;
         }
         let flags = rustdocflags_on(&expanded).map(str::to_owned);
         out.push(DocBuild {
-            recipe: recipe.clone(),
+            recipe,
             arguments: shell_tokens(&expanded),
             line: expanded,
             flags,
@@ -3455,5 +3468,562 @@ fn a_redirect_the_site_writes_is_followed_and_one_it_does_not_ends_the_trail() {
         redirect_trail(&without, ""),
         vec!["index.html".to_owned(), "api/index.html".to_owned()],
         "a hop to a page nothing writes has to end the trail there, not silently continue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the fuzz builds
+// ---------------------------------------------------------------------------
+//
+// Everything above reads a `[group('gate')]` recipe. The `[group('fuzz')]`
+// ones were read by nothing, and one of them — `fuzz-all-deep` — describes
+// itself as "the gate before tagging a release". It had never run. Neither had
+// any of the others: `cargo fuzz` takes `--target` from the platform its OWN
+// binary was built for, the Dockerfile binstalls the upstream musl release
+// asset, and no image here has ever had a musl target. So `just fuzz-quick
+// parse_render` on a clean checkout printed two errors about neither this
+// workspace nor its fuzz targets — `sanitizer is incompatible with statically
+// linked libc`, then `can't find crate for core` — and the release pre-flight
+// was a gate that could not start (DEV-230).
+//
+// A flag is what fixed it, so a flag is what the next reader deletes as a
+// redundant default. The three assertions below are the two rustc facts that
+// make it load-bearing, plus the one that says it is there at all.
+
+/// The `cargo fuzz` sub-commands that compile the harness, and so build for a
+/// triple. `add`, `init` and `list` do not.
+const FUZZ_BUILDING: &[&str] = &["build", "cmin", "coverage", "run", "tmin"];
+
+/// What a fuzz build with no `--target` builds for: cargo-fuzz's own default,
+/// as `cargo fuzz run --help` prints it (0.13.2: `[default:
+/// x86_64-unknown-linux-musl]`).
+///
+/// It is a fact about the cargo-fuzz binary rather than about this workspace
+/// or this image — cargo-fuzz derives it from the platform it was itself
+/// compiled for. That is what makes an unstated target unstated in the sense
+/// that matters: nothing in this repo chose it, and nothing in this repo would
+/// notice it changing.
+const CARGO_FUZZ_DEFAULT_TRIPLE: &str = "x86_64-unknown-linux-musl";
+
+/// A `cargo fuzz` build the `Justfile` drives: the recipe that runs it, the
+/// line, and the triple it names — `None` when it names none and takes
+/// cargo-fuzz's default.
+struct FuzzBuild {
+    recipe: String,
+    line: String,
+    triple: Option<String>,
+}
+
+impl FuzzBuild {
+    /// The triple this build actually compiles for. A build that names none
+    /// still has one, and that is the point: the two assertions that measure
+    /// what a triple can do have to be asked of the default as well, or they
+    /// go quiet on exactly the arrangement they exist to reject.
+    fn effective_triple(&self) -> &str {
+        self.triple.as_deref().unwrap_or(CARGO_FUZZ_DEFAULT_TRIPLE)
+    }
+}
+
+/// The position of the sub-command in `cargo [+toolchain] fuzz <sub>`, when
+/// these tokens run one that compiles.
+fn fuzz_build_at(tokens: &[String]) -> Option<usize> {
+    for (at, token) in tokens.iter().enumerate() {
+        if token != "cargo" {
+            continue;
+        }
+        // `cargo +nightly fuzz run` — the toolchain prefix is not the
+        // sub-command, the same way `tool_commands` reads it.
+        let mut next = at + 1;
+        while tokens.get(next).is_some_and(|token| token.starts_with('+')) {
+            next += 1;
+        }
+        if tokens.get(next).map(String::as_str) != Some("fuzz") {
+            continue;
+        }
+        if tokens
+            .get(next + 1)
+            .is_some_and(|sub| FUZZ_BUILDING.contains(&sub.as_str()))
+        {
+            return Some(next + 1);
+        }
+    }
+    None
+}
+
+/// The triple these tokens name, in either spelling cargo-fuzz takes, and only
+/// where cargo-fuzz can see it: what follows a bare `--` is handed to
+/// libFuzzer, which has no `--target` at all. `--target-dir` is a different
+/// flag and is not this one.
+fn target_triple(tokens: &[String]) -> Option<String> {
+    let own = tokens.split(|token| token == "--").next().unwrap_or(&[]);
+    for (at, token) in own.iter().enumerate() {
+        if let Some(triple) = token.strip_prefix("--target=") {
+            return Some(triple.to_owned());
+        }
+        if token == "--target" {
+            return own.get(at + 1).cloned();
+        }
+    }
+    None
+}
+
+/// Every `cargo fuzz` build in the `Justfile`, attributed to its recipe.
+fn fuzz_builds(justfile: &str) -> Vec<FuzzBuild> {
+    let mut out = Vec::new();
+    for (recipe, expanded) in expanded_recipe_lines(justfile) {
+        let tokens = shell_tokens(&expanded);
+        let Some(at) = fuzz_build_at(&tokens) else {
+            continue;
+        };
+        out.push(FuzzBuild {
+            recipe,
+            triple: target_triple(&tokens[at..]),
+            line: expanded,
+        });
+    }
+    out
+}
+
+/// Every triple the `Justfile`'s fuzz recipes compile for, mapped to a recipe
+/// that compiles for it. Keyed by triple because the assertions below shell
+/// out to rustc, and five recipes naming one triple is one question.
+fn fuzz_triples(justfile: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for build in fuzz_builds(justfile) {
+        out.entry(build.effective_triple().to_owned())
+            .or_insert(build.recipe);
+    }
+    out
+}
+
+/// A crate that needs nothing but a target's `std` to compile.
+const TRIPLE_PROBE_SOURCE: &str = "pub fn probe() {}\n";
+
+/// Can this toolchain compile for `triple`? `Err` carries rustc's own words.
+///
+/// Run rather than read: "the target is installed" is a fact about the image,
+/// and a `--target` asserted against a list written here would pass on an
+/// image that has never had it — which is the entire defect, one level up.
+fn rustc_can_build_for(triple: &str) -> Result<(), String> {
+    let dir = scratch("triple-probe");
+    let source = dir.join("probe.rs");
+    fs::write(&source, TRIPLE_PROBE_SOURCE)
+        .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+    let out = Command::new("rustc")
+        .arg(&source)
+        .args(["--crate-type", "lib", "--emit", "metadata"])
+        .arg("--out-dir")
+        .arg(&dir)
+        .args(["--target", triple])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running rustc: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where the toolchain is installed."
+            )
+        });
+    let accepted = out.status.success();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    drop(fs::remove_dir_all(&dir));
+    if accepted { Ok(()) } else { Err(stderr) }
+}
+
+/// Does a build for `triple` link libc statically? `--print cfg` is where
+/// rustc answers, and the answer is the whole of the first error: cargo-fuzz
+/// builds with a sanitizer by default (`-s, --sanitizer [default:
+/// address]`), and rustc refuses a sanitizer on a statically linked libc.
+fn links_libc_statically(triple: &str) -> bool {
+    let out = Command::new("rustc")
+        .args(["--print", "cfg", "--target", triple])
+        .output()
+        .unwrap_or_else(|e| panic!("running rustc: {e}"));
+    assert!(
+        out.status.success(),
+        "rustc does not know the target `{triple}`:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line.trim() == r#"target_feature="crt-static""#)
+}
+
+#[test]
+fn every_fuzz_build_names_the_triple_it_builds_for() {
+    // The state this section was written on: five invocations, no `--target`
+    // between them, so every one of them built for whatever platform the
+    // installed cargo-fuzz binary happened to come from.
+    //
+    // Stated over every fuzz build the file defines rather than over the
+    // recipes by name, for the reason the rustdoc assertion is: a sixth recipe
+    // added without the flag is this hole reopened, and a list of today's five
+    // would not see it.
+    let justfile = read("Justfile");
+    let builds = fuzz_builds(&justfile);
+    assert!(
+        builds.len() >= 5,
+        "the Justfile came out driving {} `cargo fuzz` build(s); the reader is not finding them \
+         in the recipe bodies",
+        builds.len()
+    );
+
+    for build in &builds {
+        assert!(
+            build.triple.is_some(),
+            "`just {}` runs cargo-fuzz without `--target`, so it builds for `{CARGO_FUZZ_DEFAULT_TRIPLE}` \
+             — the platform the cargo-fuzz BINARY was built for, which is a property of the \
+             release asset the Dockerfile binstalls and of nothing this repo controls:\n      {}",
+            build.recipe,
+            build.line.trim()
+        );
+    }
+}
+
+#[test]
+fn every_fuzz_build_compiles_for_a_triple_this_image_has() {
+    // The second of the two errors the recipes printed, as a property. Asked
+    // of the EFFECTIVE triple, so a recipe that names none is asked about
+    // cargo-fuzz's default rather than skipped — being unstated is what put
+    // the build on an uninstalled target in the first place.
+    let justfile = read("Justfile");
+    let triples = fuzz_triples(&justfile);
+    assert!(
+        !triples.is_empty(),
+        "the Justfile came out driving no `cargo fuzz` build at all; the reader is not finding \
+         them in the recipe bodies"
+    );
+
+    for (triple, recipe) in &triples {
+        if let Err(stderr) = rustc_can_build_for(triple) {
+            panic!(
+                "`just {recipe}` compiles for `{triple}` and this toolchain cannot:\n{stderr}\
+                 A target with no `std` installed fails before one fuzz target is built. Nothing \
+                 in this image installs a target other than the host's, so the triple has to be \
+                 that one — stated, because cargo-fuzz's own default is not it."
+            );
+        }
+    }
+
+    // The control, and the measurement the flag is FOR. Without it this test
+    // says only that some triple compiles; with it, it says the one cargo-fuzz
+    // picks unaided does not.
+    assert!(
+        rustc_can_build_for(CARGO_FUZZ_DEFAULT_TRIPLE).is_err(),
+        "`{CARGO_FUZZ_DEFAULT_TRIPLE}` — cargo-fuzz's default — now compiles here, so the probe \
+         above no longer tells an installed target from a missing one. Installing it is still not \
+         a repair: the crt-static assertion below is why a musl fuzz build cannot run a sanitizer \
+         either."
+    );
+}
+
+#[test]
+fn no_fuzz_build_compiles_for_a_statically_linked_libc() {
+    // The first error, and the half that outlives any image change: a target
+    // whose libc is static is a target AddressSanitizer refuses, whatever is
+    // installed. It is why installing `x86_64-unknown-linux-musl` into the
+    // fuzz stage — the repair DEV-230 offered first, on the merit of keeping
+    // cargo-fuzz's static linking — repairs nothing: it trades the missing-std
+    // error for this one, and getting past this one means passing
+    // `-C target-feature=-crt-static`, i.e. handing back the static linking
+    // that was the whole argument for going there.
+    let justfile = read("Justfile");
+    let triples = fuzz_triples(&justfile);
+    assert!(
+        !triples.is_empty(),
+        "the Justfile came out driving no `cargo fuzz` build at all; the reader is not finding \
+         them in the recipe bodies"
+    );
+
+    for (triple, recipe) in &triples {
+        assert!(
+            !links_libc_statically(triple),
+            "`just {recipe}` compiles for `{triple}`, whose libc is statically linked. cargo-fuzz \
+             builds with AddressSanitizer by default and rustc rejects a sanitizer on a static \
+             libc, so this fails before one fuzz target is built."
+        );
+    }
+
+    // The control: the default is in that state, which is why it never ran.
+    assert!(
+        links_libc_statically(CARGO_FUZZ_DEFAULT_TRIPLE),
+        "`{CARGO_FUZZ_DEFAULT_TRIPLE}` no longer reports `crt-static`, so the account this test \
+         and the `_FUZZ_TRIPLE` comment both give of why the default could not work is out of date"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the fuzz targets, wherever they are listed
+// ---------------------------------------------------------------------------
+
+/// The fuzz targets the fuzz crate registers. `fuzz/Cargo.toml` is the
+/// registry: a `[[bin]]` there is what `cargo fuzz run <name>` resolves.
+fn registered_fuzz_targets() -> BTreeSet<String> {
+    let manifest = read("crates/aozora-flavored-markdown/fuzz/Cargo.toml");
+    table_pairs(&manifest, "bin")
+        .into_iter()
+        .filter(|&(key, _)| key == "name")
+        .flat_map(|(_, value)| quoted_items(value))
+        .collect()
+}
+
+/// The fuzz targets a sweep recipe runs: the argument of each `just fuzz-<…>
+/// <target>` in its body.
+fn swept_targets(justfile: &str, recipe: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in recipe_body(justfile, recipe) {
+        let mut previous = "";
+        let mut is_argument = false;
+        for word in words(strip_comment(line)) {
+            if is_argument {
+                out.insert(word.to_owned());
+            }
+            is_argument = previous == "just" && word.starts_with("fuzz-");
+            previous = word;
+        }
+    }
+    out
+}
+
+/// The fuzz targets `fuzz-status` reports on, out of the bash array that
+/// drives it.
+fn status_targets(justfile: &str) -> BTreeSet<String> {
+    for line in recipe_body(justfile, "fuzz-status") {
+        let Some(rest) = strip_comment(line).trim().strip_prefix("targets=(") else {
+            continue;
+        };
+        let Some((list, _)) = rest.split_once(')') else {
+            continue;
+        };
+        return words(list).map(str::to_owned).collect();
+    }
+    BTreeSet::new()
+}
+
+/// The fuzz targets the regression suite replays: the first argument of each
+/// `replay_each(…)` call. The definition of the function is not a call, and
+/// its body holds strings of its own.
+fn replayed_targets(source: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = source;
+    while let Some((before, after)) = rest.split_once("replay_each(") {
+        rest = after;
+        if before.ends_with("fn ") {
+            continue;
+        }
+        out.extend(after.split('"').nth(1).map(str::to_owned));
+    }
+    out
+}
+
+#[test]
+fn every_fuzz_target_the_crate_registers_is_one_every_sweep_actually_sweeps() {
+    // A fifth listing of the same four names, and the reason to check them:
+    // the sweeps that call themselves "every registered fuzz target" are four
+    // hand-written lists, and DEV-230 was filed believing there were three
+    // targets. Adding a `[[bin]]` and stopping there leaves a target that the
+    // release pre-flight does not run, that `fuzz-status` reports nothing
+    // about, and whose promoted artifacts nothing replays — each of them
+    // silently, with every list still internally consistent.
+    let justfile = read("Justfile");
+    let registered = registered_fuzz_targets();
+    assert!(
+        registered.len() >= 3,
+        "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
+         `[[bin]]` tables"
+    );
+
+    let listings = [
+        (
+            "`just fuzz-all-quick`",
+            swept_targets(&justfile, "fuzz-all-quick"),
+        ),
+        (
+            "`just fuzz-all-deep`, the release pre-flight",
+            swept_targets(&justfile, "fuzz-all-deep"),
+        ),
+        ("`just fuzz-status`", status_targets(&justfile)),
+        (
+            "`tests/fuzz_regressions.rs`",
+            replayed_targets(&read(
+                "crates/aozora-flavored-markdown/tests/fuzz_regressions.rs",
+            )),
+        ),
+    ];
+    for (label, listed) in &listings {
+        assert_eq!(
+            *listed,
+            registered,
+            "{label} and the fuzz manifest disagree about what the fuzz targets are.\n  \
+             registered, not listed here: {:?}\n  listed here, not registered: {:?}",
+            registered.difference(listed).collect::<Vec<_>>(),
+            listed.difference(&registered).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Where a triaged crash is pinned once it is promoted out of `fuzz/`.
+const REGRESSION_ROOT: &str = "crates/aozora-flavored-markdown/tests/fuzz_regressions";
+
+#[test]
+fn every_pinned_regression_sits_under_a_target_the_suite_still_replays() {
+    // The same shape one directory over, and the reason the test above is not
+    // enough on its own. `replay_each` returns green when it finds no
+    // artifacts, and the walk it uses returns nothing for a directory that is
+    // not there — so renaming a fuzz target, or moving its folder, takes its
+    // pinned crashes out of the suite while every test still passes. Seven
+    // artifacts are pinned here today; the count is asserted because a reader
+    // that found none would report the same silence as a suite replaying none.
+    let registered = registered_fuzz_targets();
+    let root = repo_root().join(REGRESSION_ROOT);
+    let mut pinned = 0usize;
+    let mut orphaned = Vec::new();
+
+    for entry in fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", root.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        let Some(target) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|_| path.is_dir())
+        else {
+            continue;
+        };
+        // The same filter the suite applies: a companion `.txt` / `.md` beside
+        // an artifact is archaeology, not an input.
+        let artifacts = fs::read_dir(&path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_none_or(|ext| ext != "txt" && ext != "md")
+            })
+            .count();
+        if artifacts == 0 {
+            continue;
+        }
+        pinned += artifacts;
+        if !registered.contains(target) {
+            orphaned.push(format!("{target} ({artifacts} artifact(s))"));
+        }
+    }
+
+    assert!(
+        orphaned.is_empty(),
+        "these directories under {REGRESSION_ROOT} hold pinned crashes and name no registered \
+         fuzz target: {orphaned:?}\n\
+         The suite replays a directory per registered target, so nothing reads these — the \
+         regressions they pin are unpinned and no test says so."
+    );
+    assert!(
+        pinned > 0,
+        "no pinned regression artifact found under {REGRESSION_ROOT}; either every promoted \
+         crash has been deleted, or this reader is looking in the wrong place — and a promoted \
+         crash is never deleted."
+    );
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_triple_only_libfuzzer_can_see_is_not_the_triple_cargo_fuzz_builds_for() {
+    // Every fuzz recipe here ends in `-- -max_total_time=…`, so the passthrough
+    // is the one place a `--target` is easiest to put and the one place it does
+    // nothing: libFuzzer takes `-flag=value` and would reject it outright.
+    let passed_through = fuzz_builds(concat!(
+        "fuzz-x TARGET:\n",
+        "    cargo +nightly fuzz run {{TARGET}} -- --target x86_64-unknown-linux-gnu\n",
+    ));
+    assert_eq!(passed_through.len(), 1);
+    assert!(
+        passed_through[0].triple.is_none(),
+        "a `--target` handed to libFuzzer counted as the triple cargo-fuzz builds for"
+    );
+
+    // `--target-dir` is a different flag, and a prefix match would read its
+    // value — a path — as a target triple.
+    let target_dir = fuzz_builds(concat!(
+        "fuzz-y:\n",
+        "    cargo +nightly fuzz run --target-dir /cargo/target t\n",
+    ));
+    assert_eq!(target_dir.len(), 1);
+    assert!(
+        target_dir[0].triple.is_none(),
+        "`--target-dir` was read as `--target`"
+    );
+
+    // Both spellings clap accepts, and the `{{VAR}}` the recipes actually use.
+    for line in [
+        "    cargo +nightly fuzz run --target x86_64-unknown-linux-gnu t -- -max_total_time=60\n",
+        "    cargo +nightly fuzz run --target={{_T}} t\n",
+        "    {{_fuzz}} bash -c 'cd crates/x && cargo +nightly fuzz build --target {{_T}} t'\n",
+    ] {
+        let justfile = format!("_T := \"x86_64-unknown-linux-gnu\"\nfuzz-z:\n{line}");
+        let builds = fuzz_builds(&justfile);
+        assert_eq!(builds.len(), 1, "{line}");
+        assert_eq!(
+            builds[0].triple.as_deref(),
+            Some("x86_64-unknown-linux-gnu"),
+            "the triple went unread in: {line}"
+        );
+        assert_eq!(builds[0].recipe, "fuzz-z", "{line}");
+    }
+
+    // A cargo-fuzz sub-command that compiles nothing has no triple to name,
+    // and prose about the flag is not the flag.
+    let not_a_build = fuzz_builds(concat!(
+        "# cargo fuzz run --target x86_64-unknown-linux-gnu is what the recipes do\n",
+        "fuzz-l:\n",
+        "    cargo +nightly fuzz list\n",
+        "    # cargo +nightly fuzz run t\n",
+    ));
+    assert!(
+        not_a_build.is_empty(),
+        "`cargo fuzz list`, or a commented-out run, counted as a build: {:?}",
+        not_a_build
+            .iter()
+            .map(|build| &build.line)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_sweep_reads_its_targets_and_a_definition_is_not_a_call() {
+    let justfile = concat!(
+        "fuzz-all-quick:\n",
+        "    just fuzz-quick parse_render\n",
+        "    just fuzz-quick sjis_decode\n",
+        "\n",
+        "fuzz-status:\n",
+        "    #!/usr/bin/env bash\n",
+        "    targets=(parse_render sjis_decode)\n",
+        "    printf \"%-22s\\n\" target\n",
+    );
+    let expected = BTreeSet::from(["parse_render".to_owned(), "sjis_decode".to_owned()]);
+    assert_eq!(swept_targets(justfile, "fuzz-all-quick"), expected);
+    assert_eq!(
+        status_targets(justfile),
+        expected,
+        "the bash array `fuzz-status` iterates went unread, so its list could drift unchecked"
+    );
+
+    let suite = concat!(
+        "fn replay_each(target: &str, assert_one: impl Fn(&str)) {\n",
+        "    panic!(\"regression artifact {label} still crashes\");\n",
+        "}\n",
+        "#[test]\n",
+        "fn parse_render_regressions_replay_cleanly() {\n",
+        "    replay_each(\n        \"parse_render\",\n        |text| drop(text),\n    );\n",
+        "}\n",
+    );
+    assert_eq!(
+        replayed_targets(suite),
+        BTreeSet::from(["parse_render".to_owned()]),
+        "the reader took a string out of `replay_each`'s own body, or missed the call that \
+         spreads its argument onto the next line"
     );
 }

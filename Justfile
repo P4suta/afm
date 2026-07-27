@@ -268,25 +268,45 @@ test-wasm:
 # container. Triaged crashes are promoted into `tests/fuzz_regressions/` so
 # `just test` replays them with no nightly required.
 
+# The triple every `fuzz*` recipe builds for. Stated rather than defaulted:
+# cargo-fuzz takes `--target` from the platform ITS OWN BINARY was built for,
+# and the fuzz image installs it with `cargo binstall`, which fetches the
+# upstream `x86_64-unknown-linux-musl` release asset. So every recipe below
+# asked for a musl build of this workspace, inside images (and on CI runners)
+# that carry only `x86_64-unknown-linux-gnu` — and got two errors, neither
+# about this repo's code: `sanitizer is incompatible with statically linked
+# libc`, then `can't find crate for core`. That is every fuzz recipe, for every
+# fuzz target, on a clean checkout: `fuzz-all-deep`'s "a clean run is the gate
+# before tagging a release" was a gate that had never once run (DEV-230).
+#
+# Installing the musl target into the fuzz image is the other repair, and it is
+# the worse one: the static libc that makes musl the attractive default is
+# exactly what the sanitizer refuses, so a musl build would have to hand the
+# static linking back (`-C target-feature=-crt-static`) before it could fuzz at
+# all — a second toolchain target bought to arrive where the gnu one already
+# is. Do not drop this flag as a redundant default. It is not one, and what
+# replaces it is not a fuzz run on the host triple but no fuzz run at all.
+_FUZZ_TRIPLE := "x86_64-unknown-linux-gnu"
+
 # Run the named fuzz target with arbitrary args (escape hatch for advanced use).
 [group('fuzz')]
 fuzz *ARGS:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo +nightly fuzz run {{ARGS}}'
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{ARGS}}'
 
 # 60-second smoke fuzz. `timeout` is a hard backstop if libFuzzer ever hangs.
 [group('fuzz')]
 fuzz-quick TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 90s cargo +nightly fuzz run {{TARGET}} -- -max_total_time=60'
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 90s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=60'
 
 # 5-minute deep fuzz — the gate to clear before tagging a release.
 [group('fuzz')]
 fuzz-deep TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 360s cargo +nightly fuzz run {{TARGET}} -- -max_total_time=300'
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 360s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=300'
 
 # 15-minute marathon fuzz — strongest single-target soak; exits cleanly at 15 min.
 [group('fuzz')]
 fuzz-marathon TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 1000s cargo +nightly fuzz run {{TARGET}} -- -max_total_time=900'
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 1000s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=900'
 
 # Reproduce every artifact under `fuzz/artifacts/<target>/` and print
 # (bytes, panic-message) for each. Exit status is the count of artifacts
@@ -310,7 +330,7 @@ fuzz-triage TARGET:
         # prefix — `fuzz/artifacts/...` is the form cargo-fuzz wants.
         rel="${art#crates/aozora-flavored-markdown/}"
         echo "==> ${rel}"
-        out=$({{_fuzz}} bash -c "cd crates/aozora-flavored-markdown && cargo +nightly fuzz run ${target} ${rel} 2>&1" || true)
+        out=$({{_fuzz}} bash -c "cd crates/aozora-flavored-markdown && cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} ${target} ${rel} 2>&1" || true)
         # Slice out the panic block: from the `thread … panicked` line
         # through the line just before the stack trace begins. That is
         # exactly where `assert_html_invariants` prints its tier label
