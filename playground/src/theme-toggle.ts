@@ -2,7 +2,7 @@
 // on a `#aozora-md-theme` element (declared in `index.html`) and persists
 // the user preference to localStorage so reloads are sticky.
 
-import { createEffect, createSignal, type Accessor } from 'solid-js';
+import { type Accessor, createEffect, createSignal } from 'solid-js';
 
 import { THEME_URLS, type ThemeMode } from './styles/theme-urls';
 
@@ -41,7 +41,7 @@ export function createTheme(): ThemeApi {
     if (link instanceof HTMLLinkElement) {
       link.href = THEME_URLS[m];
     }
-    document.documentElement.dataset['aozoraMdTheme'] = m;
+    document.documentElement.dataset.aozoraMdTheme = m;
     persist(m);
   });
 

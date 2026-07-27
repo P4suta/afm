@@ -34,6 +34,14 @@ jobs:
   build:
     name: build site
     runs-on: ubuntu-latest
+    # Every `just` step in this job is outside the dev image, so the `_in`
+    # switch at the top of the Justfile has to be told so — once, for the job,
+    # rather than per step. It is what makes `just doc` and `just
+    # playground-build` resolve rustdoc / wasm-pack / bun directly, using the
+    # toolchains installed below and writing their output onto the runner
+    # filesystem where the Pages upload can see it.
+    env:
+      AOZORA_MD_IN_CONTAINER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -55,15 +63,7 @@ jobs:
       # spell the command out with its own `-D warnings`, which the PR gate did
       # not have: two definitions of one build, differing in exactly the
       # direction that lets a rustdoc regression merge and fail here instead.
-      #
-      # `AOZORA_MD_IN_CONTAINER=1` is what lets a workflow outside the dev image
-      # run a `just` recipe — the `_in` switch at the top of the Justfile then
-      # resolves rustdoc directly, so the build uses the stable toolchain
-      # installed above and writes `target/doc` where the Pages upload can find
-      # it. Same arrangement as ci.yml's two `[group('native')]` gates.
       - name: Build rustdoc
-        env:
-          AOZORA_MD_IN_CONTAINER: "1"
         run: just doc
 
       - name: Install bun
@@ -78,15 +78,15 @@ jobs:
           # Keep in sync with the Dockerfile WASM_PACK_VERSION arg.
           version: 'v0.15.0'
 
-      - name: Build aozora-flavored-markdown-wasm package
-        # `-- --locked` reaches the `cargo build` wasm-pack shells out to.
-        run: wasm-pack build crates/aozora-flavored-markdown-wasm --target bundler --release --out-dir pkg --out-name aozora_flavored_markdown_wasm -- --locked
-
-      - name: Install playground deps
-        run: cd playground && bun install --frozen-lockfile
-
-      - name: Build playground
-        run: cd playground && bun run build
+      # The `playground-build` gate's own recipe, which pulls
+      # `playground-install` and `wasm-build` in as dependencies. Those three
+      # steps used to be written out here — the wasm-pack build, the bun
+      # install and the bun build — because the recipes hard-coded `docker
+      # compose run` and could not run on a bare runner at all. They go
+      # through the `_in` switch now, so the site is built by the same command
+      # a PR has to pass, using the bun and wasm-pack installed above.
+      - name: Build the playground
+        run: just playground-build
 
       # `cargo doc` writes no entry page for a workspace of several crates —
       # the rustdoc flag that would (`--enable-index-page`) is nightly-only and

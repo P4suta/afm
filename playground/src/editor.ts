@@ -20,8 +20,8 @@ import {
 import { searchKeymap } from '@codemirror/search';
 import { Compartment, EditorState } from '@codemirror/state';
 import {
-  EditorView,
   drawSelection,
+  EditorView,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightSpecialChars,
@@ -36,7 +36,7 @@ import { aozoraFolding } from './editor/folding';
 import { aozoraMdHover } from './editor/hover';
 import { aozoraInlayHints } from './editor/inlayHints';
 import { linkedRangesFilter } from './editor/linkedRanges';
-import { aozoraMdLintGutter, aozoraMdLinter } from './editor/linter';
+import { aozoraMdLinter, aozoraMdLintGutter } from './editor/linter';
 import { parserStateField } from './editor/parserState';
 import { aozoraMdWrapKeymap } from './editor/wrapCommands';
 

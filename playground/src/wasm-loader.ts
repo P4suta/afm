@@ -25,8 +25,10 @@ export function slugsJson(): string {
 // Wire types come straight from the wasm-pack `.d.ts`, which `tsify`
 // derives from the Rust IR + envelope types (ADR-0017) — so the `ir`
 // field below is the real IR tree rather than `unknown`, with no separate
-// codegen step that could drift. Re-exported here so existing consumers
-// (diagnostics.ts, App.tsx) keep importing them from this module.
+// codegen step that could drift. Re-exported here because this module is the
+// one edge to the wasm package; the IR types are consumed from here directly
+// (outline.ts, App.tsx) and the diagnostic ones through `diagnostics.ts`,
+// which `diagnostics.test.ts` holds every consumer to.
 //
 // The IR types are aliased back to their `Ir*` spelling on the way out:
 // unprefixed is right inside the Rust `ir` module, which supplies the
@@ -44,12 +46,12 @@ import type {
 } from 'aozora-flavored-markdown-wasm';
 
 export type {
-  Diagnostic,
-  Severity,
-  DiagnosticSource,
   Block as IrBlock,
+  Diagnostic,
+  DiagnosticSource,
   Document as IrDocument,
   Inline as IrInline,
+  Severity,
 } from 'aozora-flavored-markdown-wasm';
 export type { RenderOptions, RenderResult };
 

@@ -3,8 +3,15 @@
 // CommonMark + GFM + aozora) to HTML once via `marked`, with a TOC, a
 // focus trap, body-scroll lock, and Escape / backdrop close.
 
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { marked, type Tokens } from 'marked';
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  Show,
+} from 'solid-js';
 
 import notationGuideSource from '../notation-guide.md?raw';
 
@@ -111,6 +118,15 @@ export default function NotationGuide(props: NotationGuideProps) {
 
   return (
     <Show when={props.open}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: the backdrop is
+          the dialog's scrim, not a control — the dialog itself carries
+          role/aria-modal, and giving the scrim a role of its own would put a
+          second landmark in front of it.
+          biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path to
+          this same action is wired above — the `keydown` listener installed
+          while the dialog is open closes it on Escape, which is what a scrim
+          click does. A key handler here would be a second binding for one
+          action. */}
       <div
         class="aozora-md-pg-guide-backdrop"
         onClick={(e) => {
@@ -159,7 +175,11 @@ export default function NotationGuide(props: NotationGuideProps) {
                 </ul>
               </nav>
             </Show>
-            <div class="aozora-md-pg-guide-body" ref={bodyRef} innerHTML={html()} />
+            <div
+              class="aozora-md-pg-guide-body"
+              ref={bodyRef}
+              innerHTML={html()}
+            />
           </div>
         </div>
       </div>

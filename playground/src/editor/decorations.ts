@@ -13,17 +13,17 @@
 import { RangeSetBuilder } from '@codemirror/state';
 import {
   Decoration,
-  EditorView,
-  ViewPlugin,
   type DecorationSet,
+  type EditorView,
+  ViewPlugin,
   type ViewUpdate,
 } from '@codemirror/view';
 import {
   byteToUtf16,
-  parserStateField,
-  utf16ToByte,
   type NodeEntry,
   type ParserState,
+  parserStateField,
+  utf16ToByte,
 } from './parserState';
 
 /**

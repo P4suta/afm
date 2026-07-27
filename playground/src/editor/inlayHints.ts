@@ -14,13 +14,13 @@
 
 import {
   Decoration,
-  EditorView,
-  ViewPlugin,
-  WidgetType,
   type DecorationSet,
+  type EditorView,
+  ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from '@codemirror/view';
-import { byteToUtf16, parserStateField, type ParserState } from './parserState';
+import { byteToUtf16, type ParserState, parserStateField } from './parserState';
 
 // Inline widget that renders `→<resolved>` after a gaiji reference. The
 // codepoint and description feed the hover title; both are decorative and

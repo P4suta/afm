@@ -1204,13 +1204,29 @@ dist-assets-check:
 
 # Vite dev/preview server container — `--service-ports` is required so
 # `docker compose run` actually publishes 5173 (it doesn't by default).
-_pg := "docker compose run --rm --service-ports playground"
+#
+# Both prefixes go through the `_in` switch, like `_dev` / `_ci` / `_fuzz`.
+# While they were hard-coded `docker compose run`, the recipes below were the
+# only ones in this file that could not be run from inside the image — and
+# `docs.yml` builds the playground on a bare runner, so it spelled the
+# wasm-pack build, the bun install and the bun build out itself. Three second
+# definitions of one gate's command, carried in `gate_wiring.rs`'s
+# `RE_SPELLED_BUILD` as exemptions whose stated reason was exactly this. The
+# switch is what retires them: the Pages job now runs `just playground-build`,
+# the same recipe `just ci` runs (DEV-310).
+#
+# The playground service's `working_dir` is the repo root, not
+# `/workspace/playground`, so both sides of the switch start where `just`
+# itself starts and each recipe spells its own `cd playground` — the shape the
+# `fuzz*` recipes already use for `cd crates/aozora-flavored-markdown`. A
+# `cd` that only one side needed would be the drift this switch removes.
+_pg := if _in == "1" { "" } else { "docker compose run --rm --service-ports playground" }
 
 # Same container without publishing 5173. Used by `playground-install`
-# and `playground-build` so they share the `playground-node-modules`
+# and the gates below so they share the `playground-node-modules`
 # named volume but don't trip "address already in use" when an existing
 # Vite or dev server is bound to 5173 on the host.
-_pg_install := "docker compose run --rm playground"
+_pg_install := if _in == "1" { "" } else { "docker compose run --rm playground" }
 
 # Build the aozora-flavored-markdown-wasm package for the playground; output to `crates/aozora-flavored-markdown-wasm/pkg/`
 # (referenced by `playground/package.json` as `file:../crates/aozora-flavored-markdown-wasm/pkg`).
@@ -1252,32 +1268,81 @@ wasm-build-dev:
 # `bun install` once by hand and commit the lockfile with the bump.
 [group('playground')]
 playground-install: wasm-build
-    {{_pg_install}} bash -c 'bun install --frozen-lockfile'
+    {{_pg_install}} bash -c 'cd playground && bun install --frozen-lockfile'
 
 # Vite dev server with HMR at http://localhost:5173/
 [group('playground')]
 playground-dev: playground-install
-    {{_pg}} bash -c 'bun run dev -- --host 0.0.0.0'
+    {{_pg}} bash -c 'cd playground && bun run dev -- --host 0.0.0.0'
 
 # Same as `playground-dev` but uses the fast dev-profile wasm build for
 # inner-loop iteration (TS edits get HMR; wasm changes still need a
 # reload after `just wasm-build-dev`).
 [group('playground')]
 playground-dev-fast: wasm-build-dev
-    {{_pg_install}} bash -c 'bun install --frozen-lockfile' && \
-    {{_pg}} bash -c 'bun run dev -- --host 0.0.0.0'
+    {{_pg_install}} bash -c 'cd playground && bun install --frozen-lockfile' && \
+    {{_pg}} bash -c 'cd playground && bun run dev -- --host 0.0.0.0'
 
 # Production build → playground/dist/ (consumed by .github/workflows/docs.yml)
 # Also runs inside `playground` service to share the `node_modules` volume.
 [group('gate')]
 [group('playground')]
 playground-build: playground-install
-    {{_pg_install}} bash -c 'bun run build'
+    {{_pg_install}} bash -c 'cd playground && bun run build'
+
+# Biome over the playground: formatter, linter and import sorting in one pass
+# (`biome check`), which is what replaces the eslint + prettier pair a
+# TypeScript tree of this size would otherwise carry. Until it landed,
+# `tsc --noEmit` inside `playground-build` was the ENTIRE static analysis over
+# ~15 modules — and a type checker has no opinion about an unused import, a
+# `==`, a `console.log` left in a handler, or an interactive element no
+# keyboard can reach. The playground is the first consumer of the wasm
+# surface, so what goes unchecked here is what nobody notices about the
+# published API either.
+#
+# `--error-on-warnings` (in the `lint` script) is what makes this a gate
+# rather than a report: several of Biome's recommended rules default to
+# warn-level, and `biome check` exits 0 on those. The repo's stance on a lint
+# it has decided not to take is the `#[allow(..., reason = "…")]` one — say so
+# where the rule is configured — so the two declined rules say it here,
+# `biome.json` being JSON and unable to hold a comment of its own:
+#
+#   style/noNonNullAssertion — `tsconfig.json` sets
+#     `noUncheckedIndexedAccess`, so `entries[mid]` is `T | undefined` even
+#     inside a binary search that just computed `mid` in range. Taking the
+#     rule leaves two options at each of those sites: a `!`, or a defensive
+#     branch that cannot execute. The second is worse — it is untested code
+#     that looks tested.
+#   suspicious/noTemplateCurlyInString — scoped off in `biome.json`'s
+#     `overrides` for `editor/completion.ts` and `editor/wrapCommands.ts`
+#     ONLY, where `'｜${1:base}《${2:reading}》'` is CodeMirror snippet syntax
+#     in a plain string, which is exactly what that rule looks for. Everywhere
+#     else it still fires.
+#
+# `bun run lint:fix` (or `just playground-lint-fix`) applies the safe half.
+[group('gate')]
+[group('playground')]
+playground-lint: playground-install
+    {{_pg_install}} bash -c 'cd playground && bun run lint'
+
+# The writing half of `playground-lint`: applies Biome's safe fixes and
+# rewrites formatting. Mirrors `fmt` / `fmt-check` on the Rust side.
+[group('playground')]
+playground-lint-fix: playground-install
+    {{_pg_install}} bash -c 'cd playground && bun run lint:fix'
+
+# Vitest over the playground's pure modules, through `vite.config.ts` — see
+# the `test` block there for why the config is shared rather than split into a
+# `vitest.config.ts`.
+[group('gate')]
+[group('playground')]
+playground-test: playground-install
+    {{_pg_install}} bash -c 'cd playground && bun run test'
 
 # Preview the production build locally at http://localhost:5173/
 [group('playground')]
 playground-serve: playground-build
-    {{_pg}} bash -c 'bun run preview -- --host 0.0.0.0 --port 5173'
+    {{_pg}} bash -c 'cd playground && bun run preview -- --host 0.0.0.0 --port 5173'
 
 # --- native gates -------------------------------------------------------------
 #
@@ -1371,15 +1436,18 @@ ci:
     #     it does invoke rustc (and clang, for libFuzzer), so it stays in the
     #     foreground rather than joining the background lane. It runs after
     #     `udeps`, the other recipe that reaches for the nightly image.
-    #   * test-wasm and playground-build are the two wasm-pack gates and run
-    #     LAST in the foreground lane, in that order: wasm-pack invokes rustc
-    #     and shares the target dir, so they cannot overlap anything — but they
-    #     compile the same graph for wasm32, and the second finds it warm.
-    #     test-wasm leads because it fails on a broken export where
-    #     playground-build fails on a broken consumer of one. playground-build
-    #     stays last: it pulls `wasm-build` in as a dependency, so a wasm / IR /
-    #     diagnostic type change can no longer pass `just ci` while silently
-    #     breaking the playground's TypeScript.
+    #   * test-wasm and the three playground gates are the wasm-pack gates and
+    #     run LAST in the foreground lane, in that order: wasm-pack invokes
+    #     rustc and shares the target dir, so they cannot overlap anything —
+    #     but they compile the same graph for wasm32, and the ones after the
+    #     first find it warm. test-wasm leads because it fails on a broken
+    #     export where the playground gates fail on a broken consumer of one.
+    #     Among the playground three, lint and test come before the build:
+    #     each is seconds once `playground-install` has run, and the build is
+    #     the minute-long one. playground-build stays last: it pulls
+    #     `wasm-build` in as a dependency, so a wasm / IR / diagnostic type
+    #     change can no longer pass `just ci` while silently breaking the
+    #     playground's TypeScript.
     #
     # `nektos/act` — running ci.yml itself locally — was considered for this and
     # rejected. Every recipe reaches its tool through `docker compose run`, so a
@@ -1409,7 +1477,8 @@ ci:
               zizmor actionlint comment-discipline commitlint \
               msrv clippy build dist-assets-check \
               test test-doc prop spec doc doc-public coverage udeps \
-              fuzz-build test-wasm playground-build)
+              fuzz-build test-wasm \
+              playground-lint playground-test playground-build)
 
     # --- manifest assert: these two lanes ARE the gate set -------------------
     # "`just ci` is a superset of CI" used to be a sentence, and a sentence is

@@ -15,10 +15,19 @@
 // only reconfigures them on the live view, so all CodeMirror wiring stays
 // in one place.
 
-import { createSignal, onCleanup, Show, type Accessor, type Component } from 'solid-js';
 import type { EditorView } from '@codemirror/view';
+import {
+  type Accessor,
+  type Component,
+  createSignal,
+  onCleanup,
+  Show,
+} from 'solid-js';
 
-import { inlayHintsCompartment, structureHighlightCompartment } from '../editor';
+import {
+  inlayHintsCompartment,
+  structureHighlightCompartment,
+} from '../editor';
 import { aozoraDecorations } from '../editor/decorations';
 import { aozoraInlayHints } from '../editor/inlayHints';
 
@@ -41,7 +50,9 @@ const SettingsPanel: Component<SettingsPanelProps> = (props) => {
     if (rootEl && !rootEl.contains(event.target as Node)) setOpen(false);
   }
   document.addEventListener('mousedown', handleClickOutside);
-  onCleanup(() => document.removeEventListener('mousedown', handleClickOutside));
+  onCleanup(() =>
+    document.removeEventListener('mousedown', handleClickOutside),
+  );
 
   function toggleInlay() {
     const next = !inlay();
@@ -55,7 +66,9 @@ const SettingsPanel: Component<SettingsPanelProps> = (props) => {
     const next = !structure();
     setStructure(next);
     props.view()?.dispatch({
-      effects: structureHighlightCompartment.reconfigure(next ? aozoraDecorations : []),
+      effects: structureHighlightCompartment.reconfigure(
+        next ? aozoraDecorations : [],
+      ),
     });
   }
 
@@ -74,17 +87,25 @@ const SettingsPanel: Component<SettingsPanelProps> = (props) => {
       <Show when={open()}>
         <div class="aozora-md-pg-settings-popover" role="menu">
           <label class="aozora-md-pg-settings-row">
-            <input type="checkbox" checked={structure()} onChange={toggleStructure} />
+            <input
+              type="checkbox"
+              checked={structure()}
+              onChange={toggleStructure}
+            />
             <span class="aozora-md-pg-settings-label">
               構造ハイライト
-              <span class="aozora-md-pg-settings-sub">見出し・ルビ・傍点・注記を色分け表示</span>
+              <span class="aozora-md-pg-settings-sub">
+                見出し・ルビ・傍点・注記を色分け表示
+              </span>
             </span>
           </label>
           <label class="aozora-md-pg-settings-row">
             <input type="checkbox" checked={inlay()} onChange={toggleInlay} />
             <span class="aozora-md-pg-settings-label">
               外字インレイヒント
-              <span class="aozora-md-pg-settings-sub">※［＃...］の後ろに →解決字 を表示</span>
+              <span class="aozora-md-pg-settings-sub">
+                ※［＃...］の後ろに →解決字 を表示
+              </span>
             </span>
           </label>
         </div>

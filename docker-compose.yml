@@ -136,13 +136,20 @@ services:
   # Vite dev / preview server for the playground. Reuses the `dev` image
   # (bun + wasm-pack); `node_modules` lives in a named volume to avoid
   # dragging the dependency tree across the bind-mount boundary (slow on WSL).
+  #
+  # `working_dir` is the repo root, like every other service, NOT
+  # `/workspace/playground`: the `playground*` recipes go through the
+  # Justfile's `_in` switch, so the same command line also runs with no
+  # container around it at all (`docs.yml`, a devcontainer), where the cwd is
+  # wherever `just` was invoked. One `cd playground` inside each recipe is what
+  # makes the two identical; a working_dir only one of them saw is the drift.
   playground:
     build:
       context: .
       dockerfile: Dockerfile
       target: dev
     image: aozora-md-dev:local
-    working_dir: /workspace/playground
+    working_dir: /workspace
     user: "${AOZORA_MD_UID:-1000}:${AOZORA_MD_GID:-1000}"  # see `dev` service
     environment: *common-env
     volumes:

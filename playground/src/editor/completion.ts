@@ -18,11 +18,11 @@
 
 import {
   autocompletion,
-  snippet,
   type Completion,
   type CompletionContext,
   type CompletionResult,
   type CompletionSource,
+  snippet,
 } from '@codemirror/autocomplete';
 import type { EditorView } from '@codemirror/view';
 
@@ -182,7 +182,12 @@ function slugCompletion(entry: SlugEntry): Completion {
     label: entry.canonical,
     type: familyToKind(entry.family),
     detail: entry.doc,
-    apply: (view: EditorView, completion: Completion, from: number, to: number) => {
+    apply: (
+      view: EditorView,
+      completion: Completion,
+      from: number,
+      to: number,
+    ) => {
       // 既存の `］`（onType が ［＃］ で挿入したペア）を消費する。
       // hasClosing=true なら範囲を `to + 1` まで広げて重複の `］` を防ぐ。
       const doc = view.state.doc;
@@ -244,9 +249,13 @@ const aozoraMdCompletionSource: CompletionSource = (
 
   // 2) Structured snippets: 直前 1 文字がトリガー
   for (const trig of TRIGGER_SNIPPETS) {
-    if (!context.matchBefore(new RegExp(escapeRegex(trig.trigger) + '$'))) continue;
+    if (!context.matchBefore(new RegExp(`${escapeRegex(trig.trigger)}$`)))
+      continue;
     // `＃` trigger は ［＃ 直後では出さない（slug カタログが優先）
-    if ((trig.trigger === '＃' || trig.trigger === '#') && isInsideSlugBody(context)) {
+    if (
+      (trig.trigger === '＃' || trig.trigger === '#') &&
+      isInsideSlugBody(context)
+    ) {
       continue;
     }
     return {

@@ -6,7 +6,13 @@
 // is a separate always-on left column (OutlinePanel), not a tab here.
 // The active tab persists to localStorage.
 
-import { createSignal, For, Show, type Accessor, type Component } from 'solid-js';
+import {
+  type Accessor,
+  type Component,
+  createSignal,
+  For,
+  Show,
+} from 'solid-js';
 
 import type { IrDocument } from '../wasm-loader';
 import CodeView from './CodeView';
@@ -22,7 +28,9 @@ const STORAGE_KEY = 'aozora-md-playground:preview-tab';
 
 function loadTab(): TabId {
   try {
-    return globalThis.localStorage?.getItem(STORAGE_KEY) === 'json' ? 'json' : 'html';
+    return globalThis.localStorage?.getItem(STORAGE_KEY) === 'json'
+      ? 'json'
+      : 'html';
   } catch {
     return 'html';
   }
@@ -67,7 +75,9 @@ const PreviewPane: Component<PreviewPaneProps> = (props) => {
           <div class="aozora-md-root" innerHTML={props.html()} />
         </Show>
         <Show when={tab() === 'json'}>
-          <CodeView value={props.ir() ? JSON.stringify(props.ir(), null, 2) : ''} />
+          <CodeView
+            value={props.ir() ? JSON.stringify(props.ir(), null, 2) : ''}
+          />
         </Show>
       </div>
     </div>

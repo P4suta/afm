@@ -11,13 +11,13 @@
 // the diagnostic `kind`s arriving over the wire are aozora-notation
 // diagnostics. The wording below is tuned for casual playground use
 // rather than typesetter precision.
-import { linter, lintGutter, type Diagnostic } from '@codemirror/lint';
+import { type Diagnostic, linter, lintGutter } from '@codemirror/lint';
 import type { EditorView } from '@codemirror/view';
 import {
   byteToUtf16,
-  parserStateField,
   type DiagnosticEntry,
   type ParserState,
+  parserStateField,
 } from './parserState';
 
 /**
@@ -26,7 +26,10 @@ import {
  * parser's `diagnostics_json`. Unknown kinds fall through as `info`
  * with the raw kind name displayed so nothing is silently dropped.
  */
-function classify(entry: DiagnosticEntry): { severity: Diagnostic['severity']; message: string } {
+function classify(entry: DiagnosticEntry): {
+  severity: Diagnostic['severity'];
+  message: string;
+} {
   switch (entry.kind) {
     case 'unclosed_bracket':
       return { severity: 'error', message: '括弧が閉じられていません' };

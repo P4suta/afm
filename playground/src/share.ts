@@ -27,7 +27,9 @@ export function decodeSourceFromHash(hash: string): string | null {
     // The TS declaration is `string`, but the runtime returns null on
     // malformed input. Treat both null and "" as "no source" so a
     // share-link copy/paste that got mangled never crashes the boot.
-    const decoded = LZString.decompressFromEncodedURIComponent(v) as string | null;
+    const decoded = LZString.decompressFromEncodedURIComponent(v) as
+      | string
+      | null;
     if (decoded === null || decoded.length === 0) return null;
     return decoded;
   }

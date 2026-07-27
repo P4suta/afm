@@ -401,11 +401,10 @@ const RESOLUTION_FLOOR: &[(&str, usize)] = &[
     // `just msrv` — the same recipe `just ci` runs — so the flag it needs is
     // the Justfile's, where the floor above already covers it.
     //
-    // docs.yml fell from 3 to 2 for the same reason ci.yml fell to none: its
-    // `cargo doc` is now `just doc`, the recipe the `doc` gate runs, so the
-    // flag it needs is the Justfile's. What is left here is the wasm-pack
-    // build and the bun install, neither of which has a recipe to defer to.
-    (".github/workflows/docs.yml", 2),
+    // docs.yml is absent for the same reason: it fell from 3 to 2 when its
+    // `cargo doc` became `just doc`, and to none when the wasm-pack build and
+    // the bun install became `just playground-build` (DEV-310). Every flag it
+    // needs is in the Justfile, where the floor above covers it.
     (".github/workflows/publish-crates.yml", 2),
 ];
 
