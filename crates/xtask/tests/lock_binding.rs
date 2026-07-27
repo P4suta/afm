@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -56,9 +57,12 @@ const CARGO_SELF_LOCKING: &[(&str, &str)] = &[
     ("semver-checks", "has no `--locked` in its CLI"),
     (
         "fuzz",
-        "the fuzz crate is its own workspace and its `Cargo.lock` is \
-         git-ignored on purpose, so `--locked` would fail on a fresh clone \
-         rather than assert anything",
+        "cargo-fuzz 0.13.2 has no `--locked` and no way to pass one to the \
+         `cargo build` it shells out to. The fuzz crate's `Cargo.lock` is \
+         committed instead (DEV-293), `just fuzz-build` fails when a build \
+         rewrote it — the same refusal, one step later — and \
+         `just verify-version-pins` compares the versions the two lockfiles \
+         resolve to",
     ),
     ("update", "rewriting the lockfile is the whole point of it"),
 ];
@@ -644,6 +648,116 @@ fn a_js_install_must_be_frozen_and_a_script_run_is_not_an_install() {
     assert!(script.unbound.is_empty(), "{:?}", script.unbound);
 }
 
+// ---------------------------------------------------------------------------
+// the one exemption that promises machinery instead of describing a CLI
+// ---------------------------------------------------------------------------
+
+/// The lockfile the fuzz workspace resolves against.
+const FUZZ_LOCK: &str = "crates/aozora-flavored-markdown/fuzz/Cargo.lock";
+
+/// The versions a lockfile resolves each package to. A name can appear more
+/// than once — cargo keeps two incompatible majors side by side — so the
+/// answer is a set, and a subset relation rather than equality is what
+/// "resolves the same graph" means between two workspaces of different size.
+fn locked_versions(text: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut name: Option<String> = None;
+    for line in text.lines() {
+        let body = line.trim();
+        if body == "[[package]]" {
+            name = None;
+        } else if let Some(value) = body.strip_prefix("name = ") {
+            name = Some(value.trim_matches('"').to_owned());
+        } else if let Some(value) = body.strip_prefix("version = ") {
+            // The `version = 4` at the top of the file is the lockfile format,
+            // and it is the one `version` with no `name` above it.
+            if let Some(name) = name.take() {
+                out.entry(name)
+                    .or_default()
+                    .insert(value.trim_matches('"').to_owned());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_lockfile_that_stands_in_for_the_fuzz_exemption_resolves_the_graph_the_workspace_ships() {
+    // Every other entry in CARGO_SELF_LOCKING states a fact about a tool: this
+    // sub-command rewrites source, that one takes the lockfile as its input.
+    // `fuzz` is the only one whose reason promises machinery — a committed
+    // lockfile, a `just fuzz-build` that fails when a build rewrote it, a
+    // `just verify-version-pins` that compares what the two lockfiles resolve
+    // — and machinery promised in a comment is what the whole file exists to
+    // reject. Nothing checked it. The exemption was even accurate before this
+    // PR under an opposite arrangement (the lockfile was git-ignored on
+    // purpose), so the sentence changing is not something a reader would catch
+    // either.
+    //
+    // Measured here rather than left to the recipe, and measured wider than the
+    // recipe measures: `verify-version-pins` compares two names, `aozora` and
+    // `comrak`. The fuzz targets link the whole graph. `comrak` pinned to the
+    // same version while `comrak`'s own parser dependency resolved differently
+    // is a target fuzzing a parser this workspace does not ship, with both
+    // manifests and both named pins in perfect agreement.
+    let root = repo_root();
+    let fuzz_lock = root.join(FUZZ_LOCK);
+    let fuzz = fs::read_to_string(&fuzz_lock).unwrap_or_else(|e| {
+        panic!(
+            "reading {FUZZ_LOCK}: {e}\n\
+             The fuzz crate is its own workspace, so it resolves its own graph, and cargo-fuzz \
+             has no `--locked` to bind that resolution with. Without this file the targets \
+             re-resolve on every build and nothing in the repo can say what they were built \
+             against (DEV-293)."
+        )
+    });
+    let workspace = fs::read_to_string(root.join("Cargo.lock"))
+        .unwrap_or_else(|e| panic!("reading Cargo.lock: {e}"));
+
+    let fuzz = locked_versions(&fuzz);
+    let workspace = locked_versions(&workspace);
+    let shared: Vec<&String> = fuzz
+        .keys()
+        .filter(|name| workspace.contains_key(*name))
+        .collect();
+    assert!(
+        shared.len() >= 40 && workspace.len() >= 100,
+        "{} packages in the fuzz lockfile, {} in the workspace's, {} shared; the reader is not \
+         finding the `[[package]]` blocks",
+        fuzz.len(),
+        workspace.len(),
+        shared.len()
+    );
+
+    let mut drifted = Vec::new();
+    for name in shared {
+        let (theirs, ours) = (&fuzz[name], &workspace[name]);
+        if !theirs.is_subset(ours) {
+            drifted.push(format!("  {name}: fuzz {theirs:?} vs workspace {ours:?}"));
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "the fuzz targets and the library resolve different versions of the same crates:\n{}\n\
+         A subset is fine — the fuzz graph is the smaller one, and the workspace keeps two majors \
+         of a few crates for dependencies the harnesses never reach. A version the workspace does \
+         not have is not: the targets are then fuzzing code this repo does not ship. Re-resolve \
+         the fuzz workspace and commit {FUZZ_LOCK}.",
+        drifted.join("\n")
+    );
+
+    // And that the two names the recipe does compare are among them, so its
+    // narrower check is narrow rather than vacuous.
+    for name in ["aozora", "comrak"] {
+        assert!(
+            fuzz.contains_key(name) && workspace.contains_key(name),
+            "`{name}` is not in both lockfiles, and `just verify-version-pins` compares exactly \
+             it and one other by name — over a package one side does not have, that comparison \
+             passes on two empty strings"
+        );
+    }
+}
+
 #[test]
 fn a_subcommand_that_takes_no_locked_flag_is_exempt() {
     for &(sub, why) in CARGO_SELF_LOCKING {
@@ -689,6 +803,57 @@ fn a_mention_of_cargo_that_is_not_an_invocation_is_ignored() {
     let scanned = scan("release.yml", text, Syntax::Lines);
     assert_eq!(scanned.resolutions, 0, "{:?}", scanned.unbound);
     assert!(scanned.unbound.is_empty(), "{:?}", scanned.unbound);
+}
+
+#[test]
+fn a_lockfile_reads_as_its_packages_and_the_format_version_is_not_one() {
+    // Every `[[package]]` block is name-then-version, and the file opens with a
+    // bare `version = 4` that belongs to the format rather than to a crate. A
+    // reader that took that one would attribute it to whichever package it had
+    // seen last — or, first thing in the file, to none, and then quietly report
+    // one package fewer than the lockfile holds.
+    let lock = concat!(
+        "version = 4\n",
+        "\n",
+        "[[package]]\n",
+        "name = \"comrak\"\n",
+        "version = \"0.52.0\"\n",
+        "dependencies = [\n",
+        " \"entities\",\n",
+        "]\n",
+        "\n",
+        "[[package]]\n",
+        "name = \"rustc-hash\"\n",
+        "version = \"1.1.0\"\n",
+        "\n",
+        "[[package]]\n",
+        "name = \"rustc-hash\"\n",
+        "version = \"2.1.3\"\n",
+    );
+    let read_here = locked_versions(lock);
+    assert_eq!(
+        read_here.len(),
+        2,
+        "the format version was read as a package, or a block was missed: {read_here:?}"
+    );
+    assert_eq!(
+        read_here["comrak"],
+        BTreeSet::from(["0.52.0".to_owned()]),
+        "a package's version went unread: {read_here:?}"
+    );
+    // Two majors of one crate, which is why the comparison is over sets: the
+    // workspace really does hold two of `rustc-hash` and two of
+    // `unicode-width`, and a reader keeping one version per name would call the
+    // fuzz lockfile drifted for resolving the other.
+    assert_eq!(
+        read_here["rustc-hash"],
+        BTreeSet::from(["1.1.0".to_owned(), "2.1.3".to_owned()]),
+        "a second version of one package overwrote the first: {read_here:?}"
+    );
+    assert!(
+        BTreeSet::from(["2.1.3".to_owned()]).is_subset(&read_here["rustc-hash"]),
+        "the subset relation the assertion rests on does not hold for a package resolved twice"
+    );
 }
 
 #[test]

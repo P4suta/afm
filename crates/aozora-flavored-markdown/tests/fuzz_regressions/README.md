@@ -14,7 +14,7 @@ tests/fuzz_regressions/
     crash-<sha>            # raw byte payload, fed verbatim
     crash-<sha>.expect.txt # (optional) panic snippet, archaeology only
   render_blocks/
-    ...
+    .gitkeep               # nothing promoted yet — the directory still exists
   serialize_round_trip/
     ...
   sjis_decode/
@@ -22,8 +22,14 @@ tests/fuzz_regressions/
 ```
 
 The runner picks files up by directory walk — drop a new file in and
-`just test` will replay it without further plumbing. A target with no
-regressions yet has no directory at all; `just fuzz-promote` creates it.
+`just test` will replay it without further plumbing.
+
+Every registered fuzz target owns a directory here whether or not it has
+anything pinned, and `.gitkeep` is what keeps an empty one in git. A
+missing directory is a hard failure, not an empty replay: `read_dir`
+answered "no such directory" with an empty list, an empty list is a pass,
+and `render_blocks`, `serialize_round_trip` and `sjis_decode` therefore
+reported green over a directory that had never been created.
 
 ## Workflow
 

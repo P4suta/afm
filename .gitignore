@@ -43,8 +43,19 @@ yarn-error.log*
 # crates/aozora-flavored-markdown/fuzz/ — the bare `fuzz/*` form matched a
 # nonexistent top-level dir and never ignored anything).
 crates/*/fuzz/target/
-crates/*/fuzz/corpus/
 crates/*/fuzz/artifacts/
+# A corpus directory is two things at once: libFuzzer's scratch space, where
+# every input it finds interesting lands under a SHA-1 name, and the seed set
+# it starts from. The first is machine output and stays out of git; the second
+# is the repo's own example documents, installed by `just fuzz-seed` under a
+# `seed-` prefix, so a clean clone (and every CI run) starts from valid
+# markdown instead of mutating an empty byte string for the first minute.
+#
+# Spelled as "files inside a target's directory" rather than the directory
+# itself on purpose: git cannot re-include a path below an excluded directory,
+# so ignoring `corpus/` wholesale would make the negation below dead text.
+crates/*/fuzz/corpus/*/*
+!crates/*/fuzz/corpus/*/seed-*
 
 # Criterion
 /target/criterion/

@@ -23,6 +23,41 @@ aozora                    = { version = "=0.5.0", default-features = false }
 [workspace]
 members = ["."]
 
+# The lint policy the parent cannot hand down. The `[workspace]` table above is
+# what keeps libfuzzer-sys out of a stable `--workspace` build, and it is also
+# what puts this crate beyond the reach of `[lints] workspace = true`. Nothing
+# carried over — so until this table existed, the four fuzz targets compiled
+# under no lint policy at all, `unsafe_code` included, while every other crate
+# here forbids it (DEV-312).
+#
+# Four entries out of the parent's two dozen, and a subset on purpose rather
+# than a copy left half-finished. The rest of `[workspace.lints.rust]` is
+# API-surface and style policy for a published library — `unreachable_pub`,
+# `missing_debug_implementations`, the lifetime-hygiene block — and this crate
+# publishes nothing and exposes nothing: four `#![no_main]` bins whose whole
+# body is one `fuzz_target!`. Nothing holds the two tables in sync (there is no
+# mechanism that could, which is the same `[workspace]` boundary again), so a
+# line here has to be worth re-typing by hand. These four are: the safety
+# property, the two that catch a target rotting away from the API it fuzzes,
+# and the identifier rule.
+#
+# `deny` where the workspace says `warn`: those levels lean on `just clippy`
+# passing `-D warnings`, and `cargo fuzz build` has no such flag to lean on.
+# The env var that would supply one applies to every unit cargo-fuzz compiles,
+# dependencies included, so the level belongs here, where it reaches this
+# crate and stops.
+#
+# `forbid` on `unsafe_code` rather than `deny`, as the workspace has it:
+# libfuzzer-sys's `fuzz_target!` does expand to `#[no_mangle]` and to `unsafe`
+# blocks, and both are spans in an external macro, which rustc's `unsafe_code`
+# lint does not report. `just fuzz-build` is what checks that this still
+# compiles rather than a sentence claiming it does.
+[lints.rust]
+unsafe_code      = "forbid"
+missing_docs     = "deny"
+non_ascii_idents = "deny"
+dead_code        = "deny"
+
 [profile.release]
 debug = 1
 

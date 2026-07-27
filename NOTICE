@@ -62,6 +62,14 @@ upstream specifications. The JSON files are generated from the adjacent
 .txt sources via `just spec-refresh`; both sources and generated fixtures
 are committed verbatim.
 
+The same two .txt sources are also the origin of the fuzz seed corpus
+under crates/aozora-flavored-markdown/fuzz/corpus/*/seed-*, which `just
+fuzz-seed` writes: one file per spec example, extracted verbatim but for
+the spec's own `→`-for-tab convention. Those files are test inputs under
+the same licence and the same terms as the fixtures above. Like the rest
+of the fuzz crate they are excluded from the published package (cargo
+does not descend into a subdirectory holding its own Cargo.toml).
+
 
 ================================================================================
 3. Aozora Bunko annotation specification snapshots (fair use / quotation)

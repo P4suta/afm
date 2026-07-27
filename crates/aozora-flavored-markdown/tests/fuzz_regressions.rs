@@ -23,14 +23,21 @@
 //! ```
 //!
 //! The test discovers artifacts by reading the directory at run time,
-//! so a new file is picked up automatically and a target with nothing
-//! promoted yet needs no directory. The discovery walk returns
-//! artifacts in sorted order so failure messages stay stable across
-//! machines and `nextest` runs.
+//! so a new file is picked up automatically. Every registered fuzz
+//! target owns a directory here, empty or not (`.gitkeep` is what keeps
+//! an empty one in git), and a missing one is a hard failure: the walk
+//! used to answer "no such directory" with an empty list, and an empty
+//! list is a pass — so three of the four tests below replayed nothing
+//! at all and said so in green for as long as their directories did not
+//! exist. The discovery walk returns artifacts in sorted order so
+//! failure messages stay stable across machines and `nextest` runs.
 
+use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::str;
 
 use aozora::decode_sjis;
@@ -169,14 +176,11 @@ enum ReplayInput {
 /// failure points straight at the file on disk.
 fn replay_each(target: &str, assert_one: impl Fn(&str), how: ReplayInput) {
     let dir = regression_dir(target);
-    let artifacts = collect_artifacts(&dir);
-    if artifacts.is_empty() {
-        // No regressions captured yet — that's the steady-state of a
-        // healthy target. Test stays green so we can tell missing
-        // tests/fuzz_regressions/ apart from "no crashes recorded".
-        return;
-    }
-    for path in artifacts {
+    // No regressions captured yet is the steady state of a healthy target, so
+    // an EMPTY directory is a pass. A MISSING one is not: the two used to be
+    // the same answer, which is how this suite reported success over targets
+    // it had never read a byte for.
+    for path in collect_artifacts(&dir) {
         let path_display = path.display();
         let bytes = fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read regression artifact {path_display}: {e}"));
@@ -222,16 +226,31 @@ fn regression_dir(target: &str) -> PathBuf {
 }
 
 fn collect_artifacts(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "reading {}: {e}\n\
+             Every registered fuzz target owns a directory under \
+             tests/fuzz_regressions/, empty or not — `.gitkeep` is what tracks \
+             an empty one. A missing directory is not an empty one: this walk \
+             used to return no artifacts for it, and no artifacts is a pass.",
+            dir.display()
+        )
+    });
     let mut out: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             // Skip companion `.expect.txt` / `.md` files — they're
-            // archaeology, not test inputs.
+            // archaeology, not test inputs — and every dotfile, which is what
+            // `.gitkeep` is and what a stray `.DS_Store` would otherwise be
+            // replayed as. A promoted artifact is named for its hash and
+            // starts with `crash-` / `leak-` / `oom-`.
+            let hidden = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with('.'));
             path.is_file()
+                && !hidden
                 && path
                     .extension()
                     .is_none_or(|ext| ext != "txt" && ext != "md")
@@ -239,4 +258,44 @@ fn collect_artifacts(dir: &Path) -> Vec<PathBuf> {
         .collect();
     out.sort();
     out
+}
+
+#[test]
+fn a_missing_directory_fails_the_walk_and_an_empty_one_does_not() {
+    // The two answers this walk used to give as one. Every `#[test]` above
+    // asserts nothing at all when `collect_artifacts` comes back empty — that
+    // is what "no regressions pinned yet" looks like and it is a legitimate
+    // pass — so a walk that answered "no such directory" with an empty list
+    // handed three of those four tests a permanent, silent, green vacuum.
+    //
+    // Stated here rather than left to the four directories existing, because
+    // those are a fact about the tree today and this is the property the suite
+    // rests on: restore the `unwrap_or_default()` and every directory is still
+    // in place, every test above still passes, and the suite is one `mv` away
+    // from reporting success over nothing again with nothing to say so.
+    let missing = regression_dir("a_target_no_bin_table_declares");
+    assert!(
+        !missing.exists(),
+        "{} exists, so this test is measuring the wrong thing",
+        missing.display()
+    );
+    let walked = panic::catch_unwind(|| collect_artifacts(&missing));
+    assert!(
+        walked.is_err(),
+        "collect_artifacts returned {:?} for a directory that does not exist. An empty list is \
+         how a healthy target with nothing pinned reads, so the two states have to be told \
+         apart here — there is nowhere further up that can.",
+        walked.unwrap_or_default()
+    );
+
+    // And the half that must NOT fail, or the suite would demand a promoted
+    // crash per target and the first one would be manufactured to satisfy it.
+    let empty = env::temp_dir().join(format!("aozora-md-empty-regressions-{}", process::id()));
+    fs::create_dir_all(&empty).unwrap_or_else(|e| panic!("creating {}: {e}", empty.display()));
+    let walked = collect_artifacts(&empty);
+    drop(fs::remove_dir_all(&empty));
+    assert!(
+        walked.is_empty(),
+        "an empty regression directory yielded {walked:?}"
+    );
 }
