@@ -48,7 +48,10 @@ const VERSION_COMMENT_EXEMPT: &[(&str, &str)] = &[(
 /// stopped reading. A step written in a shape the line scanner does not
 /// recognise otherwise turns the whole test green.
 const USES_FLOOR: &[(&str, usize)] = &[
-    (".github/workflows/ci.yml", 20),
+    // ci.yml fell from 20 to 14 when eleven hand-written jobs collapsed into
+    // one matrix generated from the Justfile's `[group('gate')]`. Fewer jobs,
+    // not less reading: a floor tracks the file as it is.
+    (".github/workflows/ci.yml", 14),
     (".github/workflows/codeql.yml", 3),
     (".github/workflows/dependency-review.yml", 2),
     (".github/workflows/dev-image.yml", 5),
@@ -61,8 +64,9 @@ const USES_FLOOR: &[(&str, usize)] = &[
 ];
 
 /// Same floor for the checkout scan: the credential rule is worth nothing if
-/// the scanner finds no checkouts to apply it to.
-const CHECKOUT_FLOOR: usize = 20;
+/// the scanner finds no checkouts to apply it to. Fell from 20 to 18 with
+/// ci.yml's gate matrix — seven jobs' worth of checkouts became one leg's.
+const CHECKOUT_FLOOR: usize = 18;
 
 /// Actions this repo pins at two different commits, each with why it is still
 /// like that. Every entry is a LIVE DEFECT, not an exemption: an immutable pin
