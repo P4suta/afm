@@ -75,12 +75,38 @@ check:
 build:
     {{_dev}} cargo build --locked --workspace --all-targets
 
-# Build rustdoc for every crate — the only gate that runs the
-# `broken_intra_doc_links = "deny"` rustdoc lint (check / clippy skip it).
+# rustdoc's lints are almost all warn-by-default — `broken_intra_doc_links` is
+# the one that denies — so a `cargo doc` printing `private_intra_doc_links`,
+# `invalid_html_tags` or `redundant_explicit_links` still exits 0. `-D warnings`
+# is what makes the two recipes below gates instead of reports. It used to live
+# in `docs.yml` alone, i.e. the earliest a doc regression could fail was the
+# Pages deploy AFTER the merge, which is the one place the answer is too late.
+#
+# It is passed as an environment variable because it cannot be passed the usual
+# way: `rustdocflags` belongs in `.cargo/config.toml`, and this repo cannot have
+# that file — `.gitignore` excludes `/.cargo/` because CARGO_HOME resolves there
+# inside the dev image, so the config would be untracked and the gate would
+# exist only on the machine that wrote it.
+_DOC_DENY := "-D warnings"
+
+# Build rustdoc for every crate, private items included — the wider of the two
+# doc gates, and the only one that resolves a link written inside a private
+# item. check / clippy run no rustdoc lint at all.
 [group('gate')]
 [group('build')]
 doc:
-    {{_dev}} cargo doc --locked --workspace --no-deps --document-private-items
+    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --no-deps --document-private-items'
+
+# The build docs.rs performs: the public surface, no `--document-private-items`.
+# Not a subset of `doc` — documenting private items also SILENCES
+# `private_intra_doc_links`, so a public item linking into a private module
+# passes `doc` and dangles for every reader of the published documentation.
+# This recipe is the one kept equivalent to docs.rs's own invocation, so what a
+# PR checks is what consumers will actually get.
+[group('gate')]
+[group('build')]
+doc-public:
+    {{_dev}} bash -c 'RUSTDOCFLAGS="{{_DOC_DENY}}" cargo doc --locked --workspace --no-deps'
 
 # Build release binaries
 [group('build')]
@@ -1005,7 +1031,8 @@ ci:
     set -uo pipefail
 
     # Why this shape (no gate is weakened vs. the old sequential loop):
-    #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/coverage/udeps)
+    #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/doc-public/
+    #     coverage/udeps)
     #     all share ONE cargo target dir, so they contend on its build lock and
     #     CANNOT truly run in parallel — they stay sequential, ordered
     #     cheap-to-expensive so a failure surfaces fast. `msrv` leads: inside the
@@ -1054,7 +1081,7 @@ ci:
     fg_steps=(typos fmt-check strict-code verify-version-pins \
               zizmor actionlint comment-discipline commitlint \
               msrv clippy build dist-assets-check \
-              test test-doc prop spec doc coverage udeps \
+              test test-doc prop spec doc doc-public coverage udeps \
               playground-build)
 
     # --- manifest assert: these two lanes ARE the gate set -------------------

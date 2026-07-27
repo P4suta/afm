@@ -361,7 +361,12 @@ const RESOLUTION_FLOOR: &[(&str, usize)] = &[
     // Its one bare `cargo check` was the msrv job's, and that job now runs
     // `just msrv` — the same recipe `just ci` runs — so the flag it needs is
     // the Justfile's, where the floor above already covers it.
-    (".github/workflows/docs.yml", 3),
+    //
+    // docs.yml fell from 3 to 2 for the same reason ci.yml fell to none: its
+    // `cargo doc` is now `just doc`, the recipe the `doc` gate runs, so the
+    // flag it needs is the Justfile's. What is left here is the wasm-pack
+    // build and the bun install, neither of which has a recipe to defer to.
+    (".github/workflows/docs.yml", 2),
     (".github/workflows/publish-crates.yml", 2),
 ];
 

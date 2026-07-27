@@ -26,13 +26,30 @@
 //! or a gate whose recipe cannot be invoked by name are all states where the
 //! declaration is still perfectly consistent and something has quietly
 //! stopped running.
+//!
+//! There is a third way, and the `doc` gate was in it: a check that is
+//! declared, is run, and passes on the defect it exists for. rustdoc's lints
+//! are warn-by-default bar one, so `cargo doc` reports and exits 0; what made
+//! the gate bite at all was `[workspace.lints.rustdoc]`, which is a
+//! hand-written list of eight lints that reaches a crate only if that crate's
+//! manifest opts in with `[lints] workspace = true`. Neither half covers a
+//! lint nobody listed or a crate nobody opted in — and the `-D warnings` that
+//! does was written in `docs.yml`, i.e. one Pages deploy after the merge.
+//!
+//! Nothing above notices any of that, because every assertion up to here is
+//! about a recipe's NAME. The last section reads what a gate hands its tool,
+//! holds the rustdoc build the repo publishes to the shape docs.rs will
+//! build, and runs rustdoc against a probe so that "these flags deny" is
+//! measured rather than spelled.
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // reading a command out of a config file
@@ -112,11 +129,14 @@ fn declared_tools(text: &str) -> Vec<String> {
 
 /// What a `Justfile` recipe depends on, off its header line.
 fn recipe_dependencies(justfile: &str, recipe: &str) -> Vec<String> {
-    let header = justfile
-        .lines()
-        .find(|line| line.starts_with(&format!("{recipe}:")))
-        .unwrap_or_else(|| panic!("the Justfile has no `{recipe}:` recipe any more"));
-    let (_, deps) = header.split_once(':').expect("found by its colon");
+    header_dependencies(recipe_header(justfile, recipe))
+}
+
+/// The same question asked of a header already in hand. Found by name rather
+/// than by prefix, because a recipe may take parameters: the dependencies of
+/// `test *ARGS:` are not on a line that starts `test:`.
+fn header_dependencies(header: &str) -> Vec<String> {
+    let (_, deps) = header.split_once(':').unwrap_or((header, ""));
     words(strip_comment(deps)).map(str::to_owned).collect()
 }
 
@@ -328,8 +348,15 @@ fn job_needs(workflow: &str, job: &str) -> BTreeSet<String> {
 /// argument that is an expression (`just "$GATE"`) is left out — that one is
 /// the manifest, which is the point of it.
 fn recipes_invoked(workflow: &str) -> BTreeSet<String> {
+    recipes_invoked_in(&jobs_block(workflow))
+}
+
+/// The same question asked of one job's lines rather than a whole workflow.
+/// Which job runs a recipe is what decides whether it needs to be told where
+/// it is, so the answer has to be per-job.
+fn recipes_invoked_in(lines: &[&str]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for line in jobs_block(workflow) {
+    for line in lines {
         let mut rest = strip_comment(line);
         while let Some((_, after)) = rest.split_once("just ") {
             rest = after;
@@ -866,5 +893,728 @@ fn a_backend_prefixed_tool_declaration_reads_as_its_command_name() {
         declared_tools(mise),
         vec!["just".to_owned(), "typos".to_owned()],
         "the `[tools]` reader picked up the wrong table or the wrong name"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// reading what a recipe hands its tool
+// ---------------------------------------------------------------------------
+
+/// The tools whose invocation IS the definition of a build step. A workflow
+/// that spells one of these out has written a second copy of a build some
+/// recipe already owns; a workflow that runs `just <recipe>` has not.
+const BUILD_TOOLS: &[&str] = &["cargo", "wasm-pack", "bun"];
+
+/// `NAME := "value"` assignments whose right-hand side is one string literal.
+/// `_dev` and its siblings are `if` expressions and stay unresolved on
+/// purpose: nothing here asks what they expand to, only what they wrap.
+fn plain_variables(justfile: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in justfile.lines() {
+        if line.starts_with([' ', '\t', '#', '[']) {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(":=") else {
+            continue;
+        };
+        let Some(literal) = value
+            .trim()
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        else {
+            continue;
+        };
+        out.insert(name.trim().to_owned(), literal.to_owned());
+    }
+    out
+}
+
+/// One `{{VAR}}` substitution pass. The deny flag is held in a variable, and a
+/// reader that stopped at the interpolation would be reading the name of the
+/// policy instead of the policy.
+fn expand(line: &str, variables: &BTreeMap<String, String>) -> String {
+    let mut out = line.to_owned();
+    for (name, value) in variables {
+        out = out.replace(&format!("{{{{{name}}}}}"), value);
+    }
+    out
+}
+
+/// The words a shell would see, with quoting and grouping punctuation as
+/// separators. It is what lets one reader find `cargo doc` inside
+/// `{{_dev}} bash -c 'RUSTDOCFLAGS="…" cargo doc …'`.
+fn shell_tokens(line: &str) -> Vec<String> {
+    let flattened: String = line
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '"' | '\'' | '`' | '(' | ')' | '{' | '}' | ',') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    flattened.split_whitespace().map(str::to_owned).collect()
+}
+
+/// A sub-command reads as one only if it is a bare word: the token after
+/// `cargo` in `command -v cargo > /dev/null` is `>`, and that is not a call.
+fn is_subcommand_word(token: &str) -> bool {
+    token.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+/// Every `<tool> <sub-command>` this line runs, for the tools above. A
+/// `+nightly` between the two is a toolchain, not the call.
+fn tool_commands(line: &str) -> Vec<(String, String)> {
+    let tokens = shell_tokens(line);
+    let mut out = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        if !BUILD_TOOLS.contains(&token.as_str()) {
+            continue;
+        }
+        let mut next = at + 1;
+        while tokens.get(next).is_some_and(|token| token.starts_with('+')) {
+            next += 1;
+        }
+        if let Some(sub) = tokens.get(next).filter(|token| is_subcommand_word(token)) {
+            out.push((token.clone(), sub.clone()));
+        }
+    }
+    out
+}
+
+/// Does this line build documentation? `cargo doc` and `cargo rustdoc` do;
+/// `just doc` does not — it runs the recipe that does, which is the whole
+/// point of the distinction.
+fn builds_rustdoc(line: &str) -> bool {
+    tool_commands(line)
+        .iter()
+        .any(|(tool, sub)| tool == "cargo" && matches!(sub.as_str(), "doc" | "rustdoc"))
+}
+
+/// The value a command assigns to `RUSTDOCFLAGS`, quotes resolved. This is the
+/// only channel the flags can arrive by: `rustdocflags` would otherwise belong
+/// in `.cargo/config.toml`, and `/.cargo/` is git-ignored here because
+/// `CARGO_HOME` resolves there inside the dev image.
+fn rustdocflags_on(line: &str) -> Option<&str> {
+    let after = line.split_once("RUSTDOCFLAGS=")?.1;
+    match after.chars().next()? {
+        quote @ ('"' | '\'') => after[1..].split(quote).next(),
+        _ => after.split_whitespace().next(),
+    }
+}
+
+/// Do these flags turn a rustdoc warning into a failure?
+fn denies_warnings(flags: &str) -> bool {
+    let words: Vec<&str> = flags.split_whitespace().collect();
+    words
+        .iter()
+        .any(|word| matches!(*word, "-Dwarnings" | "--deny=warnings"))
+        || words
+            .windows(2)
+            .any(|pair| matches!(pair[0], "-D" | "--deny") && pair[1] == "warnings")
+}
+
+/// The indented lines under a recipe header.
+fn recipe_body<'a>(justfile: &'a str, recipe: &str) -> Vec<&'a str> {
+    let header = recipe_header(justfile, recipe);
+    justfile
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| line.starts_with([' ', '\t']) || line.trim().is_empty())
+        .collect()
+}
+
+/// A documentation build the `Justfile` defines: the recipe that writes it,
+/// the flags it hands rustdoc, and the arguments it hands cargo.
+struct DocBuild {
+    recipe: String,
+    line: String,
+    flags: Option<String>,
+    arguments: Vec<String>,
+}
+
+/// Every documentation build in the `Justfile`, attributed to its recipe.
+fn doc_builds(justfile: &str) -> Vec<DocBuild> {
+    let variables = plain_variables(justfile);
+    let mut recipe = String::new();
+    let mut out = Vec::new();
+    for line in justfile.lines() {
+        if !line.starts_with([' ', '\t']) {
+            // A column-zero line is a header, an assignment, an attribute or a
+            // comment. Only the first names the recipe the indented lines
+            // under it belong to — and a comment holding a colon would
+            // otherwise read as one.
+            if let Some(name) = recipe_name(line).filter(|_| !line.starts_with(['#', '['])) {
+                recipe = name;
+            }
+            continue;
+        }
+        let expanded = expand(strip_comment(line), &variables);
+        if !builds_rustdoc(&expanded) {
+            continue;
+        }
+        let flags = rustdocflags_on(&expanded).map(str::to_owned);
+        out.push(DocBuild {
+            recipe: recipe.clone(),
+            arguments: shell_tokens(&expanded),
+            line: expanded,
+            flags,
+        });
+    }
+    out
+}
+
+/// Every `<tool> <sub-command>` a gate runs, transitively through the recipes
+/// it depends on, mapped to the gate that owns it. `playground-build` reaches
+/// `wasm-pack build` through two dependencies, and a copy of that command in a
+/// workflow is a second definition however far away the original sits.
+fn commands_owned_by_gates(justfile: &str) -> BTreeMap<(String, String), String> {
+    let variables = plain_variables(justfile);
+    let mut out = BTreeMap::new();
+    for gate in recipes_in_group(justfile, "gate") {
+        let mut pending = vec![gate.clone()];
+        let mut seen = BTreeSet::new();
+        while let Some(recipe) = pending.pop() {
+            if !seen.insert(recipe.clone()) {
+                continue;
+            }
+            pending.extend(header_dependencies(recipe_header(justfile, &recipe)));
+            for line in recipe_body(justfile, &recipe) {
+                let expanded = expand(strip_comment(line), &variables);
+                for command in tool_commands(&expanded) {
+                    out.entry(command).or_insert_with(|| gate.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Does this recipe reach its tool through `docker compose`? Those are the
+/// recipes that have to be told where they are when something outside the dev
+/// image runs them.
+fn recipe_runs_in_a_container(justfile: &str, recipe: &str) -> bool {
+    recipe_body(justfile, recipe).iter().any(|line| {
+        let body = strip_comment(line);
+        [
+            "{{_dev}}",
+            "{{_ci}}",
+            "{{_fuzz}}",
+            "{{_pg",
+            "docker compose",
+        ]
+        .iter()
+        .any(|marker| body.contains(marker))
+    })
+}
+
+fn recipe_exists(justfile: &str, recipe: &str) -> bool {
+    justfile.lines().any(|line| {
+        !line.starts_with([' ', '\t', '#', '[']) && recipe_name(line).as_deref() == Some(recipe)
+    })
+}
+
+/// Every workflow. Only ci.yml was ever read for a second definition of a
+/// gate, and the `cargo doc` this PR deleted was in docs.yml.
+fn workflow_files() -> Vec<PathBuf> {
+    let dir = repo_root().join(".github/workflows");
+    let mut out: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The repo-relative name of a path, for a failure message.
+fn label_of(path: &Path) -> String {
+    path.strip_prefix(repo_root())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// the doc gates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_rustdoc_build_this_repo_drives_denies_warnings() {
+    // rustdoc denies exactly one of its lints by default
+    // (`broken_intra_doc_links`); the rest — invalid HTML, a link out of a
+    // private item, a redundant explicit link — are warnings, and a
+    // `cargo doc` that prints them exits 0. `[workspace.lints.rustdoc]` is
+    // what used to make the difference, and it covers two things less than it
+    // looks: only the eight lints someone wrote down, and only in a crate
+    // whose manifest says `[lints] workspace = true`. Measured, not inferred —
+    // drop that opt-in from one crate and an unclosed `<div>` in its docs is a
+    // warning `just doc` exits 0 on. `-D warnings` is the half that does not
+    // ask which crate or which lint.
+    //
+    // The assertion is over every documentation build the file defines rather
+    // than over the two recipes by name: a third one added without the flag is
+    // the same hole reopened, and naming today's recipes would not see it.
+    let justfile = read("Justfile");
+    let builds = doc_builds(&justfile);
+    // A blindness check only — how MANY doc builds there should be is the
+    // docs.rs test's question, and a floor that also answered it would report
+    // the wrong defect.
+    assert!(
+        !builds.is_empty(),
+        "the Justfile came out with no rustdoc build at all; the reader is not finding \
+         `cargo doc` in a recipe body"
+    );
+    for build in &builds {
+        let flags = build.flags.as_deref().unwrap_or("");
+        assert!(
+            denies_warnings(flags),
+            "`just {}` builds documentation with RUSTDOCFLAGS=`{flags}`, which does not deny \
+             warnings — so every warn-level rustdoc lint reports and exits 0, and the recipe is \
+             a report rather than a gate:\n      {}",
+            build.recipe,
+            build.line.trim()
+        );
+    }
+}
+
+#[test]
+fn the_justfile_is_the_only_place_a_documentation_build_is_written() {
+    // The other half of the same defect. `docs.yml` spelled the build out
+    // itself, with a `-D warnings` the recipe did not have: two definitions of
+    // one command, differing in exactly the direction that lets a regression
+    // merge green and fail on the deploy. A workflow that needs the doc build
+    // runs `just doc`, so there is one definition to keep strict.
+    let mut scanned = 0;
+    let root = repo_root();
+    let extra = [root.join("Dockerfile"), root.join("bacon.toml")];
+    for path in workflow_files().into_iter().chain(extra) {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        for (index, line) in text.lines().enumerate() {
+            let body = strip_comment(line);
+            let at = index + 1;
+            assert!(
+                !builds_rustdoc(body),
+                "{label}:{at} runs rustdoc itself: `{}`\n\
+                 The `doc` / `doc-public` recipes are the definition of that build — call one \
+                 with `just`, or this file is a second copy of it that drifts on its own.",
+                body.trim()
+            );
+            assert!(
+                !body.contains("RUSTDOCFLAGS"),
+                "{label}:{at} sets RUSTDOCFLAGS: `{}`\n\
+                 The rustdoc warning policy belongs to the recipe, where every runner of it — CI, \
+                 the deploy, a laptop — gets the same one.",
+                body.trim()
+            );
+        }
+        scanned += 1;
+    }
+    assert!(
+        scanned >= 5,
+        "only {scanned} file(s) scanned; the reader is not finding the workflows"
+    );
+
+    // And the positive half: the deploy has to reach the build through the
+    // recipe, or deleting the copy just deleted the deploy's docs.
+    assert!(
+        recipes_invoked(&read(".github/workflows/docs.yml")).contains("doc"),
+        "docs.yml no longer runs `just doc`. It publishes rustdoc to Pages, so it either calls \
+         the recipe or has grown its own definition of the build again."
+    );
+}
+
+#[test]
+fn a_gate_builds_the_documentation_docs_rs_will_publish() {
+    // `--document-private-items` is not a superset. It also SILENCES
+    // `private_intra_doc_links`, so a public item linking into a private
+    // module passes a gate that documents everything and dangles for every
+    // reader of the published docs. While `doc` was the only rustdoc gate,
+    // nothing in the repo built what docs.rs builds.
+    let justfile = read("Justfile");
+    let manifest = recipes_in_group(&justfile, "gate");
+    let builds = doc_builds(&justfile);
+    let published: Vec<&DocBuild> = builds
+        .iter()
+        .filter(|build| {
+            manifest.contains(&build.recipe)
+                && !build
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--document-private-items")
+        })
+        .collect();
+    assert!(
+        !published.is_empty(),
+        "every rustdoc gate passes `--document-private-items`: {:?}. docs.rs does not, so what \
+         a PR checks is not what consumers get — and the lints that only fire on the public \
+         build fire first for them.",
+        builds.iter().map(|build| &build.recipe).collect::<Vec<_>>()
+    );
+    for build in published {
+        for required in ["--locked", "--workspace", "--no-deps"] {
+            assert!(
+                build.arguments.iter().any(|argument| argument == required),
+                "`just {}` is the docs.rs-equivalent gate and is missing `{required}`:\n      {}",
+                build.recipe,
+                build.line.trim()
+            );
+        }
+    }
+}
+
+/// A crate whose documentation trips one warn-by-default rustdoc lint
+/// (`invalid_html_tags`) and nothing else.
+const PROBE_SOURCE: &str = "//! probe: <div>\n";
+
+/// Numbers the probe directories so two of these can run side by side.
+static PROBE_RUNS: AtomicU32 = AtomicU32::new(0);
+
+/// Does rustdoc accept [`PROBE_SOURCE`] when given these flags? Run rather
+/// than read: "`-D warnings` denies" is a claim about a tool, and every other
+/// assertion in this file could pass on a Justfile whose flags were a typo.
+fn rustdoc_accepts_the_probe(flags: &[&str]) -> bool {
+    let run = PROBE_RUNS.fetch_add(1, Ordering::Relaxed);
+    let dir = env::temp_dir().join(format!("aozora-md-doc-probe-{}-{run}", process::id()));
+    let source = dir.join("probe.rs");
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("creating {}: {e}", dir.display()));
+    fs::write(&source, PROBE_SOURCE)
+        .unwrap_or_else(|e| panic!("writing {}: {e}", source.display()));
+    let out = Command::new("rustdoc")
+        .arg(&source)
+        .arg("--out-dir")
+        .arg(dir.join("doc"))
+        .args(flags)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running rustdoc: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where the toolchain is installed."
+            )
+        });
+    let accepted = out.status.success();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    drop(fs::remove_dir_all(&dir));
+    assert!(
+        accepted || stderr.contains("div"),
+        "rustdoc rejected the probe for something other than the lint under test:\n{stderr}"
+    );
+    accepted
+}
+
+#[test]
+fn the_flags_the_doc_gates_pass_are_what_makes_a_rustdoc_warning_fail() {
+    let justfile = read("Justfile");
+    let flag_sets: BTreeSet<String> = doc_builds(&justfile)
+        .into_iter()
+        .filter_map(|build| build.flags)
+        .collect();
+    assert!(
+        !flag_sets.is_empty(),
+        "no documentation build in the Justfile sets RUSTDOCFLAGS at all, so rustdoc runs with \
+         its own defaults and its warn-level lints cannot fail a gate"
+    );
+
+    // The control, and the reason the flags are load-bearing: the probe is a
+    // WARNING to rustdoc itself. Left alone it prints and exits 0 — which is
+    // what a workspace crate got whenever the hand-written deny list did not
+    // reach it.
+    assert!(
+        rustdoc_accepts_the_probe(&[]),
+        "the probe no longer trips a warn-level rustdoc lint — it now fails on its own, so this \
+         test would pass without any flags at all. Pick a lint that is still warn-by-default."
+    );
+    for flags in &flag_sets {
+        let split: Vec<&str> = flags.split_whitespace().collect();
+        assert!(
+            !rustdoc_accepts_the_probe(&split),
+            "RUSTDOCFLAGS=`{flags}` still lets a warn-level rustdoc lint through. The flags are \
+             in the recipe but they do not deny, so the gate reports and passes."
+        );
+    }
+}
+
+#[test]
+fn the_doc_gates_warning_policy_is_not_parked_in_a_git_ignored_config() {
+    // Where the flags would naturally live, and cannot. `/.cargo/` is ignored
+    // because `CARGO_HOME` resolves there inside the dev image, so a
+    // `rustdocflags` written into `.cargo/config.toml` would be a gate that
+    // exists only on the machine that wrote it — green everywhere it was
+    // never installed.
+    let ignored = read(".gitignore")
+        .lines()
+        .any(|line| line.trim() == "/.cargo/");
+    assert!(
+        ignored,
+        "`/.cargo/` is no longer git-ignored. If a tracked `.cargo/config.toml` is possible now, \
+         `rustdocflags` belongs there and the env-var route the recipes take can be retired — \
+         but decide it, do not leave both."
+    );
+    let config = repo_root().join(".cargo/config.toml");
+    if let Ok(text) = fs::read_to_string(&config) {
+        assert!(
+            !text.to_lowercase().contains("rustdocflags"),
+            "{} carries rustdocflags, and git ignores that path: the doc gates would deny \
+             warnings only for whoever has this file.",
+            label_of(&config)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// one definition of a build, wherever it is written
+// ---------------------------------------------------------------------------
+
+/// Workflow steps that spell out a build a gate already defines, each with the
+/// reason it cannot call the recipe instead. Every row is a second definition
+/// of one command — the arrangement removed here for rustdoc and still in
+/// place for these.
+const RE_SPELLED_BUILD: &[(&str, &str, &str, &str)] = &[
+    (
+        ".github/workflows/docs.yml",
+        "wasm-pack",
+        "build",
+        "`wasm-build` wraps wasm-pack in `{{_dev}}`, and the Pages job has no dev image — \
+         it builds on the native runner so the artefacts land where the upload can see them.",
+    ),
+    (
+        ".github/workflows/docs.yml",
+        "bun",
+        "install",
+        "`playground-install` hard-codes `docker compose run --rm playground` rather than \
+         going through the `_in` switch, so unlike `just doc` it cannot be run natively at all.",
+    ),
+    (
+        ".github/workflows/docs.yml",
+        "bun",
+        "run",
+        "`playground-build`, same reason as the `bun install` above.",
+    ),
+];
+
+#[test]
+fn no_workflow_spells_out_a_build_a_gate_recipe_already_defines() {
+    // `the_workflow_hand_writes_no_gate_of_its_own` asks this of ci.yml, by
+    // NAME. Both narrowings mattered: the duplicate lived in docs.yml, and it
+    // never named the `doc` gate — it wrote the gate's command out instead.
+    // What a check is, is the command it runs, so that is what has to be
+    // single-sourced.
+    let justfile = read("Justfile");
+    let owned = commands_owned_by_gates(&justfile);
+    assert!(
+        owned.len() >= 8,
+        "the gates came out running {owned:?}; the reader is not finding their bodies"
+    );
+
+    let mut re_spelled = Vec::new();
+    for path in workflow_files() {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        for line in jobs_block(&text) {
+            let body = strip_comment(line);
+            for (tool, sub) in tool_commands(body) {
+                let Some(gate) = owned.get(&(tool.clone(), sub.clone())) else {
+                    continue;
+                };
+                if RE_SPELLED_BUILD
+                    .iter()
+                    .any(|&(file, owner, name, _)| file == label && owner == tool && name == sub)
+                {
+                    continue;
+                }
+                re_spelled.push(format!(
+                    "{label}: `{tool} {sub}` is the build `just {gate}` defines\n      {}",
+                    body.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        re_spelled.is_empty(),
+        "workflow steps that re-spell a gate's build:\n{}\n\
+         Run the recipe instead, or add the step to RE_SPELLED_BUILD with the reason it cannot — \
+         a second copy drifts from the first in whichever direction nobody is looking.",
+        re_spelled.join("\n")
+    );
+}
+
+#[test]
+fn a_workflow_that_runs_a_containerized_recipe_says_where_it_is() {
+    // The seam calling the recipe opened. Every recipe here reaches its tool
+    // through `docker compose run`, and `AOZORA_MD_IN_CONTAINER=1` is what
+    // makes the `_in` switch resolve it directly instead. A job on a bare
+    // runner that forgets it does not fail loudly — it builds inside a
+    // container whose filesystem the next step cannot read.
+    //
+    // ci.yml's two native jobs were checked for this already; the rule is not
+    // about being native, it is about being outside the dev image, which is
+    // every job that does not pull it.
+    let justfile = read("Justfile");
+    let mut asked = 0;
+    for path in workflow_files() {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        for job in job_keys(&text) {
+            let Some(lines) = job_lines(&text, &job) else {
+                continue;
+            };
+            let pulls_the_image = lines
+                .iter()
+                .any(|line| strip_comment(line).contains("setup-dev-image"));
+            for recipe in recipes_invoked_in(&lines) {
+                assert!(
+                    recipe_exists(&justfile, &recipe),
+                    "{label}'s `{job}` job runs `just {recipe}` and the Justfile has no such \
+                     recipe any more"
+                );
+                if pulls_the_image || !recipe_runs_in_a_container(&justfile, &recipe) {
+                    continue;
+                }
+                asked += 1;
+                assert!(
+                    lines.iter().any(|line| strip_comment(line)
+                        .trim()
+                        .starts_with("AOZORA_MD_IN_CONTAINER:")),
+                    "{label}'s `{job}` job runs `just {recipe}` without pulling the dev image and \
+                     without setting AOZORA_MD_IN_CONTAINER. The recipe will wrap its tool in \
+                     `docker compose run`, so the job tests an image it did not build and writes \
+                     its output where the next step cannot find it."
+                );
+            }
+        }
+    }
+    // Two before this PR (`msrv`, `commitlint`), three with docs.yml's
+    // `just doc`. The floor says the reader still sees such a job at all, not
+    // how many there are: a workflow deleting its recipe call is that
+    // workflow's business, a reader that stopped finding them is this test's.
+    assert!(
+        asked >= 2,
+        "only {asked} job(s) run a containerized recipe outside the dev image; the reader is not \
+         finding them"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// what the doc readers claim, pinned both ways
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_doc_build_without_the_deny_is_read_as_one_and_with_it_is_not() {
+    let justfile = concat!(
+        "_DENY := \"-D warnings\"\n",
+        "\n",
+        "# Build the docs, and mind the `cargo doc` in this comment.\n",
+        "[group('gate')]\n",
+        "doc:\n",
+        "    {{_dev}} bash -c 'cargo doc --locked --workspace --document-private-items'\n",
+        "\n",
+        "doc-public:\n",
+        "    {{_dev}} bash -c 'RUSTDOCFLAGS=\"{{_DENY}}\" cargo doc --locked --workspace'\n",
+        "\n",
+        "publish:\n",
+        "    {{_dev}} just doc\n",
+    );
+    let builds = doc_builds(justfile);
+    assert_eq!(
+        builds.len(),
+        2,
+        "a `cargo doc` in a comment, or a `just doc`, was counted as a build: {:?}",
+        builds.iter().map(|build| &build.line).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        builds[0].recipe, "doc",
+        "a build was attributed to the wrong recipe"
+    );
+    assert!(
+        builds[0].flags.is_none(),
+        "a recipe with no RUSTDOCFLAGS came out carrying some"
+    );
+    assert_eq!(
+        builds[1].flags.as_deref(),
+        Some("-D warnings"),
+        "the interpolated deny flag was not resolved through the variable"
+    );
+    assert!(
+        denies_warnings(builds[1].flags.as_deref().unwrap_or("")),
+        "the resolved flags did not read as denying warnings"
+    );
+    assert!(
+        builds[1]
+            .arguments
+            .iter()
+            .all(|argument| argument != "--document-private-items"),
+        "the docs.rs-shaped build was read as documenting private items"
+    );
+}
+
+#[test]
+fn a_deny_that_covers_something_other_than_warnings_is_not_the_policy() {
+    // The flags are a free-form string, so "it is set" is not the question.
+    for spelling in ["-D warnings", "--cfg docsrs -Dwarnings", "--deny warnings"] {
+        assert!(
+            denies_warnings(spelling),
+            "`{spelling}` denies warnings and was not read as doing so"
+        );
+    }
+    assert!(
+        !denies_warnings(""),
+        "empty flags counted as a warning policy"
+    );
+    assert!(
+        !denies_warnings("-W warnings"),
+        "a warn-level flag counted as a deny"
+    );
+    assert!(
+        !denies_warnings("-D broken_intra_doc_links"),
+        "denying one lint counted as denying the class — the point of the flag is the lints \
+         nobody has listed, including the ones that do not exist yet"
+    );
+    assert!(
+        !denies_warnings("-A warnings"),
+        "an allow counted as a deny"
+    );
+}
+
+#[test]
+fn a_recipes_own_command_is_owned_and_a_recipe_it_depends_on_is_too() {
+    let justfile = concat!(
+        "[group('gate')]\n",
+        "playground-build: playground-install\n",
+        "    {{_pg}} bash -c 'bun run build'\n",
+        "\n",
+        "playground-install: wasm-build\n",
+        "    {{_pg}} bash -c 'bun install --frozen-lockfile'\n",
+        "\n",
+        "wasm-build:\n",
+        "    {{_dev}} bash -c 'wasm-pack build crates/x -- --locked'\n",
+        "\n",
+        "[group('lint')]\n",
+        "fmt:\n",
+        "    {{_dev}} cargo fmt --all\n",
+    );
+    let owned = commands_owned_by_gates(justfile);
+    for command in [("bun", "run"), ("bun", "install"), ("wasm-pack", "build")] {
+        let key = (command.0.to_owned(), command.1.to_owned());
+        assert_eq!(
+            owned.get(&key).map(String::as_str),
+            Some("playground-build"),
+            "`{} {}` was not traced back to the gate that depends on it",
+            command.0,
+            command.1
+        );
+    }
+    assert!(
+        !owned.contains_key(&("cargo".to_owned(), "fmt".to_owned())),
+        "a recipe no gate depends on had its command counted as gate-owned"
     );
 }
