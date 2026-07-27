@@ -222,6 +222,34 @@ fn json_writes_the_envelope_on_stdout() {
         diagnostics[0]["line"], 2,
         "the orphan is on the second line of the chapter, got {json}"
     );
+    // Pinned to the column too. `line` alone is satisfied by an index that
+    // finds the right row and then fails to count along it, which is the
+    // half of the pair a resolver gets wrong.
+    assert_eq!(
+        diagnostics[0]["column"], 7,
+        "the orphan is the 7th character of its line, got {json}"
+    );
+}
+
+#[test]
+fn json_column_counts_characters_and_not_bytes() {
+    // A book of CJK is what this tool is for, and there a byte column is not
+    // a different number but a wrong one. The canary chapter is ASCII up to
+    // the orphan, so it cannot tell the two apart.
+    let dir = fixture(&[("001.md", "序章\n日本語の》close\n")]);
+    let (out, _) = build_in(dir.path(), &["--format", "json"]);
+    let json = parse_json(stdout_of(&out));
+    let diagnostics = json["diagnostics"]
+        .as_array()
+        .expect("`diagnostics` is an array");
+    assert_eq!(
+        diagnostics[0]["line"], 2,
+        "the orphan is on the second line, got {json}"
+    );
+    assert_eq!(
+        diagnostics[0]["column"], 5,
+        "the orphan is the 5th character of its line (the 13th byte), got {json}"
+    );
 }
 
 #[test]

@@ -403,6 +403,32 @@ pub fn to_html(input: &str) -> String {
     render(input, &Options::default()).html
 }
 
+/// Report what the lexer saw, without rendering.
+///
+/// Exactly [`render`]'s diagnostics — what is skipped is the comrak parse,
+/// the splice and the HTML formatting — so a `check` command and the render
+/// it precedes can never disagree about a source.
+///
+/// ```
+/// use aozora_flavored_markdown::{Options, diagnose};
+///
+/// assert!(diagnose("｜青梅《おうめ》", &Options::default()).is_empty());
+/// ```
+#[must_use]
+pub fn diagnose(input: &str, options: &Options) -> Vec<Diagnostic> {
+    if !source_within_span_budget(input) {
+        return vec![Diagnostic::source_too_large(input.len())];
+    }
+    // The markdown-only path runs no lexer, so there is nothing to observe —
+    // the same `Vec::new()` `drive_pipeline` returns for it.
+    if !options.aozora {
+        return Vec::new();
+    }
+    let (masked_source, _) = code_block_mask::mask_code_block_triggers(input);
+    aozora::prewarm();
+    Constructs::build(&masked_source).diagnostics().to_vec()
+}
+
 /// Escape `&`, `<`, `>`, `"` and `'`, so one call is right in HTML text and
 /// in a quoted attribute alike. `'` is numeric — HTML 4 has no `&apos;`.
 #[must_use]

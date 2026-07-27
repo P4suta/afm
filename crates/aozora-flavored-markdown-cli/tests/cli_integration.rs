@@ -826,10 +826,76 @@ fn json_line_col_is_one_based() {
         d["line"], 2,
         "diagnostic on the 2nd line must report line 2, got {v}"
     );
-    assert!(
-        d["column"].as_u64().unwrap() >= 1,
-        "column must be 1-based, got {d}"
+    // Pinned to the column, not merely to `>= 1`. That weaker assertion is
+    // true of the constant 1, which is what a resolver that fails to count
+    // returns — and the count is the whole of what this field is.
+    assert_eq!(
+        d["column"], 7,
+        "the orphan is the 7th character of its line, got {v}"
     );
+}
+
+#[test]
+fn json_column_counts_characters_and_not_bytes() {
+    // The envelope publishes a *character* column, and every source this
+    // tool exists for is CJK — where a byte column is not merely a different
+    // number but a wrong one, three times over. Nothing pinned that: the one
+    // line/column case above is ASCII, in which the two agree.
+    let path = write_temp_utf8("序章\n日本語の》close");
+    let out = run_cli(&["check", "--format", "json", path.to_str().unwrap()]);
+    let v = parse_json(stdout_of(&out));
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["line"], 2, "the orphan is on the second line, got {v}");
+    assert_eq!(
+        d["column"], 5,
+        "the orphan is the 5th character of its line (the 13th byte), got {v}"
+    );
+}
+
+#[test]
+fn check_and_render_report_the_same_diagnostics() {
+    // `check` stopped calling `render`: it asks the library for the
+    // diagnostics alone. That is the same command only if the two paths
+    // answer identically — and the shape that would hide a difference is
+    // exactly the one that hid the old defect, since `check` prints no HTML
+    // either way. Compared envelope to envelope, on stdout for one and
+    // stderr for the other.
+    let sources = [
+        "clean input",
+        "orphan》close",
+        "｜青梅《おうめ》に行った",
+        "```\n｜青梅《おうめ》\n```\n",
+        "第一行\norphan》close\n《third",
+        "# 見出し\n\n本文\n\n［＃改ページ］\n",
+    ];
+    for src in sources {
+        let path = write_temp_utf8(src);
+        let arg = path.to_str().unwrap();
+        let checked = run_cli(&["check", "--format", "json", arg]);
+        let rendered = run_cli(&["render", "--format", "json", arg]);
+        assert_eq!(
+            parse_json(stdout_of(&checked)),
+            parse_json(stderr_of(&rendered)),
+            "check and render must publish one envelope for {src:?}"
+        );
+        for stream in [stdout_of(&checked), stderr_of(&checked)] {
+            for markup in ["<p", "<ruby", "<h1", "<div"] {
+                assert!(
+                    !stream.contains(markup),
+                    "check must emit no HTML for {src:?}, found {markup} in {stream:?}"
+                );
+            }
+        }
+        // The verdict has to travel with the diagnostics, or `check --strict`
+        // in CI passes a source `render --strict` would refuse.
+        let checked = run_cli(&["--strict", "check", "--format", "json", arg]);
+        let rendered = run_cli(&["--strict", "render", "--format", "json", arg]);
+        assert_eq!(
+            checked.status.code(),
+            rendered.status.code(),
+            "check --strict and render --strict must agree on {src:?}"
+        );
+    }
 }
 
 #[test]

@@ -566,7 +566,19 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // It is written down because it now has to be: the ceiling is asserted equal
 // to the measured count (`the_pinned_ceiling_is_the_count_it_is_pinned_to`),
 // so silent headroom is no longer somewhere prose can accumulate.
-const MAX_DOC_LINES: u64 = 1_728;
+//
+// Raised by 11 for one new public item, `diagnose`. It is the entry point the
+// `check` sub-command needed and the crate did not have: `check` documented
+// itself as parsing "without rendering" and called `render` anyway, because
+// nothing else could answer what the lexer saw. Five lines are the contract a
+// reader needs — that these are `render`'s diagnostics exactly, so the two can
+// never disagree about a source, and that what is skipped is the comrak parse,
+// the splice and the formatting. Six are the doctest, which is what holds the
+// first half of that claim. None of it restates the signature, which says
+// `Vec<Diagnostic>` and stops there. The two CLIs moved out of their `main.rs`
+// files in the same change and carry their prose with them, so the split
+// itself costs nothing here.
+const MAX_DOC_LINES: u64 = 1_739;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured
