@@ -68,6 +68,19 @@ jobs:
               - '.github/**'
               # The workflow linters' own policy: editing it has to run them.
               - 'zizmor.yml'
+              # Same rule for the prose linter's policy — and, unlike every
+              # other entry here, for the documents it reads. A Markdown file
+              # used to be outside every gate this repo has, which is why this
+              # filter could call a docs-only change "not rust" and skip the
+              # matrix outright. `just vale` reads them now, so a change to one
+              # is a change a gate can fail on, and the matrix is where it
+              # fails. The heavier legs riding along on a typo fix is the price
+              # of the filter staying one boolean, and it is the cheaper
+              # mistake: the other way round is a gate that cannot see the file
+              # kind it was added for.
+              - '.vale.ini'
+              - 'styles/**'
+              - '**/*.md'
 
   # The gate manifest, read straight out of the Justfile. `[group('gate')]` is
   # the declaration; this job is only the reader, and the matrix below is its

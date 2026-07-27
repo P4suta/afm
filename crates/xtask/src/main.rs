@@ -9,6 +9,7 @@
 use core::cmp;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -26,8 +27,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Fail if any comment under `crates/` names a retired upstream-internal
-    /// path, or if doc comments outgrow their pinned line budget.
+    /// Fail if any line names a repo path that no longer exists, or if doc
+    /// comments outgrow their pinned line budget.
     CommentDiscipline,
     /// Create a new Architecture Decision Record under `docs/adr/`.
     NewAdr { title: String },
@@ -184,51 +185,7 @@ fn sync_or_check(dest: &Path, content: &[u8], check: bool, drift: &mut Vec<Strin
 // comment-discipline
 // ---------------------------------------------------------------------------
 
-/// Retired upstream-internal names, each with the reason it is banned.
-///
-/// The sibling parser publishes a small, deliberately curated API; everything
-/// listed here was an *internal* path this workspace once reached into and
-/// which no longer exists. A comment naming one is prose that has already
-/// rotted — it teaches a reader an import that cannot compile. The remedy is
-/// always the same: describe the behaviour, not the upstream internal that
-/// provides it (ADR-0021).
-///
-/// Entries are written in their manifest spelling; [`fold_separators`] makes
-/// each one match the `_` spelling too, so one row covers both.
-///
-/// Real code is out of scope: code that stops compiling is caught by the
-/// compiler, and this gate exists precisely for the class of drift the
-/// compiler cannot see.
-const RETIRED_UPSTREAM_PATHS: &[(&str, &str)] = &[
-    (
-        "aozora::pipeline",
-        "the pipeline module is private upstream",
-    ),
-    ("aozora::syntax", "the syntax module is private upstream"),
-    ("aozora::render", "the render module is private upstream"),
-    (
-        "aozora::encoding",
-        "the encoding module is private upstream",
-    ),
-    ("aozora-pipeline", "no longer a published crate"),
-    ("aozora-syntax", "no longer a published crate"),
-    ("aozora-render", "no longer a published crate"),
-    ("aozora-encoding", "no longer a published crate"),
-    ("aozora-proptest", "no longer a published crate"),
-    ("aozora-spec", "no longer a published crate"),
-    ("aozora-corpus", "no longer a published crate"),
-    ("aozora-lexer", "no longer a published crate"),
-    ("aozora-parser", "no longer a published crate"),
-    ("aozora-scan", "no longer a published crate"),
-    ("lex_into_arena", "not on the public surface"),
-    ("BorrowedLexOutput", "not on the public surface"),
-    ("NormalizedOffset", "not on the public surface"),
-    ("node_at_normalized", "removed upstream"),
-    ("render_node", "not on the public surface"),
-    ("AozoraNode", "not on the public surface"),
-];
-
-/// One line naming something retired: an upstream path, or a repo path.
+/// One line naming a repo path that no longer exists.
 #[derive(Debug, PartialEq, Eq)]
 struct Violation {
     line: usize,
@@ -237,37 +194,15 @@ struct Violation {
     text: String,
 }
 
-/// Fold `_` into `-` so one banned entry matches either spelling of a name.
-///
-/// Rust writes the same crate two ways: hyphenated in a manifest, underscored
-/// in an intra-doc link. A list that knows only the manifest spelling misses
-/// every rustdoc reference — which is exactly where this drift accumulates,
-/// because an intra-doc link to a dependency that has gone away is what turns
-/// `just doc` red. Folding both the needle and the comment makes the two
-/// spellings indistinguishable to the gate.
-fn fold_separators(text: &str) -> String {
-    text.replace('_', "-")
-}
-
-/// File kinds this gate reads, each with the token its comments open on.
-///
-/// Rust and TOML are where a retired upstream name is written in prose that
-/// nothing compiles: a doc comment and a manifest note. A stale manifest note
-/// rots exactly like a stale doc comment — it is where the reason for a lint
-/// setting or a feature flag is recorded — so it belongs under the same gate.
-/// Markdown is deliberately out: `CHANGELOG.md` records what the retired
-/// crates *were*, and history is not drift.
-const SCANNED_FILES: &[(&str, &str)] = &[("rs", "//"), ("toml", "#")];
-
 /// Directories that are never authored here.
 ///
 /// `target/` is cargo output (including each fuzz crate's own), `pkg/` is
 /// wasm-pack output, `node_modules/` is bun's.
-// The rest are generated or fetched too. They only start to matter now that
-// the retired-path scan below reads every file rather than `.rs` and `.toml`:
-// `dist/` is the release bundle xtask itself writes, `coverage/` an llvm-cov
-// report, `corpus/` and `artifacts/` are cargo-fuzz's, `.cargo/` the registry
-// cache `.gitignore` reserves at this path, `.vite/` the playground's cache.
+// The rest are generated or fetched too, and they matter because the scan
+// below reads every file rather than a list of kinds: `dist/` is the release
+// bundle xtask itself writes, `coverage/` an llvm-cov report, `corpus/` and
+// `artifacts/` are cargo-fuzz's, `.cargo/` the registry cache `.gitignore`
+// reserves at this path, `.vite/` the playground's cache.
 const UNSCANNED_DIRS: &[&str] = &[
     "target",
     "pkg",
@@ -281,66 +216,17 @@ const UNSCANNED_DIRS: &[&str] = &[
     ".vite",
 ];
 
-// The comment on a line: the one that opens it, or the one that trails the
-// code on it.
-//
-// Requiring the marker at the *start* left the trailing form unscanned, and
-// the trailing form is exactly where a rule records its own justification —
-// the reason a lint is set the way it is sits at the end of the line that sets
-// it. One such reason named a crate this list bans and outlived it, so the
-// lint it justified stayed off and the drift it was hiding stayed invisible.
-//
-// Only the comment portion is searched, so a retired name in real code is
-// still the compiler's business rather than this gate's. The split is textual:
-// a `//` inside a string literal reads as a comment opener, which costs a
-// false positive only when a retired name follows it on the same line.
-fn comment_on<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
-    line.find(marker).map(|at| &line[at..])
-}
-
-/// Return every comment line in `src` that names a retired upstream path.
-///
-/// `marker` is the file kind's comment opener, per [`SCANNED_FILES`]; for
-/// Rust that one token covers `///`, `//!` and plain `//` alike. Prose rots
-/// the same way whichever marker introduces it, and the compiler already owns
-/// everything else.
-fn scan_comments(src: &str, marker: &str) -> Vec<Violation> {
-    let banned: Vec<(String, &str, &str)> = RETIRED_UPSTREAM_PATHS
-        .iter()
-        .map(|&(needle, why)| (fold_separators(needle), needle, why))
-        .collect();
-
-    let mut out = Vec::new();
-    for (idx, raw) in src.lines().enumerate() {
-        let trimmed = raw.trim_start();
-        let Some(comment) = comment_on(trimmed, marker) else {
-            continue;
-        };
-        let folded = fold_separators(comment);
-        for (folded_needle, needle, why) in &banned {
-            if folded.contains(folded_needle.as_str()) {
-                out.push(Violation {
-                    line: idx + 1,
-                    needle,
-                    why,
-                    text: trimmed.to_owned(),
-                });
-            }
-        }
-    }
-    out
-}
-
 // Repo-relative paths that no longer exist, each with the reason it is gone.
 //
-// Two things separate these from `RETIRED_UPSTREAM_PATHS` above, and both were
-// forced by how this drift actually showed up. A dead *path* rots in file
-// content, not only in prose — a `linguist-vendored` glob, a CODEOWNERS owner
-// line, a bacon watch list, a CI paths-filter — and it rots in files that carry
-// no comment marker this gate knew and that no compiler ever opens. Deleting
-// the vendored comrak tree (ADR-0024) left 15 files naming it, in four file
-// kinds; three had an extension this gate read, and exactly one of those had
-// its hit on a comment line. A hand sweep found the other 14.
+// This is what stayed behind when the retired *upstream* names moved to Vale
+// (`styles/Aozora/RetiredPaths.yml`, DEV-221), and the reason it could not go
+// with them is the reason it was written separately in the first place. A dead
+// path rots in file content, not only in prose — a `linguist-vendored` glob, a
+// CODEOWNERS owner line, a bacon watch list, a CI paths-filter — i.e. in files
+// that carry no comment marker, that no compiler opens, and that a prose
+// linter has no business reading. Deleting the vendored comrak tree (ADR-0024)
+// left 15 files naming it, in four file kinds; exactly one of those hits was
+// on a comment line. A hand sweep found the other 14.
 //
 // A path is a fact on disk, so the check needs no judgement: if the directory
 // is gone, every line still naming it is wrong. `every_banned_repo_path_is_gone`
@@ -358,9 +244,10 @@ const RETIRED_REPO_PATHS: &[(&str, &str)] = &[(
 const HISTORY_PATHS: &[&str] = &["CHANGELOG.md", "docs/adr"];
 
 // The file that defines `RETIRED_REPO_PATHS` necessarily spells every path it
-// bans, so the path scan skips it — its comments are still read for retired
-// upstream prose. `file!()` is the workspace-relative path cargo compiled this
-// file from, so the exclusion cannot drift away from the list it exists for.
+// bans, so the scan skips it. `file!()` is the workspace-relative path cargo
+// compiled this file from, so the exclusion cannot drift away from the list it
+// exists for. (Vale solves the same problem for its own rule file the same
+// way, in `.vale.ini`'s `[styles/**]` section.)
 const RETIRED_PATH_LIST_FILE: &str = file!();
 
 // Return every line in `src` that names a retired repo path.
@@ -386,15 +273,9 @@ fn scan_repo_paths(src: &str) -> Vec<Violation> {
     out
 }
 
-/// Collect every scannable file under `dir` with the comment marker its kind
-/// uses, skipping the directories nobody here authors.
-// Every file is collected, not only the kinds with a marker: the retired-path
-// scan reads them all, and `None` records that a file has no comments to read.
-fn collect_scannable_files(
-    dir: &Path,
-    root: &Path,
-    out: &mut Vec<(PathBuf, Option<&'static str>)>,
-) -> Result<()> {
+/// Every file under `dir`, skipping the directories nobody here authors and
+/// the documents where a retired path is a record.
+fn collect_scannable_files(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading an entry of {}", dir.display()))?;
@@ -411,19 +292,14 @@ fn collect_scannable_files(
         if HISTORY_PATHS.iter().any(|h| relative.starts_with(h)) {
             continue;
         }
-        let marker = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .and_then(|ext| SCANNED_FILES.iter().find(|&&(kind, _)| kind == ext))
-            .map(|&(_, marker)| marker);
-        out.push((path, marker));
+        out.push(path);
     }
     out.sort();
     Ok(())
 }
 
-/// Fail when a comment under `root` names a retired upstream path, or when
-/// doc comments have outgrown [`MAX_DOC_LINES`].
+/// Fail when a line under `root` names a repo path that no longer exists, or
+/// when doc comments have outgrown [`MAX_DOC_LINES`].
 fn comment_discipline(root: &Path) -> Result<()> {
     if !root.is_dir() {
         bail!(
@@ -436,22 +312,20 @@ fn comment_discipline(root: &Path) -> Result<()> {
     collect_scannable_files(root, root, &mut files)?;
 
     let mut total = 0usize;
-    for (path, marker) in &files {
+    for path in &files {
+        if path.ends_with(RETIRED_PATH_LIST_FILE) {
+            continue;
+        }
         let src = match fs::read_to_string(path) {
             Ok(src) => src,
-            // A file with a comment marker is source, so failing to read it is
-            // a real error. Anything else may legitimately be bytes — a fuzz
-            // corpus seed, a wasm bundle — and is simply not text to scan.
-            Err(_) if marker.is_none() => continue,
+            // Not UTF-8, so not text to scan: a fuzz corpus seed, a wasm
+            // bundle. Any other failure is real — the walk just listed this
+            // path, so not being able to open it is the error it looks like.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => continue,
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
 
-        let mut hits = marker.map_or_else(Vec::new, |marker| scan_comments(&src, marker));
-        if !path.ends_with(RETIRED_PATH_LIST_FILE) {
-            hits.extend(scan_repo_paths(&src));
-        }
-
-        for v in hits {
+        for v in scan_repo_paths(&src) {
             if total == 0 {
                 println!("comment-discipline: lines naming something retired:");
             }
@@ -469,17 +343,15 @@ fn comment_discipline(root: &Path) -> Result<()> {
 
     if total > 0 {
         bail!(
-            "comment-discipline: {total} reference(s) to a retired upstream path or a repo path \
-             that no longer exists. For an upstream name the boundary is the sibling parser's \
-             public API only (ADR-0021) — describe the behaviour instead. For a repo path there \
-             is nothing to describe: the file is gone, so the line is wrong."
+            "comment-discipline: {total} reference(s) to a repo path that no longer exists. \
+             There is nothing to describe instead: the file is gone, so the line is wrong. \
+             (A retired *upstream* name in prose is `just vale`'s finding, not this one.)"
         );
     }
 
     println!(
-        "comment-discipline: clean ({} file(s), {} upstream + {} repo path(s) checked)",
+        "comment-discipline: clean ({} file(s), {} repo path(s) checked)",
         files.len(),
-        RETIRED_UPSTREAM_PATHS.len(),
         RETIRED_REPO_PATHS.len()
     );
 
@@ -578,7 +450,15 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // `Vec<Diagnostic>` and stops there. The two CLIs moved out of their `main.rs`
 // files in the same change and carry their prose with them, so the split
 // itself costs nothing here.
-const MAX_DOC_LINES: u64 = 1_739;
+//
+// Lowered by 40 when the retired-upstream-path scan left this file for Vale
+// (DEV-221). Thirty-seven are the prose that went with the machinery —
+// `RETIRED_UPSTREAM_PATHS` and its rationale, `fold_separators`,
+// `SCANNED_FILES` and `scan_comments` — and three are the two test helpers
+// that read the banned list. None of it was deleted: the same explanations
+// are in `styles/Aozora/RetiredPaths.yml` and `.vale.ini`, beside the rule
+// they now describe. Bookkeeping after a cut, not a decision.
+const MAX_DOC_LINES: u64 = 1_699;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured
@@ -1071,9 +951,8 @@ mod tests {
     };
     use super::{
         MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path, PathBuf, RETIRED_PATH_LIST_FILE,
-        RETIRED_REPO_PATHS, RETIRED_UPSTREAM_PATHS, SCANNED_FILES, aozora_pin_pattern,
-        collect_crate_sources, count_doc_lines, doc_budget_failure, fold_separators, fs,
-        is_semver_triple, scan_comments, scan_repo_paths,
+        RETIRED_REPO_PATHS, aozora_pin_pattern, collect_crate_sources, count_doc_lines,
+        doc_budget_failure, fs, is_semver_triple, scan_repo_paths,
     };
 
     // The `(doc, all)` the gate itself would measure — the same walk over the
@@ -1198,15 +1077,6 @@ mod tests {
         assert!(doc_budget_failure(MAX_DOC_LINES, 1_000).is_some());
     }
 
-    /// The comment marker a scanned file kind uses.
-    fn marker(kind: &str) -> &'static str {
-        SCANNED_FILES
-            .iter()
-            .find(|&&(k, _)| k == kind)
-            .map(|&(_, m)| m)
-            .expect("the kind is scanned")
-    }
-
     #[test]
     fn semver_triple_accepts_a_full_version_and_rejects_the_rest() {
         assert!(is_semver_triple("0.5.0"));
@@ -1245,146 +1115,14 @@ mod tests {
         assert_eq!(pattern.find(sibling), None);
     }
 
-    /// A banned entry that is spelled with a `-`, i.e. one whose intra-doc
-    /// spelling differs from its manifest spelling.
-    fn hyphenated_entry() -> &'static str {
-        RETIRED_UPSTREAM_PATHS
-            .iter()
-            .map(|&(needle, _)| needle)
-            .find(|needle| needle.contains('-'))
-            .expect("the banned list names at least one retired crate")
-    }
-
-    #[test]
-    fn flags_a_retired_path_in_an_inner_doc_comment() {
-        // Assembled at runtime so this test's own source stays clean.
-        let src = format!("//! Layers {} onto comrak.\n", RETIRED_UPSTREAM_PATHS[0].0);
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].line, 1);
-        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
-    }
-
-    #[test]
-    fn flags_a_retired_path_in_an_outer_doc_comment() {
-        let needle = hyphenated_entry();
-        let src = format!("    /// Delegates to {needle}.\n");
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, needle);
-    }
-
-    #[test]
-    fn flags_the_underscore_spelling_of_a_retired_crate() {
-        // The banned list is written in manifest spelling; an intra-doc link
-        // uses the underscored one. Both must fail, or rustdoc references
-        // outlive the crate they point at.
-        let hyphenated = hyphenated_entry();
-        let src = format!("/// Draws from [`{}`].\n", hyphenated.replace('-', "_"));
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, hyphenated);
-    }
-
-    #[test]
-    fn flags_a_retired_path_in_a_plain_comment() {
-        // Prose rots whichever marker introduces it.
-        let src = format!("    // Mirrors {}.\n", RETIRED_UPSTREAM_PATHS[0].0);
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, RETIRED_UPSTREAM_PATHS[0].0);
-    }
-
-    #[test]
-    fn flags_a_retired_crate_in_a_manifest_comment() {
-        // A manifest note explaining why a lint is set the way it is names
-        // upstream just as a doc comment does, and rots the same way. It went
-        // uncaught while the gate read only `.rs`.
-        let needle = hyphenated_entry();
-        let src = format!("# Kept stricter than aozora: {needle} needs the allow.\n");
-        let hits = scan_comments(&src, marker("toml"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, needle);
-    }
-
-    #[test]
-    fn a_manifest_key_is_not_a_manifest_comment() {
-        // A line with no `#` on it has no comment on it, wherever the marker
-        // is allowed to sit — a dependency actually named after a retired
-        // crate would be the compiler's problem, not this gate's.
-        let needle = hyphenated_entry();
-        let src = format!("{needle} = {{ version = \"0.4.1\" }}\n");
-        assert!(scan_comments(&src, marker("toml")).is_empty());
-    }
-
-    #[test]
-    fn flags_a_retired_crate_in_a_comment_trailing_a_manifest_key() {
-        // The shape the gate could not see, and the one it was let down by: a
-        // lint setting and the reason for it on one line. `just clippy` cannot
-        // check a reason, so nothing else was ever going to notice that this
-        // one had outlived the crate it pointed at — and the lint it justified
-        // is the one that reports a stuttering type name.
-        let needle = hyphenated_entry();
-        let src = format!("some_lint = \"allow\" # `{needle}::SyntaxError` reads clearer\n");
-        let hits = scan_comments(&src, marker("toml"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, needle);
-    }
-
-    #[test]
-    fn flags_a_retired_path_in_a_comment_trailing_rust_code() {
-        let needle = RETIRED_UPSTREAM_PATHS[0].0;
-        let src = format!("let table = build(); // was {needle}\n");
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 1, "expected one violation, got {hits:?}");
-        assert_eq!(hits[0].needle, needle);
-    }
-
-    #[test]
-    fn a_retired_name_left_of_the_marker_is_still_code() {
-        // The widened reader must not become a whole-line grep: the code on a
-        // line stays out of scope even when the line does carry a comment.
-        let needle = RETIRED_UPSTREAM_PATHS[0].0;
-        let src = format!("use {needle}::thing; // an import the compiler owns\n");
-        assert!(
-            scan_comments(&src, marker("rs")).is_empty(),
-            "only the comment portion is this gate's business"
-        );
-    }
-
-    #[test]
-    fn ignores_code() {
-        // Real code is out of scope: an import that no longer resolves is the
-        // compiler's job, and this gate covers what the compiler cannot see.
-        let needle = RETIRED_UPSTREAM_PATHS[0].0;
-        let src = format!("use {needle}::thing;\nlet s = \"{needle}\";\n");
-        assert!(scan_comments(&src, marker("rs")).is_empty());
-    }
-
-    #[test]
-    fn clean_comments_produce_no_violations() {
-        let src = "//! Layers the sibling parser onto comrak.\n/// Renders to HTML.\n";
-        assert!(scan_comments(src, marker("rs")).is_empty());
-    }
-
-    #[test]
-    fn reports_every_offending_line() {
-        let needle = RETIRED_UPSTREAM_PATHS[0].0;
-        let src = format!("//! {needle}\nlet filler = 1;\n/// {needle}\n");
-        let hits = scan_comments(&src, marker("rs"));
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].line, 1);
-        assert_eq!(hits[1].line, 3);
-    }
-
     // --- retired repo paths -------------------------------------------------
     //
-    // What the comment scan above could not see. When the vendored comrak tree
-    // was deleted, 15 files still named it — a `linguist-vendored` glob, a
-    // CODEOWNERS entry, a bacon watch list, a CI paths-filter, a PR-template
-    // line, a coverage-ignore regex, a typos exclusion — and almost none of
-    // those lines is a comment in a file kind this gate read. Replaying the
-    // pre-change tree through `scan_repo_paths` flags all 15.
+    // What no prose linter can see. When the vendored comrak tree was deleted,
+    // 15 files still named it — a `linguist-vendored` glob, a CODEOWNERS
+    // entry, a bacon watch list, a CI paths-filter, a PR-template line, a
+    // coverage-ignore regex, a typos exclusion — and almost none of those
+    // lines is a comment, or even prose. Replaying the pre-change tree through
+    // `scan_repo_paths` flags all 15.
 
     // The banned path, assembled so this file's own prose stays clean whatever
     // the scan skips.
@@ -1595,19 +1333,5 @@ mod tests {
             "dependency provenance:\n{}",
             failures.join("\n")
         );
-    }
-
-    #[test]
-    fn banned_list_has_no_duplicates() {
-        // Compared after folding: `a-b` and `a_b` are one entry to the gate,
-        // so listing both would be a silent duplicate.
-        let mut names: Vec<String> = RETIRED_UPSTREAM_PATHS
-            .iter()
-            .map(|&(n, _)| fold_separators(n))
-            .collect();
-        names.sort_unstable();
-        let before = names.len();
-        names.dedup();
-        assert_eq!(before, names.len(), "duplicate entry in the banned list");
     }
 }

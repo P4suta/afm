@@ -692,16 +692,21 @@ coverage-branch:
 # --- lint / static analysis ---------------------------------------------------
 
 # Run all lints (fmt + clippy + typos + strict-code + comment-discipline
-# + zizmor + actionlint)
+# + vale + zizmor + actionlint)
 [group('lint')]
-lint: fmt-check clippy typos strict-code comment-discipline zizmor actionlint
+lint: fmt-check clippy typos strict-code comment-discipline vale zizmor actionlint
 
-# Comment drift gate. Fails when a Rust comment (`//` / `///` / `//!`) or a
-# TOML manifest comment (`#`) names a path that used to exist inside the
-# sibling parser but is no longer on its public API (ADR-0021). The compiler
-# catches the same drift in *code*; comments rot silently, so they get their
-# own gate. The banned list lives in `crates/xtask/src/main.rs`
-# (RETIRED_UPSTREAM_PATHS).
+# Retired-path gate for the half of the question no prose linter can answer,
+# plus the doc-comment volume ratchet. Fails when any line of any file names a
+# repo path that is gone (the vendored comrak tree, ADR-0024) — a
+# `linguist-vendored` glob, a CODEOWNERS owner, a CI paths-filter are all
+# lines with no comment marker in them — and when doc comments outgrow their
+# pinned budget. Both lists live in `crates/xtask/src/main.rs`
+# (RETIRED_REPO_PATHS, MAX_DOC_LINES).
+#
+# The third thing this used to do — a retired *upstream* path named in a `.rs`
+# or `.toml` comment — is `just vale` now, which reads the `.md` files this
+# never opened (DEV-221).
 [group('gate')]
 [group('lint')]
 comment-discipline:
@@ -847,8 +852,8 @@ strict-code:
     # a `u32::try_from` bounded by the Phase-0 cap, and the forward-range
     # `sourcepos_to_range`. A NEW state-assertion-style `expect` in a
     # production path should be lifted into the type system or pinned by a
-    # property test instead of pushed to runtime. Mirrors aozora-pipeline's
-    # baseline tripwire; bump the baseline only when you remove an expect.
+    # property test instead of pushed to runtime. Bump the baseline only when
+    # you remove an expect.
     #
     # Raised 8 -> 12 when the spec-conformance runners moved from `tests/`
     # (which this gate excludes) into `src/conformance.rs`, and the
@@ -973,6 +978,45 @@ actionlint:
     {{_dev}} bash -c "set -euo pipefail
         command -v actionlint >/dev/null 2>&1 || curl -fsSL '${url}' | tar -xz -C /usr/local/bin actionlint
         actionlint -no-color -shellcheck= -pyflakes="
+
+# Prose lint (Vale). The drift no compiler, clippy pass or typo checker calls
+# its business: a sentence that has stopped being true. Here that is a retired
+# upstream path — an internal of the sibling parser this workspace once
+# reached into — named anywhere a human writes a sentence in this repo.
+#
+# Markdown is why this exists. The scan it replaces read `.rs` and `.toml` and
+# nothing else, so a Markdown file was outside every gate in the repo:
+# `UPSTREAM_DIFF.md` went stale in full — it described a vendored tree that no
+# longer existed — with the whole pipeline green. Vale reads Markdown as prose
+# and extracts comments from `.rs` natively, so the case that was covered and
+# the case that was not are now one rule, and one list. That list is
+# `styles/Aozora/RetiredPaths.yml`; what gets read is `.vale.ini`. This recipe
+# only runs them.
+#
+# `git ls-files` with NO pathspec, which is the whole point. A list of file
+# kinds is what the replaced scan got wrong, and writing the same list one
+# language over would have reproduced the defect with a new tool: the first
+# full-tree run found a retired crate named in this very file, in the prose
+# above the expect() tripwire, where `'*.md' '*.rs' '*.toml'` could not reach
+# it. What this repo authors is what git tracks; there is no second definition
+# to keep in step, and nothing about the scope is written down twice.
+# `every_file_this_repo_tracks_is_one_the_prose_gate_reads` holds it there.
+#
+# The `command -v` line is the one-merge bridge `just zizmor` and
+# `just actionlint` carry, for the same reason and read back off the same kind
+# of Dockerfile ARG: CI pulls a published dev image that lags a tool addition
+# by one merge.
+[group('gate')]
+[group('lint')]
+vale:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -oE 'VALE_VERSION=[0-9.]+' Dockerfile | head -1 | cut -d= -f2)
+    url="https://github.com/vale-cli/vale/releases/download/v${v}/vale_${v}_Linux_64-bit.tar.gz"
+    {{_dev}} bash -c "set -euo pipefail
+        command -v vale >/dev/null 2>&1 || curl -fsSL '${url}' | tar -xz -C /usr/local/bin vale
+        mapfile -d '' -t files < <(git ls-files -z)
+        vale \"\${files[@]}\""
 
 # Assert tool-version pins agree across files: bun (Dockerfile /
 # playground/package.json / docs.yml) and wasm-pack (Dockerfile / docs.yml).
@@ -1428,9 +1472,9 @@ ci:
     #     --all-targets, so a bare `cargo check` pass adds no coverage. ci.yml
     #     still runs it, as the fast precondition the gate matrix waits on —
     #     scheduling, not a gate. The gates `lint` bundles
-    #     (fmt-check/typos/strict-code/comment-discipline/zizmor/actionlint) run
-    #     once on their own instead of a second time inside `lint`; only
-    #     `clippy` is left to run from `lint`.
+    #     (fmt-check/typos/strict-code/comment-discipline/vale/zizmor/
+    #     actionlint) run once on their own instead of a second time inside
+    #     `lint`; only `clippy` is left to run from `lint`.
     #   * fuzz-build compiles the fuzz crate, which is its own workspace with
     #     its own target dir — so it takes no lock the compile lane holds, but
     #     it does invoke rustc (and clang, for libFuzzer), so it stays in the
@@ -1474,7 +1518,7 @@ ci:
     # --- foreground lane: instant text gates first (fail-fast in seconds),
     # --- then the compile pipeline (sequential — shared target dir). ---------
     fg_steps=(typos fmt-check strict-code verify-version-pins \
-              zizmor actionlint comment-discipline commitlint \
+              zizmor actionlint vale comment-discipline commitlint \
               msrv clippy build dist-assets-check \
               test test-doc prop spec doc doc-public coverage udeps \
               fuzz-build test-wasm \
