@@ -1108,10 +1108,23 @@ shear:
 # comrak resolves from the registry like every other dependency (ADR-0024),
 # so the lockfile graph is the whole graph — no shim needed to reach it.
 # RustSec advisory scan over `Cargo.lock`.
+#
+# `--deny warnings` is what makes this a gate rather than a report. Without it
+# cargo-audit exits 0 on everything RustSec files as a warning — `unmaintained`,
+# `unsound`, `notice`, and a `yanked` crate — and prints it to a log nobody
+# reads, so only a live vulnerability could ever fail a build. `deny.toml`
+# already spells `yanked = "deny"` for cargo-deny; this is the same stance on
+# the other side of the pair. The flag was not new here — the vendored-comrak
+# `audit-comrak` recipe passed it, and was the only caller that did, so
+# unvendoring took the strictness out with the recipe.
+#
+# The nightly re-run of this recipe is `.github/workflows/audit.yml`: an
+# advisory is published against a lockfile that has not changed, so PR time is
+# the one moment a scan cannot catch it.
 [group('gate')]
 [group('lint')]
 audit:
-    {{_dev}} cargo audit
+    {{_dev}} cargo audit --deny warnings
 
 # Unused dependency scan (requires nightly)
 [group('gate')]
