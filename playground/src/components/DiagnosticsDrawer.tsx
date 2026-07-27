@@ -1,6 +1,6 @@
-import { For, Show, type Accessor, type Component } from 'solid-js';
+import { type Accessor, type Component, For, Show } from 'solid-js';
 
-import type { Diagnostic } from '../wasm-loader';
+import type { Diagnostic } from '../diagnostics';
 
 interface DiagnosticsDrawerProps {
   diagnostics: Accessor<readonly Diagnostic[]>;
@@ -21,7 +21,10 @@ const DiagnosticsDrawer: Component<DiagnosticsDrawerProps> = (props) => {
       >
         <span>
           診断 (
-          <span class="aozora-md-pg-drawer-count" data-empty={count() === 0 ? '1' : '0'}>
+          <span
+            class="aozora-md-pg-drawer-count"
+            data-empty={count() === 0 ? '1' : '0'}
+          >
             {count()}
           </span>
           )
@@ -35,17 +38,26 @@ const DiagnosticsDrawer: Component<DiagnosticsDrawerProps> = (props) => {
           when={count() > 0}
           fallback={
             <ul class="aozora-md-pg-diagnostics-list">
-              <li class="aozora-md-pg-diagnostics-empty">診断メッセージはありません</li>
+              <li class="aozora-md-pg-diagnostics-empty">
+                診断メッセージはありません
+              </li>
             </ul>
           }
         >
           <ul class="aozora-md-pg-diagnostics-list">
             <For each={props.diagnostics()}>
               {(d) => (
-                <li class="aozora-md-pg-diagnostics-item" data-level={d.severity}>
-                  <span class="aozora-md-pg-diagnostics-level">{d.severity}</span>
+                <li
+                  class="aozora-md-pg-diagnostics-item"
+                  data-level={d.severity}
+                >
+                  <span class="aozora-md-pg-diagnostics-level">
+                    {d.severity}
+                  </span>
                   <code class="aozora-md-pg-diagnostics-code">{d.code}</code>
-                  <span class="aozora-md-pg-diagnostics-message">{d.message}</span>
+                  <span class="aozora-md-pg-diagnostics-message">
+                    {d.message}
+                  </span>
                 </li>
               )}
             </For>

@@ -27,7 +27,8 @@ export interface OutlineEntry {
  */
 function aozoraText(html: string): string {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  for (const el of doc.querySelectorAll('rt, rp, .aozora-md-directive')) el.remove();
+  for (const el of doc.querySelectorAll('rt, rp, .aozora-md-directive'))
+    el.remove();
   return doc.body.textContent ?? '';
 }
 

@@ -20,7 +20,9 @@ export const aozoraMdEditorTheme = EditorView.theme({
   },
   '&.cm-focused': { outline: 'none' },
   '.cm-content': { caretColor: 'var(--aozora-md-pg-accent)' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--aozora-md-pg-accent)' },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: 'var(--aozora-md-pg-accent)',
+  },
   '.cm-gutters': {
     background: 'var(--aozora-md-pg-bg)',
     color: 'var(--aozora-md-pg-text-soft)',

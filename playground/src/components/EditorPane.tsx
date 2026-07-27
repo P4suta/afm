@@ -3,8 +3,8 @@
 // imperatively through a createEffect (the inner guard prevents echoing
 // the change back through onChange).
 
-import { createEffect, onCleanup, onMount, type Component } from 'solid-js';
 import type { EditorView } from '@codemirror/view';
+import { type Component, createEffect, onCleanup, onMount } from 'solid-js';
 
 import { createEditor, type EditorHandle } from '../editor';
 

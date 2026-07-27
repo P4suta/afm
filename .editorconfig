@@ -21,6 +21,13 @@ indent_size = 2
 [*.{css,scss,html}]
 indent_size = 2
 
+# Playground TypeScript. Stated rather than left to the `[*]` default of 4:
+# `playground/biome.json` formats this tree at 2, and an editor obeying the
+# default would have re-indented every file it touched into a `just
+# playground-lint` failure.
+[*.{ts,tsx}]
+indent_size = 2
+
 # Rust
 [*.rs]
 indent_size = 4

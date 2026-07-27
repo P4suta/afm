@@ -55,6 +55,12 @@ just gates                     # the gate manifest, as CI reads it
 just ci                        # exactly the gate CI runs
 ```
 
+The playground has gates of its own — `just playground-lint` (Biome:
+formatter, linter and import order), `just playground-test` (Vitest) and
+`just playground-build`. They are outside `just lint` only because each one
+pulls a release wasm build in as a dependency; `just ci` runs all three, and
+`just playground-lint-fix` writes the safe half of what the first reports.
+
 `just setup` is idempotent; re-run it after pulling. `just --list`
 enumerates every recipe. Before a release, `just prop-deep` runs a 4096-case
 property sweep — deeper than CI.

@@ -4,21 +4,25 @@
 //   - theme      : 'vertical' | 'horizontal' (driven by createTheme)
 // and wires the toolbar / editor / preview / diagnostics together.
 
-import { createMemo, createSignal, onMount, type Component } from 'solid-js';
 import { EditorView } from '@codemirror/view';
-
+import { type Component, createMemo, createSignal, onMount } from 'solid-js';
+import { createColorScheme } from './color-scheme';
 import DiagnosticsDrawer from './components/DiagnosticsDrawer';
 import EditorPane from './components/EditorPane';
 import NotationGuide from './components/NotationGuide';
 import OutlinePanel from './components/OutlinePanel';
 import PreviewPane from './components/PreviewPane';
 import Toolbar from './components/Toolbar';
-import { outlineFromIr } from './outline';
 import { loadExamples } from './examples';
-import { createColorScheme } from './color-scheme';
+import { outlineFromIr } from './outline';
 import { copyShareLink, decodeSourceFromHash } from './share';
 import { createTheme } from './theme-toggle';
-import { hashSource, render, type Diagnostic, type IrDocument } from './wasm-loader';
+import {
+  type Diagnostic,
+  hashSource,
+  type IrDocument,
+  render,
+} from './wasm-loader';
 
 const FALLBACK_SOURCE =
   '# aozora-md playground\n\nここに ｜文章《ぶんしょう》 を書いてみてください。\n';
@@ -42,7 +46,10 @@ const App: Component = () => {
   const [source, setSource] = createSignal(pickInitial(examples));
   const [rendered, setRendered] = createSignal<Rendered>(EMPTY_RENDER);
   const [drawerOpen, setDrawerOpen] = createSignal(true);
-  const [toast, setToast] = createSignal<{ message: string; ok: boolean } | null>(null);
+  const [toast, setToast] = createSignal<{
+    message: string;
+    ok: boolean;
+  } | null>(null);
   const [editorView, setEditorView] = createSignal<EditorView | null>(null);
   const [guideOpen, setGuideOpen] = createSignal(false);
 
@@ -80,7 +87,11 @@ const App: Component = () => {
 
     try {
       const result = render(text);
-      setRendered({ html: result.html, diagnostics: result.diagnostics, ir: result.ir });
+      setRendered({
+        html: result.html,
+        diagnostics: result.diagnostics,
+        ir: result.ir,
+      });
       if (result.diagnostics.length > 0) setDrawerOpen(true);
     } catch (err) {
       setRendered({
@@ -183,7 +194,10 @@ const App: Component = () => {
         <aside class="aozora-md-pg-outline" aria-label="アウトライン">
           <OutlinePanel entries={outline()} onJump={jumpToLine} />
         </aside>
-        <section class="aozora-md-pg-pane aozora-md-pg-pane-editor" aria-label="エディタ">
+        <section
+          class="aozora-md-pg-pane aozora-md-pg-pane-editor"
+          aria-label="エディタ"
+        >
           <EditorPane
             value={source()}
             onChange={(value) => {
@@ -193,7 +207,10 @@ const App: Component = () => {
             onReady={setEditorView}
           />
         </section>
-        <section class="aozora-md-pg-pane aozora-md-pg-pane-preview" aria-label="プレビュー">
+        <section
+          class="aozora-md-pg-pane aozora-md-pg-pane-preview"
+          aria-label="プレビュー"
+        >
           <PreviewPane html={html} ir={ir} />
           <DiagnosticsDrawer
             diagnostics={diagnostics}
@@ -205,7 +222,11 @@ const App: Component = () => {
       <footer class="aozora-md-pg-footer">
         <span>
           Powered by{' '}
-          <a href="https://github.com/P4suta/aozora-flavored-markdown" target="_blank" rel="noopener">
+          <a
+            href="https://github.com/P4suta/aozora-flavored-markdown"
+            target="_blank"
+            rel="noopener"
+          >
             aozora-md
           </a>{' '}
           — Aozora Flavored Markdown

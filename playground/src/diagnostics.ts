@@ -3,4 +3,4 @@
 // `import type { Diagnostic } from './diagnostics'` without reaching
 // into the wasm bridge module name.
 
-export type { Diagnostic, Severity, DiagnosticSource } from './wasm-loader';
+export type { Diagnostic, DiagnosticSource, Severity } from './wasm-loader';

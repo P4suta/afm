@@ -3,7 +3,12 @@
 // `※［＃...］` gaiji reference in a hoverTooltip, delegating the actual
 // lookup to aozora-flavored-markdown-wasm (`AozoraDocument.resolveGaijiAt`).
 import { hoverTooltip, type Tooltip } from '@codemirror/view';
-import { byteToUtf16, parserStateField, utf16ToByte, type ParserState } from './parserState';
+import {
+  byteToUtf16,
+  type ParserState,
+  parserStateField,
+  utf16ToByte,
+} from './parserState';
 
 // One `gaijiResolutionsJson` entry, as returned by `resolveGaijiAt`.
 // Spans are UTF-8 byte offsets.

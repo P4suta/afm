@@ -1146,17 +1146,20 @@ fn commands_owned_by_gates(justfile: &str) -> BTreeMap<(String, String), String>
 /// recipes that have to be told where they are when something outside the dev
 /// image runs them.
 fn recipe_runs_in_a_container(justfile: &str, recipe: &str) -> bool {
+    // The prefixes are read off the file rather than listed here. A list is
+    // the same defect one level down: `_pg_install` was added to the Justfile
+    // and to this list separately, and a fifth prefix added to only one of the
+    // two would make every recipe using it invisible to the rule below —
+    // which is the rule that says a job outside the dev image has to announce
+    // itself.
+    let markers: Vec<String> = container_prefixes(justfile)
+        .keys()
+        .map(|name| format!("{{{{{name}}}}}"))
+        .collect();
     recipe_body(justfile, recipe).iter().any(|line| {
         let body = strip_comment(line);
-        [
-            "{{_dev}}",
-            "{{_ci}}",
-            "{{_fuzz}}",
-            "{{_pg",
-            "docker compose",
-        ]
-        .iter()
-        .any(|marker| body.contains(marker))
+        body.contains("docker compose")
+            || markers.iter().any(|marker| body.contains(marker.as_str()))
     })
 }
 
@@ -1461,30 +1464,18 @@ fn the_doc_gates_warning_policy_is_not_parked_in_a_git_ignored_config() {
 
 /// Workflow steps that spell out a build a gate already defines, each with the
 /// reason it cannot call the recipe instead. Every row is a second definition
-/// of one command — the arrangement removed here for rustdoc and still in
-/// place for these.
-const RE_SPELLED_BUILD: &[(&str, &str, &str, &str)] = &[
-    (
-        ".github/workflows/docs.yml",
-        "wasm-pack",
-        "build",
-        "`wasm-build` wraps wasm-pack in `{{_dev}}`, and the Pages job has no dev image — \
-         it builds on the native runner so the artefacts land where the upload can see them.",
-    ),
-    (
-        ".github/workflows/docs.yml",
-        "bun",
-        "install",
-        "`playground-install` hard-codes `docker compose run --rm playground` rather than \
-         going through the `_in` switch, so unlike `just doc` it cannot be run natively at all.",
-    ),
-    (
-        ".github/workflows/docs.yml",
-        "bun",
-        "run",
-        "`playground-build`, same reason as the `bun install` above.",
-    ),
-];
+/// of one command — the arrangement removed here for rustdoc.
+///
+/// Empty, and that is the finished state rather than a table nobody has filled
+/// in. It held three rows, all in `docs.yml`: the wasm-pack build, the bun
+/// install and the bun build behind `just playground-build`. The reason each
+/// gave was the same one — the `playground*` recipes hard-coded `docker
+/// compose run`, so unlike `just doc` they could not run on the Pages runner.
+/// DEV-310 put those two prefixes through the Justfile's `_in` switch, which
+/// makes the reason false, so the rows go rather than stay as prose that no
+/// longer describes anything. The mechanism stays: a future step that genuinely
+/// cannot reach its recipe adds a row and says why.
+const RE_SPELLED_BUILD: &[(&str, &str, &str, &str)] = &[];
 
 #[test]
 fn no_workflow_spells_out_a_build_a_gate_recipe_already_defines() {
@@ -1586,6 +1577,873 @@ fn a_workflow_that_runs_a_containerized_recipe_says_where_it_is() {
         "only {asked} job(s) run a containerized recipe outside the dev image; the reader is not \
          finding them"
     );
+}
+
+// ---------------------------------------------------------------------------
+// one command line, both sides of the `_in` switch
+// ---------------------------------------------------------------------------
+//
+// The rule above holds a workflow to saying where it is. It never held the
+// Justfile to listening, and for the `playground*` recipes it could not have:
+// `_pg` and `_pg_install` were plain `docker compose run` strings, so a job
+// could set `AOZORA_MD_IN_CONTAINER=1`, call `just playground-build`, and
+// still be handed a `docker compose run` on a runner with no daemon to serve
+// it. docs.yml never hit that only because it wrote the three commands out by
+// hand instead — which is the entry `RE_SPELLED_BUILD` above used to carry,
+// giving that exact reason. One defect, written down twice as an exemption
+// and checked in neither place.
+//
+// A switch is two halves: the caller says where it is, and every prefix
+// collapses to nothing when it does. This section is the second half, plus
+// the other thing a command inherits from its surroundings and nothing
+// compared — the directory it starts in.
+
+/// The environment variable a caller sets to say it is already inside one of
+/// the images. Workflows set it; the `Justfile` reads it once, into the
+/// variable every run prefix branches on.
+const IN_CONTAINER_ENV: &str = "AOZORA_MD_IN_CONTAINER";
+
+/// Every `NAME := <value>` assignment, right-hand side as written.
+///
+/// Unlike [`plain_variables`], an `if` expression is kept rather than skipped:
+/// the shape of that expression is the entire question here.
+fn assignments(justfile: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in justfile.lines() {
+        if line.starts_with([' ', '\t', '#', '[']) {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(":=") else {
+            continue;
+        };
+        out.push((name.trim().to_owned(), value.trim().to_owned()));
+    }
+    out
+}
+
+/// The `Justfile` variable holding the answer to "am I already inside the
+/// image": the one assigned from [`IN_CONTAINER_ENV`].
+fn in_container_variable(justfile: &str) -> String {
+    assignments(justfile)
+        .into_iter()
+        .find(|(_, value)| value.contains("env_var_or_default") && value.contains(IN_CONTAINER_ENV))
+        .map_or_else(
+            || {
+                panic!(
+                    "no Justfile variable is assigned from {IN_CONTAINER_ENV} any more. Every run \
+                     prefix branches on it and every workflow outside the dev image sets it, so a \
+                     rename has to reach all three at once."
+                )
+            },
+            |(name, _)| name,
+        )
+}
+
+/// Every variable whose value puts a command inside a container.
+fn container_prefixes(justfile: &str) -> BTreeMap<String, String> {
+    assignments(justfile)
+        .into_iter()
+        .filter(|(_, value)| value.contains("docker compose run"))
+        .collect()
+}
+
+/// Does this right-hand side become nothing when the switch says the caller is
+/// already inside the image?
+///
+/// Textual, and deliberately so. The property is that the `"1"` branch is the
+/// empty string; reading it off the source is what makes an inverted switch,
+/// or one that merely mentions the variable, fail instead of pass.
+fn collapses_inside_the_image(value: &str, switch: &str) -> bool {
+    let switched = format!("if {switch} == \"1\" {{ \"\" }} else {{");
+    value.trim_start().starts_with(&switched)
+}
+
+#[test]
+fn every_prefix_that_enters_a_container_is_one_the_env_var_empties() {
+    let justfile = read("Justfile");
+    let switch = in_container_variable(&justfile);
+    let prefixes = container_prefixes(&justfile);
+    assert!(
+        prefixes.len() >= 4,
+        "only {} run prefix(es) came out spelling `docker compose run`; the reader is not finding \
+         them: {prefixes:?}",
+        prefixes.len()
+    );
+
+    let unswitched: Vec<String> = prefixes
+        .iter()
+        .filter(|(_, value)| !collapses_inside_the_image(value, &switch))
+        .map(|(name, value)| format!("{name} := {value}"))
+        .collect();
+    assert!(
+        unswitched.is_empty(),
+        "these run prefixes enter a container unconditionally:\n  {}\n\
+         `{IN_CONTAINER_ENV}=1` is a caller saying it is already inside an image — a devcontainer, \
+         a `just shell`, docs.yml's Pages job, ci.yml's native gates. A prefix that ignores it \
+         makes every recipe built on it unrunnable from all of those, and the workaround is one \
+         this repo has already paid for once: the workflow gives up and writes the recipe's \
+         command out by hand.",
+        unswitched.join("\n  ")
+    );
+}
+
+const COMPOSE_FILE: &str = "docker-compose.yml";
+
+/// The lines of each service in the compose file, keyed by service name.
+///
+/// Only the `services:` mapping. `x-common-env` and the top-level `volumes:`
+/// hold keys indented alike, so the column-zero header above a line is what
+/// says which block it is in.
+fn compose_services(compose: &str) -> BTreeMap<String, Vec<&str>> {
+    let mut out: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    let mut inside = false;
+    for line in compose.lines() {
+        // A blank line separates two services without ending the mapping;
+        // reading it as a column-zero key would end the walk at the first one.
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            inside = line.starts_with("services:");
+            current = None;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if line.len() - trimmed.len() == 2 {
+            current = trimmed.strip_suffix(':').map(str::to_owned);
+            if let Some(name) = &current {
+                out.entry(name.clone()).or_default();
+            }
+            continue;
+        }
+        if let Some(name) = &current {
+            out.entry(name.clone()).or_default().push(line);
+        }
+    }
+    out
+}
+
+/// The value of a scalar key inside a service block.
+fn service_value<'a>(lines: &[&'a str], key: &str) -> Option<&'a str> {
+    lines.iter().find_map(|line| {
+        strip_comment(line)
+            .trim()
+            .strip_prefix(key)?
+            .strip_prefix(':')
+            .map(str::trim)
+    })
+}
+
+/// Where a service mounts the repository: the `volumes:` entry whose source is
+/// `.`, with any `:cached` / `:ro` option dropped.
+fn repo_mount<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    lines.iter().find_map(|line| {
+        let entry = strip_comment(line).trim().strip_prefix("- ")?;
+        let target = entry.strip_prefix(".:")?;
+        Some(target.split(':').next().unwrap_or(target))
+    })
+}
+
+#[test]
+fn every_service_starts_a_command_where_just_would_have_started_it() {
+    // The other half of "one Justfile, both worlds". A recipe body is a single
+    // command line and the switch above decides only whether a container is
+    // wrapped around it — never what it says. So the cwd has to be the same on
+    // both sides, and outside a container it is wherever `just` ran, i.e. the
+    // repo root.
+    //
+    // The `playground` service started at `/workspace/playground` instead, and
+    // that is what made its recipes un-switchable: they were written for a cwd
+    // only the container had, so there was no single command line to switch.
+    // The `cd playground` each of them now spells is the fix, and this is what
+    // keeps the compose file from re-introducing the assumption it replaced.
+    let compose = read(COMPOSE_FILE);
+    let services = compose_services(&compose);
+    assert!(
+        services.len() >= 4,
+        "only {} service(s) came out of {COMPOSE_FILE}; the reader is not finding them",
+        services.len()
+    );
+
+    let mut wrong = Vec::new();
+    for (name, lines) in &services {
+        let Some(mount) = repo_mount(lines) else {
+            wrong.push(format!("{name}: mounts the repository nowhere"));
+            continue;
+        };
+        match service_value(lines, "working_dir") {
+            Some(dir) if dir == mount => {}
+            Some(dir) => wrong.push(format!(
+                "{name}: starts at `{dir}`, but the repository is mounted at `{mount}`"
+            )),
+            None => wrong.push(format!("{name}: declares no working_dir")),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "these services do not start where `just` does:\n  {}\n\
+         A recipe reaches its tool through a prefix that may be nothing at all, so the same text \
+         has to mean the same thing with and without a container around it. Give the recipe its \
+         own `cd`, the way the `fuzz*` ones do, rather than the service a working_dir only one \
+         side of the switch will see.",
+        wrong.join("\n  ")
+    );
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn a_prefix_reads_as_switched_only_when_the_env_var_empties_it() {
+    assert!(
+        collapses_inside_the_image(
+            r#"if _in == "1" { "" } else { "docker compose run --rm dev" }"#,
+            "_in"
+        ),
+        "the shape every prefix in this Justfile is written in did not read as switched"
+    );
+    assert!(
+        !collapses_inside_the_image(
+            r#""docker compose run --rm --service-ports playground""#,
+            "_in"
+        ),
+        "the unconditional spelling `_pg` carried before DEV-310 read as switched"
+    );
+    assert!(
+        !collapses_inside_the_image(
+            r#"if _in == "1" { "docker compose run --rm dev" } else { "" }"#,
+            "_in"
+        ),
+        "an inverted switch read as a switch — naming the variable is not obeying it"
+    );
+    assert!(
+        !collapses_inside_the_image(
+            r#"if _in == "0" { "" } else { "docker compose run --rm dev" }"#,
+            "_in"
+        ),
+        "a switch comparing against the wrong value read as correct"
+    );
+}
+
+#[test]
+fn a_compose_key_is_read_from_its_own_service_and_not_a_neighbour() {
+    let compose = concat!(
+        "x-common-env: &common-env\n",
+        "  WORKING_DIR: /elsewhere\n",
+        "services:\n",
+        "  dev:\n",
+        "    working_dir: /workspace\n",
+        "    volumes:\n",
+        "      - .:/workspace:cached\n",
+        "      - cargo-target:/cargo/target\n",
+        "  playground:\n",
+        "    working_dir: /workspace/playground  # the shape this test rejects\n",
+        "    volumes:\n",
+        "      - .:/workspace\n",
+        "volumes:\n",
+        "  cargo-target:\n",
+    );
+    let services = compose_services(compose);
+    assert_eq!(
+        services.keys().collect::<Vec<_>>(),
+        ["dev", "playground"],
+        "a key outside the `services:` mapping was read as a service"
+    );
+    let dev = &services["dev"];
+    assert_eq!(
+        service_value(dev, "working_dir"),
+        Some("/workspace"),
+        "a service's own working_dir was not found"
+    );
+    assert_eq!(
+        repo_mount(dev),
+        Some("/workspace"),
+        "the repo mount was not read past its `:cached` option"
+    );
+    assert_eq!(
+        repo_mount(dev).map(str::to_owned),
+        service_value(dev, "working_dir").map(str::to_owned),
+        "the two readers disagree about a service that is correct"
+    );
+    let playground = &services["playground"];
+    assert_ne!(
+        service_value(playground, "working_dir"),
+        repo_mount(playground),
+        "the arrangement that stood before DEV-310 read as correct; the trailing comment on the \
+         working_dir line is the shape that would hide it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// what the two new playground gates actually reach
+// ---------------------------------------------------------------------------
+//
+// `playground-lint` and `playground-test` are the first gates over the
+// TypeScript tree, and both are the shape this file keeps finding: a check
+// whose reach is a glob list in a config file nobody compares to the tree.
+// `tsc --noEmit` was the whole of the static analysis over ~15 modules, so
+// there is no second net under these — an `includes` narrowed to
+// `src/**/*.ts` would silently drop all eight `.tsx` components and the gate
+// would stay green, which is indistinguishable from the tree being clean.
+//
+// Same for the empty answer. `biome check` exits 0 on a warn-level rule and
+// `vitest run` is one flag away from exiting 0 on no tests at all; a gate
+// that cannot fail on the absence of what it checks is the `doc` gate's
+// defect in a different language.
+
+/// A `**` / `*` glob as a regex over a `/`-separated path. The subset biome's
+/// `files.includes` and vitest's `test.include` are written in.
+fn glob_to_regex(pattern: &str) -> Regex {
+    let mut out = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                // `**/` spans any number of directories INCLUDING none, so
+                // `src/**/*.ts` has to match `src/outline.ts`. A `**` not
+                // followed by a separator is the unanchored form.
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push_str("(?:[^/]+/)*");
+                } else {
+                    out.push_str(".*");
+                }
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            '{' | '}' | ',' => match ch {
+                '{' => out.push('('),
+                '}' => out.push(')'),
+                _ => out.push('|'),
+            },
+            _ => out.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    out.push('$');
+    Regex::new(&out)
+        .unwrap_or_else(|e| panic!("`{pattern}` is not a glob this reader can read: {e}"))
+}
+
+const PLAYGROUND: &str = "playground";
+
+/// Every file under `playground/` with one of `extensions`, as a path
+/// relative to that directory. Build output and the dependency tree are not
+/// authored here and no gate is asked to read them.
+fn playground_files(extensions: &[&str]) -> BTreeSet<String> {
+    fn walk(dir: &Path, root: &Path, extensions: &[&str], out: &mut BTreeSet<String>) {
+        let entries =
+            fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if matches!(name.as_str(), "node_modules" | "dist" | ".vite") {
+                    continue;
+                }
+                walk(&path, root, extensions, out);
+                continue;
+            }
+            if extensions.iter().any(|ext| name.ends_with(ext)) {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                out.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let root = repo_root().join(PLAYGROUND);
+    let mut out = BTreeSet::new();
+    walk(&root, &root, extensions, &mut out);
+    out
+}
+
+/// The `files.includes` list from `biome.json`, split into the patterns that
+/// admit a file and the `!`-prefixed ones that take it back out.
+fn biome_net() -> (Vec<String>, Vec<String>) {
+    let text = read("playground/biome.json");
+    let config: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("playground/biome.json: {e}"));
+    let entries = config["files"]["includes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("playground/biome.json declares no `files.includes` any more"));
+    let mut admitted = Vec::new();
+    let mut excluded = Vec::new();
+    for entry in entries {
+        let pattern = entry.as_str().unwrap_or_default();
+        match pattern.strip_prefix('!') {
+            Some(rest) => excluded.push(rest.to_owned()),
+            None => admitted.push(pattern.to_owned()),
+        }
+    }
+    (admitted, excluded)
+}
+
+/// The `include` list of `vite.config.ts`'s `test` block.
+fn vitest_include() -> Vec<String> {
+    let config = read("playground/vite.config.ts");
+    // Anchored on the `test:` block. `build.rollupOptions` is a sibling with
+    // list-valued keys of its own, and a reader that took the first `include:`
+    // in the file would be reporting on whichever block moved above it.
+    let (_, after) = config
+        .split_once("\n  test: {")
+        .unwrap_or_else(|| panic!("vite.config.ts has no `test` block any more"));
+    let list = Regex::new(r"include:\s*\[([^\]]*)\]")
+        .expect("a literal regex")
+        .captures(after)
+        .unwrap_or_else(|| panic!("vite.config.ts's `test` block declares no `include`"));
+    list[1]
+        .split(',')
+        .map(|item| item.trim().trim_matches('\'').trim_matches('"').to_owned())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+#[test]
+fn every_typescript_file_in_the_playground_is_one_the_lint_gate_reads() {
+    let (patterns, negations) = biome_net();
+    let admits: Vec<Regex> = patterns.iter().map(|p| glob_to_regex(p)).collect();
+    let refuses: Vec<Regex> = negations.iter().map(|p| glob_to_regex(p)).collect();
+
+    let sources = playground_files(&[".ts", ".tsx"]);
+    assert!(
+        sources.len() >= 20,
+        "only {} TypeScript file(s) found under {PLAYGROUND}/; the reader is not finding the tree",
+        sources.len()
+    );
+
+    let unread: Vec<&String> = sources
+        .iter()
+        .filter(|path| {
+            !admits.iter().any(|re| re.is_match(path))
+                || refuses.iter().any(|re| {
+                    path.split('/')
+                        .scan(String::new(), |at, segment| {
+                            if !at.is_empty() {
+                                at.push('/');
+                            }
+                            at.push_str(segment);
+                            Some(at.clone())
+                        })
+                        .any(|prefix| re.is_match(&prefix))
+                })
+        })
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "biome's `files.includes` does not reach these:\n  {}\n\
+         `just playground-lint` passes on a file it never opened, which reads exactly like the \
+         file being clean. Widen `files.includes` in playground/biome.json.\n\
+         admitted: {patterns:?}\n  refused: {negations:?}",
+        unread
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+#[test]
+fn every_test_file_beside_a_playground_module_is_one_the_test_gate_runs() {
+    // The narrowest net here, and the one with a live gap: `src/**/*.test.ts`
+    // does not match `.test.tsx`. A Solid component test would sit beside its
+    // component, be committed, be reviewed, and never run — and `vitest run`
+    // would report the suite it did run as passing.
+    let include: Vec<Regex> = vitest_include().iter().map(|p| glob_to_regex(p)).collect();
+    let tests: BTreeSet<String> = playground_files(&[".ts", ".tsx"])
+        .into_iter()
+        .filter(|path| path.contains(".test."))
+        .collect();
+    assert!(
+        tests.len() >= 4,
+        "only {} test file(s) found under {PLAYGROUND}/; the reader is not finding them",
+        tests.len()
+    );
+
+    let unrun: Vec<&String> = tests
+        .iter()
+        .filter(|path| !include.iter().any(|re| re.is_match(path)))
+        .collect();
+    assert!(
+        unrun.is_empty(),
+        "vitest's `include` does not match these:\n  {}\n\
+         They are test files that no gate runs. Widen the `include` list in the `test` block of \
+         playground/vite.config.ts.",
+        unrun
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// A playground gate, the `package.json` script it runs, and what that script
+/// must and must not say for the gate to be able to fail.
+///
+/// Both entries are the same defect in two tools: the default is to report,
+/// and reporting exits 0.
+const PLAYGROUND_SCRIPT_POLICY: &[(&str, &str, &[&str], &[&str])] = &[
+    (
+        "playground-lint",
+        "lint",
+        // Several of biome's recommended rules are warn-level, and `biome
+        // check` exits 0 on those.
+        &["--error-on-warnings"],
+        &[],
+    ),
+    (
+        "playground-test",
+        "test",
+        &[],
+        // With it, a suite that matched nothing — a renamed `include`, a
+        // deleted directory — is a green gate.
+        &["--passWithNoTests"],
+    ),
+];
+
+#[test]
+fn a_playground_gate_fails_on_the_absence_of_what_it_checks() {
+    let justfile = read("Justfile");
+    let text = read("playground/package.json");
+    let manifest: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("playground/package.json: {e}"));
+
+    for &(recipe, script, required, forbidden) in PLAYGROUND_SCRIPT_POLICY {
+        assert!(
+            recipes_in_group(&justfile, "gate").contains(recipe),
+            "`{recipe}` is not in the gate manifest any more"
+        );
+        let body = recipe_body(&justfile, recipe).join(" ");
+        assert!(
+            body.contains(&format!("bun run {script}")),
+            "`just {recipe}` no longer runs `bun run {script}`, so the policy below is being \
+             checked against a script nothing calls"
+        );
+
+        let command = manifest["scripts"][script]
+            .as_str()
+            .unwrap_or_else(|| panic!("playground/package.json declares no `{script}` script"));
+        for flag in required {
+            assert!(
+                command.contains(flag),
+                "the `{script}` script (`{command}`) does not pass `{flag}`. Without it the tool \
+                 reports its findings and exits 0, so `just {recipe}` is a report rather than a \
+                 gate."
+            );
+        }
+        for flag in forbidden {
+            assert!(
+                !command.contains(flag),
+                "the `{script}` script (`{command}`) passes `{flag}`, which makes `just {recipe}` \
+                 pass when it checked nothing at all."
+            );
+        }
+    }
+}
+
+#[test]
+fn every_bun_script_a_recipe_runs_is_one_the_playground_declares() {
+    // The binding the two tests above lean on, asked of every recipe rather
+    // than of the two gates: `bun run <name>` is resolved by package.json, and
+    // a renamed script fails at run time in a container, on a line no reader
+    // of the Justfile can see is wrong.
+    let justfile = read("Justfile");
+    let text = read("playground/package.json");
+    let manifest: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("playground/package.json: {e}"));
+    let declared: BTreeSet<&str> = manifest["scripts"]
+        .as_object()
+        .unwrap_or_else(|| panic!("playground/package.json declares no scripts"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    let called = Regex::new(r"bun run ([a-z][a-z0-9:-]*)").expect("a literal regex");
+    let mut missing = Vec::new();
+    let mut seen = 0;
+    for line in justfile.lines() {
+        if !line.starts_with([' ', '\t']) {
+            continue;
+        }
+        for capture in called.captures_iter(strip_comment(line)) {
+            seen += 1;
+            let script = &capture[1];
+            if !declared.contains(script) {
+                missing.push(format!("`bun run {script}` — {}", line.trim()));
+            }
+        }
+    }
+    assert!(
+        seen >= 4,
+        "only {seen} `bun run` call(s) found in the Justfile; the reader is not finding them"
+    );
+    assert!(
+        missing.is_empty(),
+        "these recipes call a script playground/package.json does not declare:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// A lefthook `glob:` as a regex. A THIRD dialect, and the difference is the
+/// whole reason this reader is separate from [`glob_to_regex`]: lefthook's
+/// `**` spans one directory or many, never none, so `a/**/*.ts` does not match
+/// `a/b.ts` — where biome's and vitest's identically-spelled pattern does.
+///
+/// Measured, not assumed, against the pinned lefthook 2.1.9:
+/// `lefthook run pre-commit --command playground --file <path>` reports
+/// `(skip) no matching staged files` for `playground/vite.config.ts` and runs
+/// for `playground/src/outline.ts`.
+fn lefthook_glob_to_regex(pattern: &str) -> Regex {
+    let spanning = glob_to_regex(pattern)
+        .as_str()
+        .replace("(?:[^/]+/)*", "(?:[^/]+/)+");
+    Regex::new(&spanning).unwrap_or_else(|e| panic!("`{pattern}` is not a glob: {e}"))
+}
+
+/// The `pre-commit` commands lefthook declares: for each, the `glob:` patterns
+/// gating it and the command line it runs.
+fn pre_commit_commands(lefthook: &str) -> BTreeMap<String, (Vec<String>, Option<String>)> {
+    let mut out: BTreeMap<String, (Vec<String>, Option<String>)> = BTreeMap::new();
+    let mut in_hook = false;
+    let mut in_commands = false;
+    let mut current: Option<String> = None;
+    let mut in_glob = false;
+    for line in lefthook.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if indent == 0 {
+            in_hook = line.starts_with("pre-commit:");
+            in_commands = false;
+            current = None;
+            continue;
+        }
+        if !in_hook {
+            continue;
+        }
+        if indent == 2 {
+            in_commands = trimmed.starts_with("commands:");
+            current = None;
+            continue;
+        }
+        if !in_commands {
+            continue;
+        }
+        if indent == 4 {
+            current = trimmed.strip_suffix(':').map(str::to_owned);
+            in_glob = false;
+            if let Some(name) = &current {
+                out.entry(name.clone()).or_default();
+            }
+            continue;
+        }
+        let Some(name) = current.clone() else {
+            continue;
+        };
+        let entry = out.entry(name).or_default();
+        if let Some(value) = trimmed.strip_prefix("glob:") {
+            in_glob = true;
+            let value = value.trim();
+            if !value.is_empty() {
+                entry.0.push(value.trim_matches('"').to_owned());
+                in_glob = false;
+            }
+        } else if let Some(value) = trimmed.strip_prefix("- ") {
+            // Only inside the list `glob:` opened; `tags:` has one too.
+            if in_glob {
+                entry.0.push(value.trim().trim_matches('"').to_owned());
+            }
+        } else if let Some(value) = trimmed.strip_prefix("run:") {
+            in_glob = false;
+            entry.1 = Some(value.trim().to_owned());
+        } else {
+            in_glob = false;
+        }
+    }
+    out
+}
+
+#[test]
+fn the_pre_commit_hook_over_the_playground_fires_on_every_file_its_gate_reads() {
+    // A hook behind a glob is two decisions — which check, and on what — and
+    // only the first one is visible when it is right. This one was wrong in
+    // the direction that matters most: the files it skipped were the gate's
+    // own configuration, so a commit that switched the gate off was a commit
+    // it did not look at.
+    let lefthook = read("lefthook.yml");
+    let commands = pre_commit_commands(&lefthook);
+    let gate = "just playground-lint";
+    let (globs, _) = commands
+        .values()
+        .find(|(_, run)| run.as_deref() == Some(gate))
+        .unwrap_or_else(|| {
+            panic!("no pre-commit command runs `{gate}` any more; the hook this checks is gone")
+        });
+    assert!(
+        !globs.is_empty(),
+        "the `{gate}` hook has no glob; it now runs on every commit, which is a different \
+         decision from the one recorded in lefthook.yml"
+    );
+    let fires: Vec<Regex> = globs.iter().map(|p| lefthook_glob_to_regex(p)).collect();
+
+    // What the gate reads: biome's own net, resolved against the tree.
+    let (patterns, _) = biome_net();
+    let admits: Vec<Regex> = patterns.iter().map(|p| glob_to_regex(p)).collect();
+    let read_by_the_gate: Vec<String> = playground_files(&[".ts", ".tsx", ".json"])
+        .into_iter()
+        .filter(|path| admits.iter().any(|re| re.is_match(path)))
+        .map(|path| format!("{PLAYGROUND}/{path}"))
+        .collect();
+    assert!(
+        read_by_the_gate.len() >= 25,
+        "only {} file(s) came out as read by the gate; the reader is not finding the tree",
+        read_by_the_gate.len()
+    );
+
+    let skipped: Vec<&String> = read_by_the_gate
+        .iter()
+        .filter(|path| !fires.iter().any(|re| re.is_match(path)))
+        .collect();
+    assert!(
+        skipped.is_empty(),
+        "`just playground-lint` reads these and the pre-commit hook does not fire on them:\n  {}\n\
+         Editing one and committing runs no check at all, and `just ci` at push time is the only \
+         thing left. lefthook's `**` needs at least one directory under it, so a top-level file \
+         wants its own pattern.\n  globs: {globs:?}",
+        skipped
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn the_two_glob_dialects_differ_where_they_were_measured_to_differ() {
+    // Held apart on purpose. Reading one file's globs with the other's rules
+    // is how the hook came to look like it covered a tree it did not.
+    for (pattern, path) in [
+        ("playground/**/*.{ts,tsx,json}", "playground/vite.config.ts"),
+        ("src/**/*.ts", "src/outline.ts"),
+    ] {
+        assert!(
+            glob_to_regex(pattern).is_match(path),
+            "biome/vitest spell `**/` as spanning zero directories; `{pattern}` missed `{path}`"
+        );
+        assert!(
+            !lefthook_glob_to_regex(pattern).is_match(path),
+            "lefthook's `**` needs a directory under it; `{pattern}` was read as matching `{path}`, \
+             which is the reading that hid the gap this test exists for"
+        );
+    }
+    // And where they agree, they agree.
+    for (pattern, path) in [
+        ("playground/**/*.{ts,tsx,json}", "playground/src/outline.ts"),
+        ("playground/*.{ts,json}", "playground/package.json"),
+    ] {
+        assert!(
+            lefthook_glob_to_regex(pattern).is_match(path),
+            "`{pattern}` should fire on `{path}`"
+        );
+    }
+    assert!(
+        !lefthook_glob_to_regex("playground/*.{ts,json}").is_match("README.md"),
+        "a playground glob matched a file outside the playground"
+    );
+}
+
+#[test]
+fn a_hook_glob_is_read_off_its_own_command_and_not_a_neighbouring_list() {
+    let lefthook = concat!(
+        "pre-commit:\n",
+        "  commands:\n",
+        "    fmt:\n",
+        "      glob: \"*.rs\"\n",
+        "      run: just fmt\n",
+        "    playground:\n",
+        "      glob:\n",
+        "        - \"playground/*.{ts,json}\"\n",
+        "        - \"playground/**/*.{ts,tsx,json}\"\n",
+        "      run: just playground-lint\n",
+        "      fail_text: |\n",
+        "        - not a glob, and neither is the run: word in this sentence\n",
+        "    typos:\n",
+        "      run: just typos\n",
+        "pre-push:\n",
+        "  commands:\n",
+        "    deep:\n",
+        "      glob: \"*.never\"\n",
+        "      run: just prop-deep\n",
+        "      tags:\n",
+        "        - deep\n",
+    );
+    let commands = pre_commit_commands(lefthook);
+    assert_eq!(
+        commands.keys().collect::<Vec<_>>(),
+        ["fmt", "playground", "typos"],
+        "a command outside the pre-commit hook was read as one of its own"
+    );
+    assert_eq!(
+        commands["playground"].0,
+        ["playground/*.{ts,json}", "playground/**/*.{ts,tsx,json}"],
+        "the list form of `glob:` did not come out as two patterns"
+    );
+    assert_eq!(
+        commands["playground"].1.as_deref(),
+        Some("just playground-lint"),
+        "the `run:` after a list-valued glob was lost"
+    );
+    assert_eq!(
+        commands["fmt"].0,
+        ["*.rs"],
+        "the scalar form of `glob:` did not come out"
+    );
+    assert!(
+        commands["typos"].0.is_empty(),
+        "a command with no glob came out carrying its neighbour's"
+    );
+}
+
+#[test]
+fn a_glob_matches_across_directories_only_where_it_says_it_does() {
+    let cases: &[(&str, &str, bool)] = &[
+        // The gap this reader exists to see.
+        ("src/**/*.test.ts", "src/outline.test.ts", true),
+        ("src/**/*.test.ts", "src/editor/parserState.test.ts", true),
+        ("src/**/*.test.ts", "src/components/Toolbar.test.tsx", false),
+        // `**/` has to span zero directories as well as many.
+        ("src/**/*.ts", "src/outline.ts", true),
+        ("src/**/*.ts", "src/styles/theme-urls.ts", true),
+        ("src/**/*.ts", "src/App.tsx", false),
+        // A single `*` stops at a separator, so a top-level pattern does not
+        // quietly cover the tree below it.
+        ("*.ts", "vite.config.ts", true),
+        ("*.ts", "src/outline.ts", false),
+        // A literal, and the `.` in it as a literal too.
+        ("package.json", "package.json", true),
+        ("package.json", "packageXjson", false),
+        // The brace form, which the glob lists here are one edit away from.
+        ("src/**/*.{ts,tsx}", "src/components/Toolbar.tsx", true),
+        ("src/**/*.{ts,tsx}", "src/styles/shell.css", false),
+    ];
+    for &(pattern, path, expected) in cases {
+        assert_eq!(
+            glob_to_regex(pattern).is_match(path),
+            expected,
+            "`{pattern}` against `{path}` should be {expected}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
-import { For, type Accessor, type Component } from 'solid-js';
 import type { EditorView } from '@codemirror/view';
+import { type Accessor, type Component, For } from 'solid-js';
 
 import type { ColorSchemePref } from '../color-scheme';
 import { WRAP_SHAPES, wrapCommand } from '../editor/wrapCommands';
@@ -37,7 +37,16 @@ const Toolbar: Component<ToolbarProps> = (props) => {
         <span class="aozora-md-pg-brand-mark">aozora-md</span>
         <span class="aozora-md-pg-brand-sub">playground</span>
       </a>
-      <div class="aozora-md-pg-toolbar-group" role="group" aria-label="表示モード">
+      {/* biome-ignore lint/a11y/useSemanticElements: the element the rule
+          asks for is <fieldset>, which is a form-control grouping — these are
+          toolbar toggles outside any form, and a fieldset would also bring a
+          default box model the toolbar layout has to undo. `role="group"`
+          plus the label is the correct ARIA for a labelled toolbar cluster. */}
+      <div
+        class="aozora-md-pg-toolbar-group"
+        role="group"
+        aria-label="表示モード"
+      >
         <span class="aozora-md-pg-label">表示</span>
         <button
           type="button"
@@ -122,7 +131,11 @@ const Toolbar: Component<ToolbarProps> = (props) => {
         {COLOR_SCHEME_LABEL[props.colorSchemePref()]}
       </button>
       <SettingsPanel view={props.editorView} />
-      <button type="button" class="aozora-md-pg-share" onClick={() => props.onShare()}>
+      <button
+        type="button"
+        class="aozora-md-pg-share"
+        onClick={() => props.onShare()}
+      >
         共有リンクをコピー
       </button>
     </header>

@@ -11,8 +11,8 @@
 // This handle is the Aozora parser directly, NOT the aozora-md pipeline, so
 // its spans are in source coordinates — which is what the assists need.
 
-import { StateField } from '@codemirror/state';
 import type { EditorState, Transaction } from '@codemirror/state';
+import { StateField } from '@codemirror/state';
 
 import { AozoraDocument } from '../wasm-loader';
 
@@ -188,7 +188,10 @@ function deriveContainerFolds(
   return folds;
 }
 
-function computeParserState(prev: ParserState | null, source: string): ParserState {
+function computeParserState(
+  prev: ParserState | null,
+  source: string,
+): ParserState {
   prev?.doc?.free();
   if (source === '') {
     const tables = buildOffsetTables('');

@@ -1,6 +1,14 @@
-import { defineConfig, type Plugin } from 'vite';
+import type { Plugin } from 'vite';
 import solid from 'vite-plugin-solid';
 import wasm from 'vite-plugin-wasm';
+// `vitest/config` re-exports Vite's own `defineConfig` with the `test` key
+// added to its type. Importing it from there rather than keeping a separate
+// `vitest.config.ts` is what makes the unit tests run through THIS config:
+// a second file would replace it, and the tested modules would then be
+// transformed without `import.meta.glob` resolving `examples/*.md?raw` or the
+// `?url` theme imports resolving at all — i.e. the suite would be testing a
+// different build of the module than the one that ships.
+import { defineConfig } from 'vitest/config';
 
 // Strict Content-Security-Policy for the production bundle. Defense-in-depth
 // layered *on top of* the renderer's escaping: the preview is mounted via
@@ -125,5 +133,19 @@ export default defineConfig(({ command }) => ({
         },
       },
     },
+  },
+  // Unit tests for the modules that hold logic rather than DOM wiring
+  // (`outline`, `examples`, `share`, …). `tsc --noEmit` was the whole of the
+  // static analysis over this tree; a type checker cannot say whether
+  // `outlineFromIr` walks into a list item.
+  test: {
+    // Beside the module they test, so a module without one is visible in the
+    // same directory listing.
+    include: ['src/**/*.test.ts'],
+    // `outline.ts` reads heading text back out of rendered HTML with
+    // `DOMParser`, which node has not got. happy-dom over jsdom for the
+    // reason the sibling aozora playground picked it: same API surface for
+    // what is used here, a fraction of the start-up.
+    environment: 'happy-dom',
   },
 }));

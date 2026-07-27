@@ -13,7 +13,7 @@
 // `theme.ts`; aozora-md keeps the writing-mode toggle on a distinct attribute,
 // `data-aozora-md-theme`, so the two axes never collide.)
 
-import { createEffect, createSignal, type Accessor } from 'solid-js';
+import { type Accessor, createEffect, createSignal } from 'solid-js';
 
 const STORAGE_KEY = 'aozora-md-playground:color-scheme';
 const CYCLE = ['auto', 'light', 'dark'] as const;
@@ -38,7 +38,9 @@ function savePref(pref: ColorSchemePref): void {
 }
 
 function osPrefersDark(): boolean {
-  return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+  return (
+    globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
+  );
 }
 
 function effective(pref: ColorSchemePref): 'light' | 'dark' {
@@ -46,7 +48,7 @@ function effective(pref: ColorSchemePref): 'light' | 'dark' {
 }
 
 function paint(pref: ColorSchemePref): void {
-  document.documentElement.dataset['colorScheme'] = effective(pref);
+  document.documentElement.dataset.colorScheme = effective(pref);
 }
 
 /**
