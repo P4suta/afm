@@ -25,7 +25,8 @@ use std::fs;
 use std::path::Path;
 
 use aozora_flavored_markdown::{
-    Options, RenderedBlocks, canonicalize, render, render_blocks, render_to_ir,
+    Diagnostic, Options, RenderedBlocks, canonicalize, diagnose, render, render_blocks,
+    render_to_ir,
 };
 use aozora_flavored_markdown_test_support::config;
 use aozora_flavored_markdown_test_support::generators::{
@@ -312,6 +313,87 @@ fn the_canonicaliser_leaves_no_payload_more_dangerous_than_it_found_it() {
             "canonicalize→render",
             src,
             &render(&canonical, &Options::new()).html,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// one document, one set of diagnostics
+// ---------------------------------------------------------------------------
+
+/// What every entry point says the lexer saw, for one source under one
+/// configuration.
+///
+/// `diagnose` is the odd one out and the reason this rule exists: it is the
+/// only entry point that reaches its answer *without* rendering, so it is the
+/// only one whose answer can drift without a rendered document to contradict
+/// it. The three renderers are not redundant either — `render_blocks` reads
+/// its diagnostics off a `StreamingIrBuilder`'s own construct table, not off
+/// the one the document path builds.
+fn four_readings(src: &str, opts: &Options) -> [(&'static str, Vec<Diagnostic>); 4] {
+    [
+        ("diagnose", diagnose(src, opts)),
+        ("render", render(src, opts).diagnostics),
+        ("render_to_ir", render_to_ir(src, opts).diagnostics),
+        ("render_blocks", render_blocks(src, opts).diagnostics),
+    ]
+}
+
+fn assert_one_reading(label: &str, src: &str, opts: &Options) {
+    let readings = four_readings(src, opts);
+    let (_, expected) = &readings[0];
+    for (name, actual) in &readings[1..] {
+        assert_eq!(
+            actual, expected,
+            "`{name}` and `diagnose` disagree about {src:?} under {label}"
+        );
+    }
+}
+
+#[test]
+fn no_reachable_configuration_makes_the_entry_points_disagree_about_a_source() {
+    // The CLI's `check` sub-command stopped rendering: it asks `diagnose` and
+    // exits 2 under `--strict` on what comes back, where it used to exit 2 on
+    // what `render` came back with. That is only the same command if these
+    // agree everywhere, and "everywhere" includes the configuration space —
+    // `diagnose` has its own early return for `with_aozora(false)`, which is
+    // a second place the two can part company.
+    for (label, opts) in reachable_options() {
+        for src in XSS_PAYLOADS {
+            assert_one_reading(&label, src, &opts);
+        }
+        for src in DIAGNOSTIC_SOURCES.iter().chain(MASKED_SOURCES) {
+            assert_one_reading(&label, src, &opts);
+        }
+    }
+}
+
+/// Sources that make the lexer say something, so the rule above is quantified
+/// over non-empty diagnostics rather than agreeing four ways on nothing.
+const DIAGNOSTIC_SOURCES: &[&str] = &[
+    "orphan》close",
+    "｜青梅《おうめ》と orphan》close",
+    "第一行\n第二行》\n第三行",
+];
+
+/// Sources whose triggers are hidden from the lexer by the code-block mask.
+/// Swept but not required to diagnose: masking is a step `diagnose` performs
+/// for itself rather than inherits, so it is a place the readings could part
+/// company — by one of them seeing a construct the other masked away.
+const MASKED_SOURCES: &[&str] = &[
+    "```\norphan》close\n```\n",
+    "    orphan》close\n",
+    "`｜青梅《おうめ》`",
+];
+
+#[test]
+fn the_diagnostic_corpus_is_one_that_actually_diagnoses() {
+    // A corpus that quietly stopped provoking the lexer would leave the rule
+    // above passing on four empty vectors.
+    for src in DIAGNOSTIC_SOURCES {
+        assert!(
+            !diagnose(src, &Options::default()).is_empty(),
+            "{src:?} must still raise a diagnostic, or the corpus needs a new canary"
         );
     }
 }
@@ -685,6 +767,15 @@ proptest! {
             &render_to_ir(&src, &opts).html,
             &rendered.html,
             "the IR path must format the same document as the HTML path"
+        );
+        // Quantified here rather than only over the fixed corpus above: what
+        // `check` now reports is `diagnose`'s answer, and an input nobody
+        // wrote down is exactly where a second reading of the same source
+        // would first differ.
+        prop_assert_eq!(
+            &diagnose(&src, &opts),
+            &rendered.diagnostics,
+            "`diagnose` must report what the render it skips would have"
         );
         // The per-block path restores the code-block mask a block at a time,
         // so it can leak where the document path does not.

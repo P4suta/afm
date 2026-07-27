@@ -35,7 +35,7 @@ use std::str;
 
 use aozora::decode_sjis;
 use aozora_flavored_markdown::{
-    Options, RenderedBlocks, canonicalize, render, render_blocks, sentinels,
+    Options, RenderedBlocks, canonicalize, diagnose, render, render_blocks, sentinels,
 };
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
@@ -46,8 +46,18 @@ fn parse_render_regressions_replay_cleanly() {
     replay_each(
         "parse_render",
         |src| {
-            let html = render(src, &Options::default()).html;
-            assert_html_invariants(src, &html);
+            let rendered = render(src, &Options::default());
+            assert_html_invariants(src, &rendered.html);
+            // The corpus is inputs libFuzzer found by looking for trouble, so
+            // it is the sharpest set to ask the `check`-vs-`render` question
+            // of: `diagnose` reaches the same diagnostics without rendering,
+            // and an artifact promoted here is an input that once broke
+            // something on the way.
+            assert_eq!(
+                diagnose(src, &Options::default()),
+                rendered.diagnostics,
+                "`diagnose` and `render` disagree about {src:?}"
+            );
         },
         ReplayInput::Utf8,
     );
@@ -61,7 +71,11 @@ fn render_blocks_regressions_replay_cleanly() {
             // Mirrors the `render_blocks` target: Tier B per chunk, the
             // rest on the concatenation, which is the only form that owes
             // tag balance when a container spans blocks.
-            let RenderedBlocks { blocks, .. } = render_blocks(src, &Options::default());
+            let RenderedBlocks {
+                blocks,
+                diagnostics,
+                ..
+            } = render_blocks(src, &Options::default());
             let mut joined = String::new();
             for block in &blocks {
                 if let Err(e) = check_no_sentinel_leak(src, &block.html) {
@@ -73,6 +87,14 @@ fn render_blocks_regressions_replay_cleanly() {
                 joined.push_str(&block.html);
             }
             assert_html_invariants(src, &joined);
+            // The streaming path builds its own construct table, so this is a
+            // second producer of the diagnostics `diagnose` claims to be the
+            // one answer for.
+            assert_eq!(
+                diagnose(src, &Options::default()),
+                diagnostics,
+                "`diagnose` and `render_blocks` disagree about {src:?}"
+            );
         },
         ReplayInput::Utf8,
     );

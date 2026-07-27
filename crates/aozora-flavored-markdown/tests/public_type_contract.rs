@@ -1174,7 +1174,65 @@ fn a_diagnostic_reads_back_off_the_envelope_it_writes() {
 /// and it is the *symmetry* with `canonicalize` that would motivate it. Read
 /// off the source rather than asserted per function, so an entry point added
 /// later is covered without editing this.
-const INFALLIBLE_BY_DESIGN: &[&str] = &["render", "render_to_ir", "render_blocks", "to_html"];
+/// `escape_html` is here for a duller reason than the rest — escaping cannot
+/// fail — but it is a crate-root function a consumer calls, and the rule below
+/// is now the complete list rather than the remembered one.
+const INFALLIBLE_BY_DESIGN: &[&str] = &[
+    "diagnose",
+    "escape_html",
+    "render",
+    "render_to_ir",
+    "render_blocks",
+    "to_html",
+];
+
+/// The other side of that rule: the one entry point that can be handed more
+/// than it can address.
+const FALLIBLE_BY_DESIGN: &str = "canonicalize";
+
+/// Every free function `lib.rs` declares at the crate root — the entry points,
+/// and nothing that hangs off a type.
+///
+/// Read by indentation, which under rustfmt is exactly the difference: a
+/// method inside an `impl` block is indented, a crate-root function is not.
+///
+/// This reader is the half [`INFALLIBLE_BY_DESIGN`] was missing. The list
+/// above says a name in it must still exist — so a *deleted* entry point
+/// fails — but nothing said the list was complete, and `diagnose` arrived on
+/// the public surface with every rule below silently skipping it, because
+/// each of them filters by that list first.
+fn crate_root_entry_points() -> BTreeSet<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let src = fs::read_to_string(&path).expect("src/lib.rs must be readable");
+    let names: BTreeSet<String> = src
+        .lines()
+        .filter(|line| !line.starts_with(char::is_whitespace))
+        .filter_map(public_fn_name)
+        .collect();
+    assert!(
+        !names.is_empty(),
+        "no crate-root public function found in {}; the reader must be retargeted, not deleted",
+        path.display()
+    );
+    names
+}
+
+#[test]
+fn the_fallibility_rule_covers_every_crate_root_entry_point() {
+    let ruled: BTreeSet<String> = INFALLIBLE_BY_DESIGN
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain(once(FALLIBLE_BY_DESIGN.to_owned()))
+        .collect();
+    assert_eq!(
+        crate_root_entry_points(),
+        ruled,
+        "a public entry point is named by neither rule. Every function a consumer calls at the \
+         crate root is one of the two: infallible because CommonMark is a total grammar, or the \
+         one that can be handed too much source. Add it to whichever it is — the rules below \
+         filter by these lists, so an unnamed entry point is one they all skip"
+    );
+}
 
 /// The name a `pub fn` declares, `const` and `async` spellings included.
 fn public_fn_name(decl: &str) -> Option<String> {
@@ -1237,8 +1295,8 @@ fn the_canonicaliser_is_the_only_public_function_that_can_fail() {
          has a source it can be handed too much of. Found: {fallible:?}"
     );
     assert!(
-        fallible[0].ends_with(": canonicalize"),
-        "the fallible one must be `canonicalize`, not {:?}",
+        fallible[0].ends_with(&format!(": {FALLIBLE_BY_DESIGN}")),
+        "the fallible one must be `{FALLIBLE_BY_DESIGN}`, not {:?}",
         fallible[0]
     );
 }
@@ -1314,10 +1372,22 @@ fn no_public_function_returns_an_anonymous_tuple() {
             }
             entry_points.insert(name.clone());
             let head = head_of(ty);
+            // The third arm is an allowance and is narrower than it reads:
+            // the element stays sealed, so what a diagnostic *says* can still
+            // grow. What a `Vec` cannot do is grow a field beside itself, so
+            // `diagnose` is the one entry point whose result is fixed at one
+            // thing for good — where `Rendered` grew `diagnostics` next to
+            // `html` and could grow again. Written down as a decision about
+            // that signature, rather than left implicit in the fact that no
+            // rule had enumerated the entry points.
+            let element = idents(ty).get(1).cloned().unwrap_or_default();
+            let allowed = head == "String"
+                || sealed.contains(&head)
+                || (head == "Vec" && sealed.contains(&element));
             assert!(
-                head == "String" || sealed.contains(&head),
-                "{}:{}: entry point `{name}` returns `{ty}`, which is neither a `String` \
-                 nor a sealed public type of this crate",
+                allowed,
+                "{}:{}: entry point `{name}` returns `{ty}`, which is none of a `String`, \
+                 a sealed public type of this crate, or a `Vec` of one",
                 path.display(),
                 start + 1,
             );
