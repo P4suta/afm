@@ -47,7 +47,7 @@ jobs:
             Zlib,
             CC-BY-SA-4.0
 
-          # Per-package exemptions, for two distinct reasons:
+          # Per-package exemptions, for three distinct reasons:
           #
           # - Swatinem/rust-cache (LGPL-3.0). CI-only actions are build-time
           #   tooling, never linked into or shipped with the crates, so their
@@ -69,10 +69,26 @@ jobs:
           #   `LicenseRef-bad-apache-2.0mit`. Dev-dependency of the wasm
           #   crate only, reached solely by `just test-wasm`, and never
           #   linked into a published artefact. Same removal condition.
+          #
+          # - libfuzzer-sys declares `(MIT OR Apache-2.0) AND NCSA`. Unlike
+          #   the two above this is a real third licence, not a parser
+          #   artefact: NCSA is the University of Illinois/NCSA licence LLVM
+          #   used before it relicensed, and libfuzzer-sys wraps LLVM's
+          #   libFuzzer. It is permissive and OSI-approved, so it conflicts
+          #   with nothing the product ships — and it cannot reach a shipped
+          #   artefact anyway, because it is reached only from
+          #   crates/aozora-flavored-markdown/fuzz, which is `publish = false`
+          #   and outside the cargo workspace. That exclusion is also why
+          #   cargo-deny never sees this edge and only this action does.
+          #   Drop this entry if the fuzz crate stops depending on
+          #   libfuzzer-sys — libafl_libfuzzer is a drop-in replacement under
+          #   MIT OR Apache-2.0, and libFuzzer itself has been in
+          #   maintenance-only mode upstream since late 2022.
           allow-dependencies-licenses: >-
             pkg:githubactions/Swatinem/rust-cache,
             pkg:cargo/rustc-demangle,
-            pkg:cargo/minicov
+            pkg:cargo/minicov,
+            pkg:cargo/libfuzzer-sys
 
           # Comment only on failure so clean PRs aren't spammed.
           comment-summary-in-pr: on-failure
