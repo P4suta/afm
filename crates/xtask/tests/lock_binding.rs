@@ -43,7 +43,7 @@ use std::process::Command as Spawn;
 /// registry holds the day the image is baked.
 const CARGO_RESOLVING: &[&str] = &[
     "add", "bench", "binstall", "build", "check", "clean", "clippy", "deny", "doc", "install",
-    "llvm-cov", "metadata", "nextest", "publish", "release", "remove", "rustc", "run", "shear",
+    "llvm-cov", "metadata", "nextest", "pkgid", "publish", "remove", "rustc", "run", "shear",
     "test", "tree", "udeps",
 ];
 
@@ -68,6 +68,13 @@ const CARGO_SELF_LOCKING: &[(&str, &str)] = &[
          resolve to",
     ),
     ("update", "rewriting the lockfile is the whole point of it"),
+    (
+        "release",
+        "the same answer as `update`, one level up: `just release` bumps every \
+         member's version, and `Cargo.lock` records those versions, so rewriting \
+         it is what the step is for. cargo-release 1.1.3 has no `--locked` to \
+         pass anyway",
+    ),
 ];
 
 /// JS package managers, and the sub-commands of theirs that can rewrite

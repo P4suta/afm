@@ -142,6 +142,104 @@ fn declared_tools(text: &str) -> Vec<String> {
     out
 }
 
+/// The tools the dev image installs, by package name.
+///
+/// `mise.toml` is the HOST copy — six tools, "latest", for editor integration
+/// and the commit-msg hook. The image is where a tool becomes available to a
+/// recipe, and it carries twenty-five. Reading only the first is how
+/// `cargo-release` sat in tier D of the `Dockerfile` from the day that layer
+/// was added, invoked by nothing, while the rule below reported every declared
+/// tool as running.
+///
+/// Two forms, both read off the file rather than listed here. `cargo binstall`
+/// and `cargo install` name their packages outright. Everything fetched from a
+/// release archive is pinned by an `ARG <TOOL>_VERSION`, which is the same
+/// declaration one layer up and the only one those `curl | tar` lines make in
+/// a shape a reader can find — `just` is installed with its version inline and
+/// is therefore the one tool in the image neither form sees.
+fn image_tools(dockerfile: &str) -> BTreeSet<String> {
+    let joined = dockerfile.replace("\\\n", " ");
+    let mut out = BTreeSet::new();
+    for line in joined.lines() {
+        if let Some(rest) = line.strip_prefix("ARG ") {
+            let name = rest.split('=').next().unwrap_or_default().trim();
+            if let Some(tool) = name.strip_suffix("_VERSION") {
+                out.insert(tool.to_ascii_lowercase().replace('_', "-"));
+            }
+            continue;
+        }
+        if !line.starts_with("RUN") {
+            continue;
+        }
+        let body = strip_comment(line);
+        let Some(at) = ["cargo binstall", "cargo install"]
+            .iter()
+            .find_map(|head| body.find(head).map(|at| at + head.len()))
+        else {
+            continue;
+        };
+        // Everything after the sub-command that is not a flag, a shell
+        // expansion or a path is a package. `sccache@0.10.0` is a pin on one.
+        for token in body[at..].split_whitespace() {
+            if token.starts_with(['-', '$', '"', '\''])
+                || token.contains('/')
+                || token.contains('=')
+            {
+                continue;
+            }
+            out.insert(token.split('@').next().unwrap_or(token).to_owned());
+        }
+    }
+    out
+}
+
+/// The words a package of that name can be invoked as. A `-cli` crate ships
+/// the bare command (`typos-cli` → `typos`).
+fn command_names(tool: &str) -> Vec<String> {
+    let mut out = vec![tool.to_owned()];
+    if let Some(stem) = tool.strip_suffix("-cli") {
+        out.push(stem.to_owned());
+    }
+    out
+}
+
+/// The command lines this repo runs: the same text [`executed_words`] reduces
+/// to a set, kept whole.
+fn executed_lines(justfile: &str, lefthook: &str) -> Vec<String> {
+    let mut out: Vec<String> = justfile
+        .lines()
+        .filter(|line| line.starts_with([' ', '\t']))
+        .map(|line| strip_comment(line).to_owned())
+        .collect();
+    out.extend(
+        lefthook
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("run:"))
+            .map(str::to_owned),
+    );
+    out
+}
+
+/// Is `tool` invoked by anything this repo runs?
+///
+/// A cargo plug-in is reached as `cargo <sub>`, which is TWO ADJACENT WORDS,
+/// and a set of words cannot tell them apart from the same two words far
+/// apart. Measured on this repo: `just profile` names
+/// `target/release/examples/samply_render`, which puts `release` in the
+/// vocabulary of a Justfile that has never run `cargo release` — so the
+/// one-word test reports the idle tool as running, which is the answer that
+/// makes the rule useless for the one case it was widened for.
+fn tool_is_invoked(tool: &str, lines: &[String], words: &BTreeSet<String>) -> bool {
+    if let Some(sub) = tool.strip_prefix("cargo-") {
+        let plugin = Regex::new(&format!(r"\bcargo(\s+\+\S+)?\s+{}\b", regex::escape(sub)))
+            .unwrap_or_else(|e| panic!("compiling the reader for `{tool}`: {e}"));
+        return lines
+            .iter()
+            .any(|line| plugin.is_match(line) || line.contains(tool));
+    }
+    command_names(tool).iter().any(|name| words.contains(name))
+}
+
 /// What a `Justfile` recipe depends on, off its header line.
 fn recipe_dependencies(justfile: &str, recipe: &str) -> Vec<String> {
     header_dependencies(recipe_header(justfile, recipe))
@@ -452,26 +550,155 @@ fn read(relative: &str) -> String {
 // the invariants
 // ---------------------------------------------------------------------------
 
+/// Tools the image installs that no recipe calls, each with the reason. Both
+/// entries are debts rather than decisions, so both are written as such: a
+/// name on this list is a layer the image pays for on every build and a
+/// binary a reviewer will read as enforcement.
+const INSTALLED_AND_NOT_RUN: &[(&str, &str)] = &[
+    (
+        "cargo-edit",
+        "DEBT, and the only one on this list. Tier D of the Dockerfile installs \
+         it beside cargo-release, and it is exactly what cargo-release was until `just \
+         release` existed: an installed release helper nothing invokes. \
+         `cargo add` and `cargo remove` are cargo's own since 1.62 and \
+         `cargo release version` supersedes `cargo set-version`, so nothing is \
+         known to need it. Left in place rather than removed here because \
+         dropping a name from that layer is a Dockerfile change, not a test's.",
+    ),
+    (
+        "node",
+        "READER ARTIFACT, not a tool. `ARG NODE_VERSION` parameterises an apt \
+         source URL in the node-base stage; what it installs is the JS RUNTIME \
+         the image is built on, which bun and the playground toolchain reach \
+         without any recipe naming `node` as a command.",
+    ),
+];
+
 #[test]
 fn every_tool_this_repo_declares_is_a_tool_this_repo_runs() {
-    let declared = declared_tools(&read("mise.toml"));
+    let justfile = read("Justfile");
+    let lefthook = read("lefthook.yml");
+    let executed = executed_words(&justfile, &lefthook);
+    let lines = executed_lines(&justfile, &lefthook);
+
+    let host = declared_tools(&read("mise.toml"));
     assert!(
-        declared.len() >= 5,
+        host.len() >= 5,
         "mise.toml yielded {} tools; the reader is not finding the `[tools]` table",
-        declared.len()
+        host.len()
     );
 
-    let executed = executed_words(&read("Justfile"), &read("lefthook.yml"));
-    let idle: Vec<&String> = declared
+    // The image is the other half, and the half the question is actually
+    // about: a recipe can only call what the container holds, and `mise.toml`
+    // holds six of the twenty-five names in the `Dockerfile`. Asking only the
+    // small list is what let a release tool be installed, pinned, given its
+    // own layer and called by nothing for as long as tier D has existed.
+    let image = image_tools(&read("Dockerfile"));
+    assert!(
+        image.len() >= 20 && image.contains("cargo-nextest") && image.contains("vale"),
+        "the Dockerfile came out installing {image:?}; the reader is not finding its \
+         `cargo binstall` lists or its `ARG <TOOL>_VERSION` pins"
+    );
+
+    let mut idle: Vec<String> = host
         .iter()
-        .filter(|tool| !executed.contains(*tool))
+        .chain(image.iter())
+        .filter(|tool| {
+            !INSTALLED_AND_NOT_RUN
+                .iter()
+                .any(|(excused, _)| excused == tool)
+        })
+        .filter(|tool| !tool_is_invoked(tool, &lines, &executed))
+        .cloned()
         .collect();
+    idle.sort();
+    idle.dedup();
     assert!(
         idle.is_empty(),
-        "declared in mise.toml and invoked nowhere: {idle:?}\n\
+        "installed by this repo and invoked nowhere: {idle:?}\n\
          A pinned, installed tool nothing calls reads as a gate and is not one. \
-         Give it a `just` recipe (and a place in `just lint` / `just ci`), or drop \
-         the declaration."
+         Give it a `just` recipe (and a place in `just lint` / `just ci`), drop the \
+         installation, or add it to INSTALLED_AND_NOT_RUN with the reason it is there."
+    );
+}
+
+#[test]
+fn the_image_shipped_a_release_tool_no_recipe_called() {
+    // The `Justfile` as it stood: a `changelog` recipe that runs git-cliff and
+    // a `dist-assets` recipe that regenerates the man page, and between them
+    // no caller for the tool whose whole job is to move the version those two
+    // describe. `cargo-release` is in the same `cargo binstall` list as
+    // `cargo-edit`, one layer below `cargo-semver-checks`, and every rule in
+    // this file passed on it — because the one that asks the question in the
+    // right words was pointed at `mise.toml`, where it is not named.
+    let dockerfile = concat!(
+        "ARG ZIZMOR_VERSION=1.28.0\n",
+        "RUN cargo binstall --no-confirm --locked --root /usr/local \\\n",
+        "        cargo-semver-checks \\\n",
+        "        sccache@0.10.0\n",
+        "RUN cargo binstall --no-confirm --locked --root /usr/local \\\n",
+        "        cargo-edit \\\n",
+        "        cargo-release\n",
+    );
+    let tools = image_tools(dockerfile);
+    assert_eq!(
+        tools,
+        [
+            "cargo-edit",
+            "cargo-release",
+            "cargo-semver-checks",
+            "sccache",
+            "zizmor"
+        ]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<String>>(),
+        "the reader no longer sees what the image installs; a pin, a continued list and a \
+         version-suffixed package are all forms it has to read"
+    );
+
+    // The `Justfile` as it stood, including the line that made the obvious
+    // reader answer wrongly: `just profile` names a path under
+    // `target/release/`, and a word-set test cannot tell that from a call.
+    let before = concat!(
+        "changelog:\n",
+        "    {{_dev}} git-cliff --unreleased\n",
+        "profile REPEAT:\n",
+        "    samply record -o /tmp/r.json.gz -- target/release/examples/samply_render {{REPEAT}}\n",
+        "dist-assets:\n",
+        "    {{_dev}} cargo run --package xtask -- gen-dist-assets\n",
+    );
+    let idle: Vec<&String> = tools
+        .iter()
+        .filter(|tool| {
+            !tool_is_invoked(
+                tool,
+                &executed_lines(before, ""),
+                &executed_words(before, ""),
+            )
+        })
+        .collect();
+    assert!(
+        idle.contains(&&"cargo-release".to_owned()),
+        "the reader stopped reporting the defect it was widened for: {idle:?}"
+    );
+    assert!(
+        executed_words(before, "").contains("release"),
+        "the fixture no longer holds the word that fools a one-word reader, so it is no longer \
+         pinning the difference between this reader and that one"
+    );
+
+    let after = format!(
+        "{before}release LEVEL:\n    {{{{_dev}}}} cargo release version {{{{LEVEL}}}} --workspace\n"
+    );
+    assert!(
+        tool_is_invoked(
+            "cargo-release",
+            &executed_lines(&after, ""),
+            &executed_words(&after, "")
+        ),
+        "a recipe that runs `cargo release <step>` is what settles it, and the reader does not \
+         see one"
     );
 }
 
@@ -627,10 +854,10 @@ fn the_workflow_hand_writes_no_gate_of_its_own() {
     );
 }
 
-/// The recipes ci.yml may run without being gates, each with the reason it is
-/// not one. Anything else it runs is a check `just ci` does not run — the
+/// The recipes a workflow may run without being gates, each with the reason it
+/// is not one. Anything else one runs is a check `just ci` does not run — the
 /// original defect, in the direction the manifest does not close by itself.
-const NOT_A_GATE_IN_CI: &[(&str, &str)] = &[
+const NOT_A_GATE_IN_A_WORKFLOW: &[(&str, &str)] = &[
     (
         "check",
         "a scheduling precondition: one cheap compile the matrix waits on, so a \
@@ -642,39 +869,73 @@ const NOT_A_GATE_IN_CI: &[(&str, &str)] = &[
         "the manifest query itself — the thing that decides what the gates are \
          cannot be one of them.",
     ),
+    (
+        "changelog-check",
+        "not answerable on a branch, so not answerable by a gate: the section \
+         it looks for is called `## [Unreleased]` until the release bump dates \
+         it, so every pull request would fail it. publish-crates.yml's \
+         preflight asks it of a release ref, which is the one ref where it has \
+         an answer.",
+    ),
 ];
 
 #[test]
-fn every_recipe_the_workflow_runs_is_a_gate_or_a_named_precondition() {
+fn every_recipe_a_workflow_runs_is_a_gate_or_a_named_precondition() {
     // The other direction of the same drift, and the one derivation does not
     // close: nothing stops a `- run: just <something>` step being added back
     // to ci.yml. That is how `wasm-build` came to run in CI and not in
     // `just ci` — a check the workflow enforces that no local command
     // reproduces is exactly as broken as a check that runs nowhere.
+    //
+    // Over EVERY workflow, not ci.yml alone. The rule was written when ci.yml
+    // was the only file that ran a recipe, and it has not been for a while:
+    // audit.yml runs the two advisory gates on a cron, docs.yml builds the
+    // rustdoc and the playground, and publish-crates.yml runs the preflight
+    // that stands between a broken manifest and an irrevocable upload. That
+    // last one is the file where an unaccounted recipe costs the most and the
+    // file the rule reached least — it runs on `workflow_dispatch` alone, so a
+    // step naming a recipe that does not exist first says so on release day.
     let justfile = read("Justfile");
-    let workflow = read(".github/workflows/ci.yml");
     let manifest = recipes_in_group(&justfile, "gate");
-    let invoked = recipes_invoked(&workflow);
+    let mut invoked: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for path in workflow_files() {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        for recipe in recipes_invoked(&text) {
+            invoked.entry(recipe).or_default().insert(label.clone());
+        }
+    }
 
     assert!(
-        invoked.len() >= 3,
-        "ci.yml came out running {invoked:?}; the reader is not finding its `just` steps"
+        invoked.len() >= 6,
+        "the workflows came out running {invoked:?}; the reader is not finding their `just` steps"
     );
-    let unaccounted: Vec<&String> = invoked
+    let unaccounted: Vec<String> = invoked
         .iter()
-        .filter(|recipe| {
+        .filter(|(recipe, _)| {
             !manifest.contains(*recipe)
-                && !NOT_A_GATE_IN_CI
+                && !NOT_A_GATE_IN_A_WORKFLOW
                     .iter()
                     .any(|(allowed, _)| allowed == recipe)
         })
+        .map(|(recipe, sites)| format!("{recipe} (in {sites:?})"))
         .collect();
     assert!(
         unaccounted.is_empty(),
-        "ci.yml runs these and `[group('gate')]` does not declare them: {unaccounted:?}\n\
-         Tag the recipe so `just ci` runs it too, or add it to NOT_A_GATE_IN_CI with the reason \
-         it is not a gate."
+        "these run in a workflow and `[group('gate')]` does not declare them: {unaccounted:?}\n\
+         Tag the recipe so `just ci` runs it too, or add it to NOT_A_GATE_IN_A_WORKFLOW with the \
+         reason it is not a gate."
     );
+
+    // A recipe a workflow names and the Justfile does not have is a step that
+    // cannot start. In ci.yml that costs a pull request; in the release path
+    // it costs the dispatch somebody made to cut a release.
+    for (recipe, sites) in &invoked {
+        assert!(
+            recipe_exists(&justfile, recipe),
+            "{sites:?} run `just {recipe}` and the Justfile has no such recipe"
+        );
+    }
 }
 
 #[test]
@@ -9852,4 +10113,595 @@ fn an_include_that_climbs_out_of_its_crate_is_read_and_prose_about_one_is_not() 
         "no include in {support} reaches outside it any more; either the root README's doctest \
          moved again, or this reader has stopped seeing escapes at all"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the bump that has to move every version this repo states
+// ---------------------------------------------------------------------------
+//
+// Releasing was three steps in CONTRIBUTING.md performed by hand, and the two
+// declarations that turn them into a tool's job — `release.toml` and the
+// `[package.metadata.release]` tables — are the same shape as everything else
+// in this file: a rule stated in one file and executed by a program somewhere
+// else, with no compiler between them. What is different is WHEN the execution
+// happens. Every other declaration here is read on every pull request; these
+// are read once, on the day somebody cuts a release, against a tree that is
+// about to become a tag. A `search` that stopped matching, a version line that
+// quietly joined the other one, a generated file the bump does not regenerate
+// — each is a thing nobody finds out until the worst moment to find it out.
+//
+// So the rules below ask the declarations the questions the release itself
+// would ask, on every merge instead of once a cycle. Three of them are about
+// the shape this workspace is unusual in — two version lines, ADR-0018 — and
+// the last two are about the two things `just release` is deliberately NOT
+// allowed to do, both of which cargo-release does by default.
+
+/// cargo-release's workspace configuration.
+const RELEASE_CONFIG: &str = "release.toml";
+
+/// The per-package half of it.
+const RELEASE_TABLE: &str = "package.metadata.release";
+
+/// The group name cargo-release gives a member that inherits
+/// `[workspace.package] version`, whatever [`RELEASE_CONFIG`] says its default
+/// is. Read it back with `cargo release config --manifest-path <manifest>`.
+const INHERITED_GROUP: &str = "workspace";
+
+/// The generated assets `just dist-assets` writes and `just dist-assets-check`
+/// compares. The man page in here embeds the CLI's version.
+const GENERATED_ASSETS: &str = "dist/assets";
+
+/// The whole of `release.toml`, whose keys sit in no table — so
+/// [`manifest_value`] reads them under the empty one.
+fn release_config() -> String {
+    let path = repo_root().join(RELEASE_CONFIG);
+    fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "reading {RELEASE_CONFIG}: {e}\n\
+             It is what `cargo release` reads, and its defaults are the opposite of this repo's \
+             policy on every key that matters: publish on, tag on, push on."
+        )
+    })
+}
+
+/// A top-level key of [`RELEASE_CONFIG`].
+fn release_setting(key: &str) -> Option<String> {
+    manifest_value(&release_config(), "", key).map(str::to_owned)
+}
+
+/// The version line a member is on: the literal it declares, or `None` when it
+/// inherits `[workspace.package] version`.
+fn own_version(manifest: &str) -> Option<String> {
+    manifest_value(manifest, "package", "version").map(|value| value.trim_matches('"').to_owned())
+}
+
+/// The `shared-version` group a member is bumped in.
+///
+/// A member inheriting the workspace version is in [`INHERITED_GROUP`] and
+/// cannot be moved out of it. A member naming its own version takes its own
+/// declaration, and falls back to [`RELEASE_CONFIG`]'s default when it makes
+/// none — which is the collapse this file exists to notice.
+fn shared_version_group(member: &Member) -> String {
+    if own_version(&member.manifest).is_none() {
+        return INHERITED_GROUP.to_owned();
+    }
+    manifest_value(&member.manifest, RELEASE_TABLE, "shared-version")
+        .map(|value| value.trim_matches('"').to_owned())
+        .or_else(|| {
+            release_setting("shared-version").map(|value| value.trim_matches('"').to_owned())
+        })
+        .unwrap_or_else(|| INHERITED_GROUP.to_owned())
+}
+
+#[test]
+fn every_version_line_this_workspace_carries_is_bumped_as_one_group() {
+    // ADR-0018 consolidated the EPUB generator in on a 0.1.x line of its own
+    // and left the parser, its CLI, the wasm bridge and the two dev crates on
+    // the workspace's. Nothing in this repo has ever read those two lines as
+    // lines. `no_workflow_reads_a_crate_version_out_of_a_manifest_by_hand`
+    // names the hazard in its own comment — "this workspace publishes on more
+    // than one version line, so a single read of the root manifest names the
+    // wrong version for some crate" — and then only forbids a workflow from
+    // grepping for one. The publishable-set rules derive everything from
+    // `publish = false` and read no version at all.
+    //
+    // The thing that actually moves those numbers is `cargo release`, and it
+    // decides by GROUP: members of one group take one bump, and a member that
+    // names its own version and no group falls into whatever default
+    // `release.toml` declares. Measured on this workspace, putting the EPUB
+    // library in the workspace group takes it from 0.1.0 to 0.6.0 while its
+    // CLI, left in `epub`, goes to 0.2.0 — no error, no warning, and the two
+    // halves of one crate pair ship as two numbers.
+    let members = workspace_members();
+    let mut lines: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut undeclared = Vec::new();
+    for member in &members {
+        let group = shared_version_group(member);
+        let Some(version) = own_version(&member.manifest) else {
+            lines.entry(group).or_default().insert(workspace_version());
+            continue;
+        };
+        if manifest_value(&member.manifest, RELEASE_TABLE, "shared-version").is_none() {
+            undeclared.push(format!("  {} (version = \"{version}\")", member.path));
+        }
+        lines.entry(group).or_default().insert(version);
+    }
+
+    // A rule about two lines says nothing over one.
+    let distinct: BTreeSet<&String> = lines.values().flatten().collect();
+    assert!(
+        distinct.len() >= 2,
+        "this workspace came out on {distinct:?} — one version line. Either ADR-0018's second \
+         line is gone, in which case retire this rule rather than leaving it passing vacuously, \
+         or the reader has stopped telling `version = \"…\"` from `version.workspace = true`."
+    );
+
+    assert!(
+        undeclared.is_empty(),
+        "these members name their own version and no `[{RELEASE_TABLE}] shared-version`:\n{}\n\
+         A member with no group takes `{RELEASE_CONFIG}`'s default, which is the group every \
+         crate on the workspace line is already in. `cargo release <level>` would then bump it \
+         to that line's next number — silently, because a shared version is a thing cargo-release \
+         enforces rather than reports. Name the group in the manifest, on every member of the \
+         line: it is a property of each of them, and a pair with it on one half only ships as \
+         two numbers.",
+        undeclared.join("\n")
+    );
+
+    for (group, versions) in &lines {
+        assert_eq!(
+            versions.len(),
+            1,
+            "the `{group}` group holds {versions:?}. A group is bumped as a unit, so two \
+             versions in one is a state the next release resolves by picking one of them."
+        );
+    }
+    assert_eq!(
+        lines.len(),
+        distinct.len(),
+        "{} group(s) for {} version line(s): {lines:?}. Every line needs its own group, or two \
+         of them move together the first time somebody runs a bump.",
+        lines.len(),
+        distinct.len()
+    );
+}
+
+/// The workspace's own version, the number the `v<version>` tag and the
+/// CHANGELOG heading carry.
+fn workspace_version() -> String {
+    manifest_value(&read("Cargo.toml"), "workspace.package", "version")
+        .unwrap_or_else(|| panic!("Cargo.toml has no `[workspace.package] version`"))
+        .trim_matches('"')
+        .to_owned()
+}
+
+#[test]
+fn a_second_version_line_with_no_group_of_its_own_reads_as_swept_into_the_first() {
+    // The reader, on the two shapes it has to tell apart. This is the
+    // configuration DEV-226 specified — one `shared-version` in `release.toml`
+    // and nothing in the manifests — and the point is that it looks complete:
+    // the key is set, the file exists, `cargo release` runs, and the second
+    // version line is gone.
+    let epub = Member {
+        path: "crates/aozora-flavored-markdown-epub".to_owned(),
+        manifest: "[package]\nname = \"e\"\nversion = \"0.1.0\"\n".to_owned(),
+    };
+    assert_eq!(
+        shared_version_group(&epub),
+        release_setting("shared-version")
+            .map(|value| value.trim_matches('"').to_owned())
+            .unwrap_or_default(),
+        "a member naming its own version and no group has to read as being in the DEFAULT \
+         group; that is what makes the omission visible"
+    );
+
+    let grouped = Member {
+        path: epub.path,
+        manifest: format!(
+            "[package]\nname = \"e\"\nversion = \"0.1.0\"\n\n[{RELEASE_TABLE}]\nshared-version = \"epub\"\n"
+        ),
+    };
+    assert_eq!(
+        shared_version_group(&grouped),
+        "epub",
+        "the declaration in the manifest is what settles it"
+    );
+
+    let inheriting = Member {
+        path: "crates/aozora-flavored-markdown".to_owned(),
+        manifest: format!(
+            "[package]\nname = \"a\"\nversion.workspace = true\n\n[{RELEASE_TABLE}]\nshared-version = \"epub\"\n"
+        ),
+    };
+    assert_eq!(
+        shared_version_group(&inheriting),
+        INHERITED_GROUP,
+        "a member inheriting `[workspace.package] version` is in the `{INHERITED_GROUP}` group \
+         whatever its manifest says — cargo-release decides that, not the file. A reader that \
+         believed the manifest here would report a workspace crate as being on the EPUB line."
+    );
+}
+
+/// One `pre-release-replacements` entry: the edit the release makes to a file
+/// that is not a manifest.
+struct Replacement {
+    member: String,
+    file: String,
+    search: String,
+    exactly: Option<usize>,
+}
+
+/// A TOML basic string, unescaped. `search` values carry `\\[` for a literal
+/// bracket and `replace` values carry `\n`, and both mean nothing until the
+/// escapes are resolved — a reader that matched the raw text would report
+/// every search as finding nothing.
+fn toml_string(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    let mut chars = literal.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// One quoted field of an inline table.
+fn inline_field(chunk: &str, key: &str) -> Option<String> {
+    let pattern = Regex::new(&format!(r#"\b{key}\s*=\s*"((?:[^"\\]|\\.)*)""#))
+        .unwrap_or_else(|e| panic!("compiling the reader for `{key}`: {e}"));
+    pattern
+        .captures(chunk)
+        .map(|caught| toml_string(&caught[1]))
+}
+
+/// Every replacement any member declares, with the member that declares it.
+///
+/// Read off the manifests rather than listed here for the reason every
+/// derivation in this file is: a replacement added to a second package is
+/// exactly the state the rule below exists to reject, and a listed set would
+/// not contain it.
+fn release_replacements() -> Vec<Replacement> {
+    let count = Regex::new(r"\bexactly\s*=\s*(\d+)").expect("compiling the `exactly` reader");
+    let mut out = Vec::new();
+    for member in workspace_members() {
+        let mut inside = false;
+        for line in member.manifest.lines() {
+            let body = line.trim();
+            if body.starts_with("pre-release-replacements") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if body == "]" {
+                inside = false;
+                continue;
+            }
+            if !body.starts_with('{') {
+                continue;
+            }
+            out.push(Replacement {
+                member: member.path.clone(),
+                file: inline_field(body, "file").unwrap_or_else(|| {
+                    panic!("{}'s replacement `{body}` names no `file`", member.path)
+                }),
+                search: inline_field(body, "search").unwrap_or_else(|| {
+                    panic!("{}'s replacement `{body}` names no `search`", member.path)
+                }),
+                exactly: count
+                    .captures(body)
+                    .and_then(|caught| caught[1].parse().ok()),
+            });
+        }
+    }
+    out
+}
+
+#[test]
+fn every_replacement_the_release_makes_matches_where_it_says_it_does() {
+    // `## [Unreleased]` becoming `## [0.6.0] - <date>` is step 1 of the manual
+    // release, and the step most likely to be skipped. As a declaration it is
+    // five regular expressions over a file nothing else in this repo compiles
+    // a regular expression against — and CHANGELOG.md is the one file here
+    // that is APPEND-ONLY by design, so every cycle adds text a search written
+    // against last cycle's shape can start matching. `exactly` turns that into
+    // an abort, which is the right behaviour and arrives at the wrong moment:
+    // mid-release, on a tree that is about to be tagged, after the version
+    // step has already rewritten seven manifests.
+    //
+    // The vale gate reads CHANGELOG.md for retired names and the path gate
+    // excuses it as history. Neither compiles these searches. This does, on
+    // every merge.
+    let declared = release_replacements();
+    assert!(
+        !declared.is_empty(),
+        "no member declares `pre-release-replacements`. Cutting `## [Unreleased]` into a dated \
+         section is then a thing somebody has to remember again, and the CHANGELOG heading \
+         `just changelog-check` looks for is one nothing writes."
+    );
+
+    let mut per_file: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for replacement in &declared {
+        per_file
+            .entry(replacement.file.as_str())
+            .or_default()
+            .insert(replacement.member.as_str());
+
+        let path = repo_root()
+            .join(&replacement.member)
+            .join(&replacement.file);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "{}'s replacement targets {} and it does not read: {e}\n\
+                 `file` resolves against the manifest's own directory, not the workspace root.",
+                replacement.member,
+                path.display()
+            )
+        });
+
+        let exactly = replacement.exactly.unwrap_or_else(|| {
+            panic!(
+                "{}'s search `{}` declares no `exactly`. Without it cargo-release accepts any \
+                 number of matches, zero included — so a search that has stopped finding its \
+                 line reports nothing and the release ships the file unedited.",
+                replacement.member, replacement.search
+            )
+        });
+        let pattern = Regex::new(&replacement.search).unwrap_or_else(|e| {
+            panic!(
+                "{}'s search `{}` is not a regular expression: {e}",
+                replacement.member, replacement.search
+            )
+        });
+        let found = pattern.find_iter(&text).count();
+        assert_eq!(
+            found, exactly,
+            "`{}` matches {} in {}, and the release declares `exactly = {exactly}`.\n\
+             cargo-release aborts on that mismatch — mid-release, after the version step has \
+             rewritten every manifest. Fix the search here, where it costs a test.",
+            replacement.search, found, replacement.file
+        );
+    }
+
+    for (file, members) in &per_file {
+        assert_eq!(
+            members.len(),
+            1,
+            "{file} is rewritten by {members:?}. cargo-release runs the replacements once per \
+             SELECTED package, so a file two members both claim is edited twice in one release \
+             — and the second pass reads what the first wrote."
+        );
+    }
+}
+
+#[test]
+fn the_search_cargo_release_documents_would_rewrite_this_files_history() {
+    // Why those searches are anchored, measured rather than asserted.
+    // cargo-release's own documented recipe for this is `search = "Unreleased"`
+    // over the whole file. This CHANGELOG holds the word three times: the
+    // heading, the link definition — and a sentence in the 0.4.0 section
+    // saying "see [Unreleased]" about a splicer that has since shipped. The
+    // unanchored form rewrites that sentence into a cross-reference to a
+    // release it predates, and `exactly = 1` would abort before it got there.
+    let text = read("CHANGELOG.md");
+    let documented = text.matches("Unreleased").count();
+    assert!(
+        documented > 1,
+        "`Unreleased` occurs {documented} time(s) in CHANGELOG.md. The anchoring in the \
+         replacements is written against a file where it occurs more than once; if that is no \
+         longer true, this rule is measuring nothing and the searches can be reconsidered."
+    );
+
+    let declared = release_replacements();
+    let anchored = declared
+        .iter()
+        .filter(|replacement| {
+            replacement.file.ends_with("CHANGELOG.md") && replacement.search.contains("(?m)")
+        })
+        .count();
+    assert!(
+        anchored > 0,
+        "no search over CHANGELOG.md is anchored any more, and the word it is looking for \
+         appears {documented} times in that file"
+    );
+}
+
+/// The `just` recipes any member's `pre-release-hook` runs, with the member.
+fn release_hooks() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for member in workspace_members() {
+        let Some(value) = manifest_value(&member.manifest, RELEASE_TABLE, "pre-release-hook")
+        else {
+            continue;
+        };
+        let command = quoted_items(value);
+        let Some(at) = command.iter().position(|word| word == "just") else {
+            continue;
+        };
+        if let Some(recipe) = command.get(at + 1) {
+            out.push((member.path, recipe.clone()));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_generated_file_a_gate_compares_is_regenerated_when_the_version_moves() {
+    // Step 2 of the manual release, and the one with a gate already pointed at
+    // it. `dist/assets/man/aozora-flavored-markdown.1` is generated from the
+    // CLI's clap definition and embeds the version twice;
+    // `just dist-assets-check` regenerates it and diffs. Both halves were
+    // already here — the gate has been in `[group('gate')]` and the recipe
+    // that writes it in `[group('release')]` — and nothing connected them to
+    // the thing that changes the version. So the release commit, the one
+    // commit in the cycle that MUST be green, was the commit that failed a
+    // gate, and the way you found out was by pushing it.
+    //
+    // The rule is over the SET: any generated asset that comes to carry the
+    // version is covered, not the man page by name.
+    let justfile = read("Justfile");
+    let version = workspace_version();
+    let generated = git_tracked(&[GENERATED_ASSETS.to_owned()]);
+    assert!(
+        !generated.is_empty(),
+        "`git ls-files {GENERATED_ASSETS}` lists nothing; the reader is not finding the assets \
+         `just dist-assets` writes"
+    );
+
+    let carriers: Vec<&String> = generated
+        .iter()
+        .filter(|path| read(path).contains(&version))
+        .collect();
+    assert!(
+        !carriers.is_empty(),
+        "no file under {GENERATED_ASSETS} carries the workspace version {version} any more. \
+         That is the whole reason the bump has to regenerate them; if it has stopped being \
+         true, say so here rather than leaving the hook unexplained."
+    );
+
+    let hooks = release_hooks();
+    assert!(
+        !hooks.is_empty(),
+        "{carriers:?} carry version {version} and no member declares a \
+         `[{RELEASE_TABLE}] pre-release-hook`. Those files are regenerated by a recipe a \
+         `[group('gate')]` check runs, so a bump with no hook leaves the release commit failing \
+         a gate — found on push, on the commit that is about to become a tag."
+    );
+
+    // Derived, not named: the hook has to run the WRITING half of a pair whose
+    // checking half is a gate. That is what makes "the release commit stays
+    // green" the thing being asserted, rather than "a hook exists".
+    let gates = recipes_in_group(&justfile, "gate");
+    let mut regenerates_a_gated_file = false;
+    for (member, recipe) in &hooks {
+        assert!(
+            recipe_exists(&justfile, recipe),
+            "{member}'s pre-release-hook runs `just {recipe}` and the Justfile has no such \
+             recipe. cargo-release would fail the release on it."
+        );
+        regenerates_a_gated_file |= gates.contains(&format!("{recipe}-check"));
+    }
+    assert!(
+        regenerates_a_gated_file,
+        "no pre-release-hook runs a recipe whose `-check` half is a gate: {hooks:?}. A hook that \
+         regenerates nothing any gate compares is not what keeps the release commit green."
+    );
+}
+
+/// The cargo-release steps `just release` is allowed to run: the three that
+/// write files in the work tree. What is missing from it is the point —
+/// `commit`, `tag`, `push` and `publish` are the four that leave it.
+const FILE_WRITING_STEPS: &[&str] = &["version", "replace", "hook", "config"];
+
+#[test]
+fn no_release_this_repo_can_run_uploads_to_crates_io_itself() {
+    // The fifth reading of `publish = false`, and the first of a file that is
+    // not a cargo manifest. Everything in "the ladder that reaches crates.io"
+    // above derives the uploaded SET from the manifests and then checks that
+    // `publish-crates.yml` reaches all of it — on the premise that the
+    // workflow is the only thing that uploads. ADR-0015 is explicit about why
+    // that matters: the upload runs behind the `release` GitHub Environment,
+    // with a short-lived OIDC token that exists only after a required-reviewer
+    // approval.
+    //
+    // cargo-release publishes BY DEFAULT, and this image has had it installed
+    // since tier D was added — reachable from `just shell`, from a laptop,
+    // with no approval in front of it and a long-lived token if one is in the
+    // developer's cargo credentials. No rule above could see that, because
+    // every one of them reads `cargo publish` and this is not one.
+    let image = image_tools(&read("Dockerfile"));
+    assert!(
+        image.contains("cargo-release"),
+        "the image no longer installs cargo-release; if the tool is gone, so is this rule's \
+         subject — but so is `just release`, so check that first"
+    );
+
+    assert_eq!(
+        release_setting("publish").as_deref(),
+        Some("false"),
+        "{RELEASE_CONFIG} does not turn cargo-release's publishing off. Its default is ON, and \
+         a `cargo release` run from `just shell` would then upload straight to crates.io: no \
+         environment approval, no OIDC token, no preflight, and an upload is the one operation \
+         crates.io will not let anybody take back."
+    );
+    for member in workspace_members() {
+        assert_ne!(
+            manifest_value(&member.manifest, RELEASE_TABLE, "publish"),
+            Some("true"),
+            "{} turns publishing back on for itself. A per-package key overrides \
+             {RELEASE_CONFIG}, so one manifest is all it takes to put a second uploader beside \
+             the approved one.",
+            member.path
+        );
+    }
+}
+
+#[test]
+fn the_release_recipe_runs_only_the_steps_that_write_files() {
+    // The other default, and the one that fails by SUCCEEDING. Commits and
+    // tags here are SSH-signed and signing is mandatory; the key is on the
+    // host, and docker-compose mounts the work tree and the cargo caches and
+    // nothing else (ADR-0002). A `git commit` inside the dev image therefore
+    // does not fail for want of a key — it succeeds, unsigned. So the recipe
+    // runs cargo-release's file-writing steps and stops, and the release
+    // commit and the `v<version>` tag are made afterwards, on the host.
+    //
+    // "Stops" is a property of an argument list, which is a thing that gets
+    // shortened. A bare `cargo release <level>` runs every step there is, and
+    // it is both the obvious simplification of this recipe and the spelling
+    // every cargo-release tutorial shows.
+    let justfile = read("Justfile");
+    let invocation = Regex::new(r"cargo\s+release\s+(\S+)").expect("compiling the reader");
+    let mut steps: Vec<(String, String)> = Vec::new();
+    for (recipe, line) in expanded_recipe_lines(&justfile) {
+        for caught in invocation.captures_iter(&line) {
+            steps.push((recipe.clone(), caught[1].to_owned()));
+        }
+    }
+    assert!(
+        !steps.is_empty(),
+        "no recipe runs `cargo release`. The tool is installed in the dev image and the \
+         workspace carries a {RELEASE_CONFIG} for it; a configuration nothing executes is the \
+         shape this whole file exists to reject."
+    );
+
+    for (recipe, step) in &steps {
+        assert!(
+            FILE_WRITING_STEPS.contains(&step.as_str()),
+            "`just {recipe}` runs `cargo release {step}`.\n\
+             Only {FILE_WRITING_STEPS:?} write inside the work tree and stop there. `commit`, \
+             `tag` and `push` reach git — and a commit made in the dev image is not a commit \
+             that fails for want of the signing key, it is an UNSIGNED commit that succeeds. A \
+             bare `cargo release <level>` runs all of them.",
+        );
+        assert!(
+            recipe_runs_in_a_container(&justfile, recipe),
+            "`just {recipe}` runs `cargo release {step}` outside the dev image. Execution here \
+             is docker-only (ADR-0002); a recipe that reaches the host toolchain also reaches \
+             the host's git configuration, which is the one thing this split is arranged around."
+        );
+    }
+
+    for key in ["tag", "push"] {
+        assert_eq!(
+            release_setting(key).as_deref(),
+            Some("false"),
+            "{RELEASE_CONFIG} leaves `{key}` at cargo-release's default, which is on. The \
+             recipe not running those steps is the first half; this is the half that holds when \
+             somebody runs the tool by hand from `just shell`. The tag name matters too: \
+             cargo-release spells it `<crate>-v<version>` for a package in a subdirectory, and \
+             `v<version>` is what cliff.toml's tag_pattern, the semver gate's baseline and \
+             release.yml's trigger all expect."
+        );
+    }
 }

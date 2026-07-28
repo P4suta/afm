@@ -1,6 +1,6 @@
 [package]
 name          = "aozora-flavored-markdown-epub-cli"
-version       = "0.1.0"            # independent of the workspace 0.4.x line (ADR-0018)
+version       = "0.1.0"            # independent of the workspace 0.5.x line (ADR-0018)
 edition       = { workspace = true }
 rust-version  = { workspace = true }
 license       = { workspace = true }
@@ -32,6 +32,14 @@ dist = false
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+# The `epub` version line, the same declaration the library beside this crate
+# makes and for the same reason — see its manifest. Both halves say it because
+# a group is a property of each member: a CLI left on the default would take
+# the parser's version while the library it wraps kept its own, and the pair
+# would ship as two numbers.
+[package.metadata.release]
+shared-version = "epub"
 
 [lints]
 workspace = true
