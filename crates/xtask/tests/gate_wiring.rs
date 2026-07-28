@@ -9146,3 +9146,710 @@ fn an_adr_section_ends_where_the_next_one_starts_and_a_crate_name_is_read_whole(
         "a section that is not there read as present"
     );
 }
+
+// ---------------------------------------------------------------------------
+// what leaves inside the tarball
+// ---------------------------------------------------------------------------
+//
+// The section above is the fourth reading of `publish = false` and asks WHICH
+// crates leave this workspace. Every rule it holds is about a set of names, and
+// the set was right while all four tarballs were wrong: each carried the
+// repository's landing README (an inherited `readme` resolves against the
+// WORKSPACE root, so one document was four crates.io pages, and the EPUB pair's
+// page never said EPUB), none carried a word of either licence though `license`
+// promises two, one shipped a `#[cfg(doctest)]` `include_str!` reaching three
+// directories above its own package, and most of every tarball's bytes were a
+// test suite only this repository runs (DEV-225).
+//
+// None of that is a gap in those rules — it is the same gap `just package` has.
+// That gate unpacks each crate and BUILDS it, which is the strongest thing any
+// gate here does to a tarball, and every defect above survives it: a wrong
+// README compiles, an absent licence compiles, an excluded test suite compiles,
+// and a `#[cfg(doctest)]` or `#[cfg(test)]` include is not compiled by a verify
+// build at all — those configurations are exactly the ones `cargo build` turns
+// off, so the one include that escaped the package was the one the packaging
+// gate could not see.
+//
+// So these rules ask cargo what it would put in the archive — `cargo package
+// --list` is the same collection step the gate runs, minus the build — and hold
+// the answer to what a consumer needs out of it. `--allow-dirty` for the reason
+// the recipe gives: committedness is a different question, asked on the upload.
+
+/// The document a manifest puts on a crate's page, as it spells the key.
+#[derive(Debug, PartialEq, Eq)]
+enum Readme {
+    /// `readme = "…"`, resolved against the crate's own directory.
+    Own(String),
+    /// `readme.workspace = true` or `readme = { workspace = true }`. Cargo
+    /// resolves the inherited value against the WORKSPACE root — which is the
+    /// whole defect, because the value that arrives is a path and the crate it
+    /// arrives at is not where it was written.
+    Inherited,
+    /// No key at all. Cargo still ships a `README.md` sitting beside the
+    /// manifest, so absence is not the same as shipping nothing.
+    Absent,
+}
+
+fn readme_declaration(manifest: &str) -> Readme {
+    if manifest_value(manifest, "package", "readme.workspace").is_some() {
+        return Readme::Inherited;
+    }
+    match manifest_value(manifest, "package", "readme") {
+        Some(value) if value.contains("workspace") => Readme::Inherited,
+        Some(value) => quoted_items(value)
+            .first()
+            .map_or(Readme::Absent, |path| Readme::Own(path.clone())),
+        None => Readme::Absent,
+    }
+}
+
+/// The README one member ships, repo-relative, by cargo's own resolution.
+///
+/// `workspace_readme` is passed rather than read so the reader can be shown the
+/// arrangement this repo used to have — that is the case the rules below are
+/// about, and it is no longer reachable from the manifests on disk.
+fn shipped_readme(
+    member_path: &str,
+    manifest: &str,
+    workspace_readme: Option<&str>,
+) -> Option<String> {
+    match readme_declaration(manifest) {
+        Readme::Own(path) => Some(format!("{member_path}/{path}")),
+        Readme::Inherited => workspace_readme.map(str::to_owned),
+        Readme::Absent => {
+            let beside = format!("{member_path}/README.md");
+            repo_root().join(&beside).is_file().then_some(beside)
+        }
+    }
+}
+
+/// The `readme` the workspace table offers members, if it offers one.
+fn workspace_readme() -> Option<String> {
+    let root = read("Cargo.toml");
+    manifest_value(&root, "workspace.package", "readme")
+        .and_then(|value| quoted_items(value).first().cloned())
+}
+
+/// Every link target a Markdown document points at, with its 1-based line.
+/// Fenced blocks are skipped: a path inside one is a sample, not a link.
+fn markdown_link_targets(text: &str) -> Vec<(usize, String)> {
+    let inline = Regex::new(r"\]\(\s*<?([^)>\s]+)").expect("the inline-link reader is a regex");
+    let reference =
+        Regex::new(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)").expect("the reference reader is a regex");
+    let mut fenced = false;
+    let mut out = Vec::new();
+    for (at, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let hits = inline
+            .captures_iter(line)
+            .chain(reference.captures_iter(line));
+        out.extend(hits.map(|capture| (at + 1, capture[1].to_owned())));
+    }
+    out
+}
+
+/// Can a reader on crates.io follow this target? That page is not on GitHub and
+/// not in a checkout, so a repo-relative path is a 404 there and nowhere else.
+fn followable_from_crates_io(target: &str) -> bool {
+    target.starts_with("https://")
+        || target.starts_with("http://")
+        || target.starts_with('#')
+        || target.starts_with("mailto:")
+}
+
+/// The files `cargo package` would collect for one crate, as paths inside the
+/// archive. Asked of cargo rather than derived: `exclude`, the auto-discovered
+/// targets and the symlinks the licence files are all resolve here, and a
+/// second implementation of that is what would drift.
+fn packaged_files(crate_name: &str) -> BTreeSet<String> {
+    let out = Command::new("cargo")
+        .args(["package", "--list", "--locked", "--allow-dirty", "--quiet"])
+        .args(["-p", crate_name])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("running `cargo package --list -p {crate_name}`: {e}"));
+    assert!(
+        out.status.success(),
+        "`cargo package --list -p {crate_name}` failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        files.contains("Cargo.toml"),
+        "`cargo package --list -p {crate_name}` came back without even a manifest ({files:?}); a \
+         reader finding nothing calls every tarball complete"
+    );
+    files
+}
+
+/// The identifiers an SPDX expression names.
+fn spdx_ids(expression: &str) -> Vec<String> {
+    expression
+        .split(|ch: char| ch.is_whitespace() || ch == '(' || ch == ')')
+        .filter(|word| !word.is_empty() && !matches!(*word, "OR" | "AND" | "WITH"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The file this repo keeps one identifier's text in. `None` is a failure and
+/// not a pass: an identifier nothing here can point at is a promise on the
+/// crates.io page with no text behind it.
+fn licence_file(id: &str) -> Option<&'static str> {
+    match id {
+        "Apache-2.0" => Some("LICENSE-APACHE"),
+        "MIT" => Some("LICENSE-MIT"),
+        _ => None,
+    }
+}
+
+/// The SPDX expression a member publishes under, inherited or its own.
+fn licence_expression(manifest: &str, workspace: &str) -> String {
+    manifest_value(manifest, "package", "license")
+        .filter(|value| !value.contains("workspace"))
+        .and_then(|value| quoted_items(value).first().cloned())
+        .unwrap_or_else(|| workspace.to_owned())
+}
+
+/// Every `include_str!` / `include_bytes!` path in one source file, with its
+/// 1-based line. A comment-only line is skipped: prose about an include is not
+/// one, and this file's subject is prose that reads like enforcement.
+fn included_paths(src: &str) -> Vec<(usize, String)> {
+    let include = Regex::new(r#"include_(?:str|bytes)!\s*\(\s*"([^"]+)""#)
+        .expect("the include reader is a regex");
+    let mut out = Vec::new();
+    for (at, line) in src.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        out.extend(
+            include
+                .captures_iter(line)
+                .map(|capture| (at + 1, capture[1].to_owned())),
+        );
+    }
+    out
+}
+
+/// `relative` applied to `base` by folding `.` and `..` textually. Lexical
+/// because the path being resolved is the one suspected of not existing.
+fn lexical_join(base: &Path, relative: &str) -> PathBuf {
+    let mut out = base.to_path_buf();
+    for part in relative.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            _ => out.push(part),
+        }
+    }
+    out
+}
+
+/// A directory cargo auto-discovers targets in that only this repository ever
+/// runs, plus the fuzz crate's own workspace. `cargo test` and `cargo bench`
+/// on a DEPENDENCY run none of these, so every byte of them on crates.io is
+/// bandwidth spent on nobody.
+const TARGETS_ONLY_THIS_REPO_RUNS: &[&str] = &["tests", "benches", "fuzz"];
+
+/// Why an `include_str!` in published source may still reach outside its own
+/// package. One entry is one tarball a consumer cannot `cargo test`.
+const CONFORMANCE_FIXTURES: &str = "the CommonMark / GFM fixtures live at the repository root and are shared with `xtask \
+     spec-refresh`, so no copy of them sits inside this package. The module is `#[cfg(test)]`, \
+     which is why nothing has ever reported it: `cargo package`'s verify build compiles with \
+     `cargo build`, where that configuration is off. It is the same blind spot DEV-225 closed \
+     for the `#[cfg(doctest)]` README include, left open one file over — a SURVIVING DEFECT, \
+     not a decision.";
+
+/// The escapes that stand, as `(source file, include path, why)`.
+const INCLUDES_THAT_LEAVE_THE_PACKAGE: &[(&str, &str, &str)] = &[
+    (
+        "crates/aozora-flavored-markdown/src/conformance.rs",
+        "../../../spec/commonmark-0.31.2.json",
+        CONFORMANCE_FIXTURES,
+    ),
+    (
+        "crates/aozora-flavored-markdown/src/conformance.rs",
+        "../../../spec/gfm-0.29-gfm.json",
+        CONFORMANCE_FIXTURES,
+    ),
+];
+
+#[test]
+fn every_crate_this_repo_publishes_ships_a_readme_of_its_own() {
+    // The root cause first. `[workspace.package] readme` is a path resolved
+    // against the workspace root by every member that inherits it, so the key
+    // cannot mean "each crate's README" no matter how it is spelled. Leaving it
+    // undefined is what turns `readme.workspace = true` from a plausible-looking
+    // line into a hard cargo error.
+    assert!(
+        workspace_readme().is_none(),
+        "[workspace.package] offers a `readme` for members to inherit. An inherited one resolves \
+         against the WORKSPACE root, so every member taking it publishes the same document — \
+         which is how four crates.io pages came to be one repository landing page."
+    );
+
+    let members = workspace_members();
+    let inheritable = workspace_readme();
+    let mut shipped: BTreeMap<String, String> = BTreeMap::new();
+    let mut opted_out = 0_usize;
+    for member in &members {
+        assert_ne!(
+            readme_declaration(&member.manifest),
+            Readme::Inherited,
+            "{}/Cargo.toml inherits its `readme`, which resolves against the workspace root.",
+            member.path
+        );
+        if !is_published(&member.manifest) {
+            opted_out += 1;
+            continue;
+        }
+        let resolved = shipped_readme(&member.path, &member.manifest, inheritable.as_deref());
+        let path = resolved.unwrap_or_else(|| {
+            panic!(
+                "{}/Cargo.toml publishes to crates.io and names no README. Its page would be the \
+                 crate name, the description and nothing else.",
+                member.path
+            )
+        });
+        assert!(
+            repo_root().join(&path).is_file(),
+            "{}/Cargo.toml names `{path}`, which is not a file. Cargo fails the package, but only \
+             once somebody packages it.",
+            member.path
+        );
+        let name = member_name(member);
+        assert!(
+            read(&path).contains(&name),
+            "`{path}` is what `{name}`'s crates.io page shows and it never names that crate. That \
+             is the EPUB page verbatim: a document about something else, in front of the reader \
+             who came for this."
+        );
+        if let Some(other) = shipped.insert(path.clone(), name.clone()) {
+            panic!(
+                "`{path}` is the crates.io page of both `{other}` and `{name}`. One document \
+                 cannot be the introduction to two crates — the one it is not about is the one \
+                 nobody notices."
+            );
+        }
+    }
+
+    // Blindness check, both ways, as the docs.rs rule makes it: a reader that
+    // cannot tell `publish = false` from its absence answers every assertion
+    // above over the whole workspace or over nothing.
+    assert!(
+        shipped.len() >= 2 && opted_out >= 1,
+        "{} published and {opted_out} opted-out member(s) out of {}; the reader is not telling \
+         `publish = false` apart from its absence",
+        shipped.len(),
+        members.len()
+    );
+}
+
+#[test]
+fn every_link_a_published_readme_carries_is_one_a_crates_io_reader_can_follow() {
+    // A README is the one document this repo publishes to a place that is not
+    // this repo. `./docs/adr/`, `./LICENSE-MIT`, `./CONTRIBUTING.md` all resolve
+    // on GitHub and 404 from crates.io, and nothing here could say so: `just
+    // vale` reads these files for retired names and never resolves a target,
+    // and the rustdoc gates' `broken_intra_doc_links` is about Rust paths in
+    // Rust docs — the README was not in rustdoc at all.
+    let members = workspace_members();
+    let inheritable = workspace_readme();
+    let mut read_targets = 0_usize;
+    let mut unreachable: Vec<String> = Vec::new();
+    for member in &members {
+        // Published, or shipping a README to somebody anyway: the wasm crate's
+        // reaches editor hosts through `pkg/`, which `wasm-pack` fills from
+        // these same fields.
+        let declares_own = matches!(readme_declaration(&member.manifest), Readme::Own(_));
+        if !is_published(&member.manifest) && !declares_own {
+            continue;
+        }
+        let resolved = shipped_readme(&member.path, &member.manifest, inheritable.as_deref());
+        let Some(path) = resolved else {
+            continue;
+        };
+        for (line, target) in markdown_link_targets(&read(&path)) {
+            read_targets += 1;
+            if !followable_from_crates_io(&target) {
+                unreachable.push(format!("{path}:{line}: {target}"));
+            }
+        }
+    }
+    assert!(
+        read_targets >= 20,
+        "{read_targets} link(s) read across every README this repo publishes; the reader is not \
+         finding them, and a reader finding nothing calls every page followable"
+    );
+    assert!(
+        unreachable.is_empty(),
+        "these link(s) resolve in a checkout and 404 from the page they are published on:\n  \
+         {}\nA published README is read where the repository is not. Spell the target as an \
+         absolute URL.",
+        unreachable.join("\n  ")
+    );
+}
+
+#[test]
+fn every_crate_this_repo_publishes_carries_the_licence_text_it_names() {
+    // `license = "Apache-2.0 OR MIT"` is an identifier, and cargo carries no
+    // text with one. Until DEV-225 the text existed at the repository root and
+    // nowhere else, so every tarball this workspace would have uploaded offered
+    // a consumer two licences and the words of neither.
+    //
+    // The two gates that read the word "licence" both point the other way:
+    // `just deny` answers what this repo may take IN, and dependency-review.yml
+    // answers the same about a pull request. Nothing asked about the licence
+    // going OUT, which is the only one this repo is the author of.
+    let root = read("Cargo.toml");
+    let expression = manifest_value(&root, "workspace.package", "license")
+        .and_then(|value| quoted_items(value).first().cloned())
+        .expect("[workspace.package] declares no `license` for the members to inherit");
+    let mut checked = 0_usize;
+    for member in workspace_members() {
+        if !is_published(&member.manifest) {
+            continue;
+        }
+        let ids = spdx_ids(&licence_expression(&member.manifest, &expression));
+        assert!(
+            !ids.is_empty(),
+            "{}/Cargo.toml resolves to an empty licence expression",
+            member.path
+        );
+        let packaged = packaged_files(&member_name(&member));
+        // `NOTICE` rides along with the identifiers: Apache-2.0 §4(d) makes it
+        // part of what a redistributor has to receive, and it is the file that
+        // names the upstream work this crate is built on.
+        let mut wanted: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                licence_file(id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} publishes under `{id}`, which this reader cannot point at a file \
+                             for. Add the text and teach `licence_file` where it is — an \
+                             identifier with no text behind it is a promise on a page.",
+                            member.path
+                        )
+                    })
+                    .to_owned()
+            })
+            .collect();
+        wanted.push("NOTICE".to_owned());
+        for file in wanted {
+            assert!(
+                packaged.contains(&file),
+                "`{}`'s tarball carries no `{file}`. It is one `cargo package --list` away from \
+                 being known, and it is the file a consumer's own compliance review asks for \
+                 first.",
+                member.path
+            );
+            let beside = read(&format!("{}/{file}", member.path));
+            assert_eq!(
+                beside,
+                read(&file),
+                "{}/{file} is not the text at the repository root. Two copies of a licence are \
+                 one copy and one claim about it.",
+                member.path
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 8,
+        "{checked} licence file(s) checked across every published crate; the reader is not \
+         finding the published set"
+    );
+}
+
+#[test]
+fn no_tarball_this_repo_publishes_carries_a_target_only_this_repo_runs() {
+    // `cargo package` collects everything git tracks under the package unless
+    // `exclude` says otherwise, so the default is that a consumer downloads the
+    // test suite, the benchmarks and the fuzz corpus and can run none of them —
+    // `cargo test` on a DEPENDENCY builds no test target of that dependency.
+    // Nothing measured it: the packaging gate reports a size and has no ceiling,
+    // and a tarball is not less buildable for being four times too big.
+    let mut with_such_a_directory = 0_usize;
+    let mut carried: Vec<String> = Vec::new();
+    for member in workspace_members() {
+        if !is_published(&member.manifest) {
+            continue;
+        }
+        if TARGETS_ONLY_THIS_REPO_RUNS
+            .iter()
+            .any(|dir| repo_root().join(&member.path).join(dir).is_dir())
+        {
+            with_such_a_directory += 1;
+        }
+        // An `exclude` entry naming nothing is a rule over nothing — the shape
+        // a typo takes, and the shape the whole payload comes back in. Only for
+        // the literal paths: cargo takes gitignore patterns here too, and a
+        // rule that cannot read one would be a rule that has to be switched off
+        // the first time somebody writes one.
+        for entry in manifest_value(&member.manifest, "package", "exclude")
+            .map(quoted_items)
+            .unwrap_or_default()
+        {
+            if entry.contains(['*', '?', '[', '!']) {
+                continue;
+            }
+            let path = repo_root()
+                .join(&member.path)
+                .join(entry.trim_end_matches('/'));
+            assert!(
+                path.exists(),
+                "{}/Cargo.toml excludes `{entry}`, which does not exist. An exclusion that \
+                 matches nothing looks exactly like one that works.",
+                member.path
+            );
+        }
+        let packaged = packaged_files(&member_name(&member));
+        carried.extend(packaged.into_iter().filter(|file| {
+            TARGETS_ONLY_THIS_REPO_RUNS
+                .iter()
+                .any(|dir| file.starts_with(&format!("{dir}/")))
+        }));
+    }
+    assert!(
+        with_such_a_directory >= 2,
+        "only {with_such_a_directory} published crate(s) have a `tests/`, `benches/` or `fuzz/` \
+         directory at all; this rule is measuring nothing"
+    );
+    assert!(
+        carried.is_empty(),
+        "these files ship to every consumer and are runnable by nobody but this repository:\n  \
+         {}\nName the directory in that crate's `exclude`.",
+        carried.join("\n  ")
+    );
+}
+
+#[test]
+fn every_file_a_published_source_includes_is_one_its_own_tarball_carries() {
+    // An `include_str!` is a build dependency on a file, written in a form no
+    // manifest records. Inside the package it is free; outside it, the source
+    // ships and the file it reads does not, and the crate a consumer unpacked
+    // cannot be built in the configuration that reaches the line.
+    //
+    // The packaging gate is the one that should hold this and structurally
+    // cannot: it verifies by BUILDING, and both spellings this workspace used
+    // — `#[cfg(doctest)]` on the README include, `#[cfg(test)]` on the spec
+    // runners — are configurations a verify build turns off. `just test-doc`
+    // compiles the first, from a working tree where three directories up is
+    // still the repository.
+    let mut standing: BTreeSet<(String, String)> = INCLUDES_THAT_LEAVE_THE_PACKAGE
+        .iter()
+        .map(|&(file, path, _)| (file.to_owned(), path.to_owned()))
+        .collect();
+    let mut escapes: Vec<String> = Vec::new();
+    let mut resolved = 0_usize;
+    for member in workspace_members() {
+        if !is_published(&member.manifest) {
+            continue;
+        }
+        let crate_dir = repo_root().join(&member.path);
+        let packaged = packaged_files(&member_name(&member));
+        for source in rust_files(&crate_dir.join("src")) {
+            let relative = format!(
+                "{}/{}",
+                member.path,
+                source
+                    .strip_prefix(&crate_dir)
+                    .unwrap_or(&source)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            );
+            let directory = source.parent().unwrap_or(&crate_dir).to_path_buf();
+            for (line, raw) in included_paths(&fs::read_to_string(&source).unwrap_or_default()) {
+                resolved += 1;
+                if standing.remove(&(relative.clone(), raw.clone())) {
+                    continue;
+                }
+                let target = lexical_join(&directory, &raw);
+                let inside = target
+                    .strip_prefix(&crate_dir)
+                    .ok()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"));
+                match inside {
+                    Some(path) if packaged.contains(&path) => {}
+                    Some(path) => escapes.push(format!(
+                        "{relative}:{line}: `{raw}` is `{path}`, which `exclude` \
+                                       keeps out of the tarball"
+                    )),
+                    None => escapes.push(format!(
+                        "{relative}:{line}: `{raw}` reaches outside the package"
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        resolved >= 3,
+        "{resolved} include(s) read across every published crate; the reader is not finding them"
+    );
+    assert!(
+        escapes.is_empty(),
+        "these included files are not in the tarball that ships the source reading them:\n  {}",
+        escapes.join("\n  ")
+    );
+    // An exemption for an escape that is gone is an exemption that would excuse
+    // the next one silently.
+    assert!(
+        standing.is_empty(),
+        "INCLUDES_THAT_LEAVE_THE_PACKAGE still excuses {standing:?}, which no published source \
+         writes any more. Delete the entry."
+    );
+}
+
+// --- the readers above, on the shapes that would fool them ------------------
+
+#[test]
+fn the_readme_arrangement_that_stood_before_these_readers_reads_as_the_defect() {
+    // The manifests as this repo shipped them, in both spellings it used: the
+    // dotted one the library and CLI wrote, and the inline table the EPUB pair
+    // wrote. Reconstructed rather than read, because the point of the rules
+    // above is that this arrangement can no longer be reached from disk — and a
+    // rule whose subject has been deleted is a rule nobody can check.
+    let dotted = "[package]\nname = \"lib\"\nreadme.workspace       = true\n";
+    let inline = "[package]\nname = \"epub\"\nreadme        = { workspace = true }\n";
+    let own = "[package]\nname = \"lib\"\nreadme = \"README.md\"\n";
+    assert_eq!(readme_declaration(dotted), Readme::Inherited);
+    assert_eq!(readme_declaration(inline), Readme::Inherited);
+    assert_eq!(readme_declaration(own), Readme::Own("README.md".to_owned()));
+    assert_eq!(
+        readme_declaration("[package]\nname = \"x\"\n"),
+        Readme::Absent
+    );
+
+    // And what the inheritance resolved to: one document, for both of them,
+    // and it is not in either crate's directory.
+    let workspace = Some("README.md");
+    let library = shipped_readme("crates/lib", dotted, workspace);
+    let epub = shipped_readme("crates/epub", inline, workspace);
+    assert_eq!(library.as_deref(), Some("README.md"));
+    assert_eq!(epub, library, "the two crates shipped different documents");
+    assert_eq!(
+        shipped_readme("crates/lib", own, workspace).as_deref(),
+        Some("crates/lib/README.md"),
+        "an own `readme` resolved against the workspace root, which is the bug spelled the other \
+         way round"
+    );
+
+    // The document they landed on is this repository's, and it is written for a
+    // reader who has the repository.
+    let repo_relative = markdown_link_targets(&read("README.md"))
+        .into_iter()
+        .any(|(_, target)| !followable_from_crates_io(&target));
+    assert!(
+        repo_relative,
+        "the landing README has no repo-relative link left, so the link rule above can no longer \
+         be shown failing on the arrangement it was written for"
+    );
+}
+
+#[test]
+fn a_link_inside_a_code_fence_is_not_one_and_a_reference_definition_is() {
+    let document = concat!(
+        "See [the ADRs](./docs/adr/) and [the site](https://example.invalid/).\n",
+        "\n",
+        "```markdown\n",
+        "[not a link](./sample.md)\n",
+        "```\n",
+        "\n",
+        "[badge]: https://img.example.invalid/b.svg\n",
+        "![logo](<./logo.png> \"title\")\n",
+    );
+    let targets: Vec<String> = markdown_link_targets(document)
+        .into_iter()
+        .map(|(_, target)| target)
+        .collect();
+    assert!(
+        !targets.iter().any(|target| target == "./sample.md"),
+        "a sample inside a fence was read as a link, which is how a rule becomes unlivable: {targets:?}"
+    );
+    assert!(
+        targets.iter().any(|target| target == "./docs/adr/"),
+        "the inline link went unread: {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|target| target == "https://img.example.invalid/b.svg"),
+        "a reference definition went unread, so a README could park every link at the bottom and \
+         answer for none of them: {targets:?}"
+    );
+    assert!(
+        targets.iter().any(|target| target == "./logo.png"),
+        "an angle-bracketed image target went unread: {targets:?}"
+    );
+    assert!(followable_from_crates_io("#usage"));
+    assert!(!followable_from_crates_io("./CONTRIBUTING.md"));
+    assert!(!followable_from_crates_io("docs/adr/0015.md"));
+}
+
+#[test]
+fn an_include_that_climbs_out_of_its_crate_is_read_and_prose_about_one_is_not() {
+    let source = concat!(
+        "// keeps the `include_str!` out of normal builds\n",
+        "#[doc = include_str!(\"../README.md\")]\n",
+        "const CSS: &str = include_str!(\"../theme/x.css\");\n",
+        "const SPEC: &str = include_str!( \"../../../spec/x.json\" );\n",
+    );
+    let found: Vec<String> = included_paths(source)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(
+        found,
+        vec!["../README.md", "../theme/x.css", "../../../spec/x.json"],
+        "the include reader either missed a spelling or counted the sentence about one"
+    );
+
+    let crate_dir = Path::new("/w/crates/lib");
+    let src = crate_dir.join("src");
+    assert_eq!(
+        lexical_join(&src, "../README.md"),
+        crate_dir.join("README.md")
+    );
+    assert_eq!(
+        lexical_join(&src.join("ir"), "../../theme/x.css"),
+        crate_dir.join("theme/x.css")
+    );
+    assert!(
+        lexical_join(&src, "../../../spec/x.json")
+            .strip_prefix(crate_dir)
+            .is_err(),
+        "a path climbing above the crate still read as being inside it, which is the one shape \
+         the rule exists to reject"
+    );
+
+    // And the reader is not blind to a live escape: the workspace still holds
+    // one, in the crate where it is legitimate. `publish = false` is what makes
+    // it so — an unpublished crate has no package to leave — and the rule above
+    // is scoped to published members for exactly that reason, so this is the
+    // proof that the scoping is a choice and not a reader that finds nothing.
+    let support = "crates/aozora-flavored-markdown-test-support";
+    let escapes = included_paths(&read(&format!("{support}/src/lib.rs")));
+    assert!(
+        escapes.iter().any(|(_, path)| {
+            lexical_join(&repo_root().join(support).join("src"), path)
+                .strip_prefix(repo_root().join(support))
+                .is_err()
+        }),
+        "no include in {support} reaches outside it any more; either the root README's doctest \
+         moved again, or this reader has stopped seeing escapes at all"
+    );
+}

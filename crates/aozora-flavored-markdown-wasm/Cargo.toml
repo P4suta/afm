@@ -10,9 +10,14 @@ rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
 authors.workspace      = true
-readme.workspace       = true
 keywords.workspace     = true
 categories.workspace   = true
+
+# This crate's own README. It reaches its readers through `pkg/`, which
+# `wasm-pack` fills from the fields here — so an inherited `readme` put the
+# repository landing page in front of every editor-host developer, describing
+# a CLI and a Rust API rather than the `.d.ts` they are about to import.
+readme = "README.md"
 
 [lints]
 workspace = true

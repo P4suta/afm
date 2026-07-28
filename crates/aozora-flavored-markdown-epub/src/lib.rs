@@ -9,6 +9,14 @@
 #![doc(html_logo_url = "https://github.com/P4suta/aozora-flavored-markdown-epub")]
 #![forbid(unsafe_code)]
 
+// This crate's README carries the `build` call a reader copies first, so it is
+// compiled as a doctest by `just test-doc` — the same guard the library crate
+// puts on its own quick-start. `#[cfg(doctest)]` keeps the `include_str!` out
+// of normal builds and out of `cargo doc`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 use std::path::{Path, PathBuf};
 
 mod compose;
