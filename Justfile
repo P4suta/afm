@@ -569,6 +569,16 @@ fuzz-status:
 #     `→`, so they are restored — the same substitution CommonMark's own
 #     `spec_tests.py` makes.
 #
+# …and one that is not, because it cannot be. Both sources above are LF end to
+# end — `.gitattributes` normalises the working tree, so no document this repo
+# tracks can hold a CR at all — and every seed built from them told the fuzzer
+# that a line ends exactly one way. CommonMark §2.1 says it ends three ways,
+# and the third is the one the region arithmetic miscounted (DEV-233): a lone
+# CR after which every sourcepos was a line low, so a fence was canonicalised
+# as prose. libFuzzer had to invent that byte from scratch before it could
+# reach any of it. The CR seeds below are written by `printf` rather than
+# committed as files for exactly the reason the gap existed.
+#
 # Names are content-addressed: the examples the two spec documents share
 # collapse to one file, re-running is a no-op, and a source change shows up as
 # the seeds it added rather than as every seed shifting by one. The `seed-`
@@ -607,6 +617,19 @@ fuzz-seed:
         }
         taking { gsub(/→/, "\t"); body = body $0 "\n" }
     ' spec/sources/*.txt
+
+    # One seed per shape a line ending decides, each carrying notation the
+    # canonicaliser rewrites in prose and must not rewrite inside code — so a
+    # mutation that only moves the CR still lands on something a gate can
+    # judge, rather than on inert text.
+    printf 'a\rb\n\n```\nc\n\n\nd\n```\n' \
+        >"$work/seeds/eol-cr-in-prose-shifts-a-later-fence"
+    printf '```\r｜青梅《おうめ》\r［＃改ページ］\r```\r' \
+        >"$work/seeds/eol-cr-is-the-only-ending"
+    printf '```\r\n｜青梅《おうめ》\r｜漢字《かんじ》\r\n```\n' \
+        >"$work/seeds/eol-all-three-in-one-fence"
+    printf '> ```\r> ｜青梅《おうめ》\r> ```\r\n\n    ｜青梅《おうめ》\r    ｜漢字《かんじ》\n' \
+        >"$work/seeds/eol-cr-behind-a-container-and-an-indent"
 
     for target in $(just _fuzz-targets); do
         dir="$corpus/$target"

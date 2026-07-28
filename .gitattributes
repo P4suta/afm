@@ -6,6 +6,20 @@
 spec/aozora/fixtures/**/*.txt  binary
 spec/aozora/fixtures/**/*.zip  binary
 
+# Fuzz inputs. A seed and a promoted crash artifact are the exact bytes the
+# target was handed, and for a whole family of defects the line ending IS the
+# input: DEV-233 was a lone CR the region arithmetic did not count as one. The
+# default above rewrites a CRLF-only payload on check-in, so the suite would
+# replay an input the fuzzer never found and the seed corpus could not carry a
+# CRLF line at all. `text=auto` happens to guess "binary" for anything holding
+# a bare CR, which is why today's corpus survived — by accident, not by rule.
+crates/aozora-flavored-markdown/fuzz/corpus/**             binary
+crates/aozora-flavored-markdown/tests/fuzz_regressions/**  binary
+
+# …except the prose filed beside them, which is read and reviewed as text.
+crates/aozora-flavored-markdown/tests/fuzz_regressions/**/*.md   text eol=lf diff merge
+crates/aozora-flavored-markdown/tests/fuzz_regressions/**/*.txt  text eol=lf diff merge
+
 # Generated spec JSON; the authoritative sources live alongside as *.txt
 # under spec/sources/. Mark as generated so they don't count toward
 # language stats and don't expand by default in diffs.
