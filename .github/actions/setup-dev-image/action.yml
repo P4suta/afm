@@ -16,7 +16,13 @@ description: Pull (or build) the aozora-flavored-markdown dev image, install `ju
 runs:
   using: composite
   steps:
-    - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2
+    # BUMP THIS BY HAND, together with the workflow copies. Dependabot's
+    # `github-actions` ecosystem at `directory: "/"` reads `.github/workflows`
+    # and does not reach `.github/actions/`, so a grouped SHA bump moves the
+    # four workflow call sites and leaves this one behind — which is exactly
+    # how #229 went red. `one_action_is_pinned_to_one_commit_across_the_whole_repo`
+    # in `crates/xtask/tests/action_pinning.rs` is what catches the split.
+    - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
       with:
         tool: just
 
