@@ -5,12 +5,14 @@
 //! the host paragraph is promoted to a heading, and the renderer emits
 //! `<h1>/<h2>/<h3>` with the extracted target as the body.
 //!
-//! Also covers the adjacent sanitize rule: a line of ≥ 10 repeats of
-//! `-`/`=`/`_` is isolated from the preceding paragraph so CommonMark does not
-//! promote it to a setext heading (`<h2>`).
+//! Also covers the promotion this crate does *not* do: a line of `-`/`=`/`_`
+//! underlines the paragraph above it whatever its width, because the row is
+//! held out of the sibling parser's reach and CommonMark reads it instead.
 
 use aozora_flavored_markdown::to_html;
-use aozora_flavored_markdown_test_support::{check_heading_integrity, check_no_bare_bracket};
+use aozora_flavored_markdown_test_support::{
+    check_heading_integrity, check_no_bare_bracket, check_no_sentinel_leak,
+};
 
 #[test]
 fn big_heading_is_rendered_as_h1() {
@@ -102,6 +104,102 @@ fn heading_hint_inside_a_markdown_heading_leaves_the_heading_alone() {
     assert!(check_no_bare_bracket(&out).is_ok(), "Tier A: {out}");
 }
 
+/// A `@` stands for the body under test. Between them, every heading a
+/// caller writes in markdown rather than in 青空文庫 notation: ATX at the
+/// ends and the middle of the level range, and a setext underline on both
+/// sides of the width at which the sibling parser used to read the row as
+/// decoration instead.
+const MARKDOWN_HEADINGS: &[&str] = &[
+    "# @\n",
+    "## @\n",
+    "###### @\n",
+    "@\n---\n",
+    "@\n===\n",
+    "@\n----------\n",
+    "@\n==================================\n",
+];
+
+/// Every 青空文庫 marker whose rendering is a wrapper rather than text, plus
+/// the two shapes that carry no wrapper at all — an unknown annotation and a
+/// truncated one, which reach the heading body by the recovery path instead.
+const MARKERS: &[&str] = &[
+    "",
+    "［＃１字下げ］",
+    "［＃２字下げ］",
+    "［＃ここから２字下げ］",
+    "［＃ここで字下げ終わり］",
+    "［＃地付き］",
+    "［＃改ページ］",
+    "［＃ほげふが］",
+    "［＃［＃２字下げ］",
+];
+
+#[test]
+fn a_markdown_heading_body_carries_no_marker_and_no_sentinel() {
+    // THE GRID `heading_hint_inside_a_markdown_heading_leaves_the_heading_alone`
+    // is one cell of. That test asks what an ATX heading does with a heading
+    // *hint* and answers correctly; nothing asked what one does with any of
+    // the other markers, and two defects lived in the gap:
+    //
+    // * an indent marker rendered its `aozora-md-indent` wrapper into the
+    //   heading body — Tier C, and reachable through `to_html` on `main` by
+    //   typing `# ［＃２字下げ］漢字`. `inline_is_dropped` dropped a directive
+    //   inside a heading and not an indent.
+    // * a heading body the splice consumed *entirely* kept its original text
+    //   node, sentinels and all — Tier B, reachable by `# ［＃「漢字」は大見出し］`,
+    //   where the hint names a target the heading has no room for.
+    //
+    // Both tiers judge any `<hN>` correctly. Neither had ever been shown a
+    // markdown heading with a marker in it: the Tier C property generator
+    // builds its headings out of hints alone, and the Tier B generators have no
+    // `#` in their atom pool and draw their rule rows at widths the sibling
+    // parser used to swallow — so a setext heading could not form there either.
+    let mut cells = 0usize;
+    for heading in MARKDOWN_HEADINGS {
+        for marker in MARKERS {
+            for body in ["", "漢字"] {
+                for hint in ["", "［＃「漢字」は大見出し］"] {
+                    let src = heading.replace('@', &format!("{marker}{body}{hint}"));
+                    let out = to_html(&src);
+                    check_heading_integrity(&out)
+                        .unwrap_or_else(|e| panic!("Tier C for src={src:?}, html={out:?}: {e}"));
+                    check_no_sentinel_leak(&src, &out)
+                        .unwrap_or_else(|e| panic!("Tier B for src={src:?}, html={out:?}: {e}"));
+                    cells += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        cells,
+        MARKDOWN_HEADINGS.len() * MARKERS.len() * 2 * 2,
+        "the grid stopped covering what it enumerates"
+    );
+
+    // The two defects, spelled out, because a grid of "must never" says nothing
+    // about severity — and, between them, they are what keeps the grid from
+    // passing vacuously: a renderer that emitted no heading at all would
+    // satisfy both tiers everywhere above and fail here.
+    assert_eq!(
+        to_html("# ［＃２字下げ］漢字"),
+        "<h1>漢字</h1>\n",
+        "an indent marker has nothing to indent on a one-line heading, so it is dropped"
+    );
+    assert_eq!(
+        to_html("# ［＃「漢字」は大見出し］"),
+        "<h1></h1>\n",
+        "a heading whose whole body was consumed is empty — an empty ATX heading is \
+         legitimate markdown (Tier L is about a *promoted* one), and it is what CommonMark \
+         renders for `#` with nothing after it"
+    );
+    assert_eq!(
+        to_html("［＃２字下げ］漢字\n----------\n"),
+        "<h2>漢字</h2>\n",
+        "the setext arm of the grid answers the same way, and it exists at all only \
+         because the rule row is now CommonMark's to read"
+    );
+}
+
 #[test]
 fn heading_hint_inside_a_table_cell_renders_nothing() {
     // Same reasoning one context over: nothing to promote, so the
@@ -115,48 +213,48 @@ fn heading_hint_inside_a_table_cell_renders_nothing() {
 }
 
 #[test]
-fn long_hyphen_rule_does_not_turn_paragraph_into_setext_heading() {
+fn a_long_hyphen_rule_underlines_the_line_above_it() {
     // Direct analogue of the `spec/aozora/fixtures/56656/input.utf8.txt`
     // front-matter shape: a prose line followed by a long `-` run.
-    // Without phase0's rule-isolation pass, CommonMark would promote
-    // the prose to a setext H2.
+    //
+    // These two tests used to assert the opposite, on the sibling parser's
+    // rule-isolation pass — which reads a run of ten or more as a decorative
+    // separator and pushes it onto a stanza of its own, so the prose above
+    // stays a paragraph and the row becomes a `<hr>`. That is the 青空文庫
+    // reading, and this crate no longer takes it on the render path: the
+    // dialect is documented as a superset of CommonMark, and CommonMark says
+    // the row underlines the line above it whatever its width. The row is
+    // held out of the parser's reach instead (`crate::verbatim_regions`), so
+    // both halves of the crate answer the same way and the length threshold
+    // stops being observable at all.
     let input = "凡例です。\n-----------------------------------\n本文";
     let out = to_html(input);
     assert!(
-        out.contains("<p>凡例です。</p>"),
-        "preceding prose must remain a paragraph; got: {out}"
+        out.contains("<h2>凡例です。</h2>"),
+        "the row underlines the paragraph CommonMark gave it to; got: {out}"
     );
     assert!(
-        !out.contains("<h2>凡例です。</h2>"),
-        "preceding prose must not become a setext heading; got: {out}"
-    );
-    // The rule itself should render as a thematic break.
-    assert!(
-        out.contains("<hr"),
-        "decorative rule should render as <hr>; got: {out}"
+        !out.contains("<hr"),
+        "a setext underline is not also a thematic break; got: {out}"
     );
 }
 
 #[test]
-fn long_equals_rule_does_not_turn_paragraph_into_setext_heading() {
+fn a_long_equals_rule_underlines_the_line_above_it() {
     let input = "凡例です。\n=====================================\n本文";
     let out = to_html(input);
     assert!(
-        out.contains("<p>凡例です。</p>"),
-        "preceding prose must remain a paragraph; got: {out}"
-    );
-    assert!(
-        !out.contains("<h1>凡例です。</h1>"),
-        "preceding prose must not become a setext H1; got: {out}"
+        out.contains("<h1>凡例です。</h1>"),
+        "an `=` row is a setext H1 underline at any width; got: {out}"
     );
 }
 
 #[test]
 fn short_setext_heading_still_works() {
-    // Regression canary for the rule-isolation threshold. A standard
-    // 3-character setext underline is shorter than
-    // `DECORATIVE_RULE_MIN_LEN` (10) and therefore untouched — the
-    // CommonMark idiom of `Heading\n---\n` still promotes to H2.
+    // The control that always passed: a 3-character underline was below the
+    // sibling parser's threshold even before the row was held out of its
+    // reach, so this is what tells a reader the two cases now agree rather
+    // than merely both being green.
     let input = "Heading\n---\nbody";
     let out = to_html(input);
     assert!(

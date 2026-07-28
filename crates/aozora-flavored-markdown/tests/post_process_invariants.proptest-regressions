@@ -9,3 +9,4 @@ cc 38b3e39147c1a42bf7bde12a89d7f08a1618de5134c6110a3ac77207f702d882 # shrinks to
 cc 6207311adece9cfef961acf6697709adc48bd63646713ebe2a2848e1b8a42d77 # shrinks to src = "《［＃］》"
 cc 50c66eddee518bbf2ef44e1c822d50820d4001a46aca5874fa5cc702b0391668 # shrinks to src = "［＃］"
 cc 2ac18f7d2c3172e7b9469c33e4ba6f92405e376f5fa12fa05c490ec9841ed4d9 # shrinks to src = "［＃］"
+cc a141a37e9310873f924865a3f604da6880557207f290dfec4073f9268c6b0a98 # shrinks to src = "［＃［＃２字下げ］\n------------"

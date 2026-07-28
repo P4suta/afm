@@ -53,6 +53,13 @@ mod verbatim_regions;
 ///
 /// Owned here rather than re-exported from the sibling parser: the
 /// substitution is ours to make, so the constants are ours to keep stable.
+///
+/// **These five are not source text.** [`render`] and its siblings replace an
+/// author-typed `INLINE` / `BLOCK_LEAF` / `BLOCK_OPEN` / `BLOCK_CLOSE` with
+/// U+FFFD, so nothing downstream can mistake one for a substituted sentinel;
+/// only `MASK` comes back as written, masking having stood down rather than
+/// guess at its origin. [`canonicalize`] owes its caller the source it was
+/// handed and preserves all five — different debts, not an oversight.
 // Hidden rather than private: the leak checks in the test-support crate read
 // `ALL`, and a consumer has no use for the internal representation.
 #[doc(hidden)]

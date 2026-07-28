@@ -26,12 +26,11 @@ bare URLs that GFM's own autolink extension links. Nothing is skipped.
 hardbreaks turns every source newline into a `<br>`, because verse and
 dialogue boundaries are load-bearing in 青空文庫 source. Take it off with
 `Options::default().with_hardbreaks(false)` and the Aozora extensions apply
-only where the input uses them, on 3 968 of the 3 972 spec documents swept.
-The four that remain are one known defect, not a reservation: a setext
-underline of ten characters or more (`Foo` over `----------`) is long enough
-for the 青空文庫 pre-pass to read as a decorative rule, so the heading it
-underlines splits into a paragraph and a `<hr>`. The file extension stays
-`.md`.
+only where the input uses them, on all 3 972 spec documents swept. One
+reservation is left, and it is about input no CommonMark document has: the
+five private-use codepoints this crate substitutes one per 青空文庫 construct
+are not source text, so a source that types `U+E001`–`U+E004` gets `U+FFFD`
+back from a render. The file extension stays `.md`.
 
 None of these claims is a promise. The conformance runners in
 [`src/conformance.rs`](https://github.com/P4suta/aozora-flavored-markdown/blob/main/crates/aozora-flavored-markdown/src/conformance.rs)
@@ -39,7 +38,7 @@ render both spec corpora through those exact constructors — its `expected` is
 the list of 13, each entry naming the authority that supersedes the fixture
 and pinning what this crate renders instead — and
 [`tests/render_commonmark_superset.rs`](https://github.com/P4suta/aozora-flavored-markdown/blob/main/crates/aozora-flavored-markdown/tests/render_commonmark_superset.rs)
-sweeps the same corpora through the dialect and pins the exception above.
+sweeps the same corpora through the dialect and holds the claim above.
 `cargo test -p aozora-flavored-markdown` is the proof.
 
 ```text

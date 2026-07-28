@@ -24,9 +24,9 @@ use aozora_flavored_markdown_test_support::check_html_tag_balance;
 const UNRESOLVED: &str = "aozora-md::constructs_unresolved";
 
 /// The shapes a real 青空文庫 file has, and the shape that used to defeat
-/// this crate: CRLF moves every offset, the decorative rule moves them
-/// again, and the accent digraph combines two characters into one on the
-/// notation's own line.
+/// this crate: CRLF moves every offset, the accent digraph combines two
+/// characters into one on the notation's own line, and the decorative rule
+/// is substituted one byte for one so that it moves nothing at all.
 const HARD_SOURCES: &[(&str, &str)] = &[
     ("CRLF", "本文\r\n｜青梅《おうめ》"),
     ("BOM", "\u{feff}｜青梅《おうめ》"),
@@ -80,13 +80,16 @@ fn an_accent_digraph_reaches_the_output_combined() {
     );
 }
 
-/// A decorative rule is a rule, not the underline of a setext heading. The
-/// parser isolates it before reading, and comrak reads the isolated form.
+/// A rule row is CommonMark's to read, notation on the next line or not. The
+/// row is held out of the parser's reach and comrak reads the caller's own
+/// line, so the row underlines the paragraph above it and the ruby after it
+/// is still tracked.
 #[test]
-fn a_decorative_rule_does_not_promote_the_line_above_it() {
+fn a_decorative_rule_promotes_the_line_above_it_and_keeps_the_notation() {
     let html = html_of("本文\n----------\n｜青梅《おうめ》");
-    assert!(!html.contains("<h2>"), "Tier H: {html}");
-    assert!(html.contains("<hr />"), "{html}");
+    assert!(html.contains("<h2>本文</h2>"), "{html}");
+    assert!(!html.contains("<hr"), "{html}");
+    assert!(html.contains("<ruby>"), "{html}");
 }
 
 #[test]

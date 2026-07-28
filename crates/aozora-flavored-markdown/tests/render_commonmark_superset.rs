@@ -20,44 +20,21 @@
 //!   document exactly as `gfm()` does — no exceptions, so a divergence below
 //!   is attributable to the pass rather than merely noticed.
 //! * [`the_dialect_renders_every_spec_example_as_gfm_does_once_hardbreaks_is_off`]
-//!   is the claim itself, and it is not clean: four documents survive as a
-//!   defect, pinned rather than excused.
+//!   is the claim itself, and it is clean.
 //! * [`hardbreaks_is_why_the_headline_claim_needs_a_condition`] pins why the
 //!   unconditional sentence this replaced was false.
-//! * [`the_rule_row_protection_covers_canonicalize_and_leaves_render_open`]
-//!   states the surviving defect precisely, on the same matrix the serialize
-//!   half already runs green.
+//! * [`a_rule_row_renders_in_the_block_that_owns_it`] holds the matrix the
+//!   serialize half already runs green, now that `render` runs it green too.
+//! * [`every_reserved_codepoint_is_neutralised_on_the_render_path`] holds the
+//!   *other* matrix the serialize half runs — the one whose two halves answer
+//!   differently on purpose.
 
-use aozora_flavored_markdown::{Options, canonicalize, render, to_html};
+use aozora_flavored_markdown::{Options, render, sentinels, to_html};
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 
 const COMMONMARK: &str = include_str!("../../../spec/commonmark-0.31.2.json");
 const GFM: &str = include_str!("../../../spec/gfm-0.29-gfm.json");
-
-/// Measured 2026-07-28 over all 3 972 documents. Every one of them is
-/// CommonMark example 83 and its GFM twin 53 —
-/// `"Foo\n-------------------------\n\nFoo\n=\n"` — in its bare and in its
-/// list-item shape. The 25-character setext underline is long enough for the
-/// sibling parser to read as a decorative rule and push onto a stanza of its
-/// own, so `<h2>Foo</h2>` comes out as `<p>Foo</p><hr />`.
-///
-/// A surviving defect rather than a tolerance: the right value is 0. It is
-/// pinned as a count so that fixing it fails here — with the message telling
-/// the reader what to write instead — rather than passing silently.
-/// [`the_rule_row_protection_covers_canonicalize_and_leaves_render_open`]
-/// says what is broken and where the protection that should cover it lives.
-const EXPECTED_RENDER_DIVERGENCES: usize = 4;
-
-/// Measured 2026-07-28 over the 270 cells of the matrix below: 52 of them
-/// render differently under the dialect than under `gfm()`, every one at a
-/// width of ten or thirty-five. Widths 1, 3 and 9 are the control group —
-/// below whatever threshold the sibling parser applies, and none of them
-/// moves — which is what makes this a measurement of one rewrite rather than
-/// of the pre-pass in general.
-///
-/// The right value is 0, for the same defect as above.
-const RULE_ROWS_RENDER_CORRUPTS: usize = 52;
 
 /// A `@` stands for the row under test. Copied from
 /// `serialize_commonmark_identity.rs` deliberately: the point of this file is
@@ -167,21 +144,6 @@ fn every_spec_document() -> Vec<(String, String)> {
     documents
 }
 
-/// A line that is a run of one rule character and nothing else, at any
-/// width. Deliberately not a threshold: the threshold is the sibling
-/// parser's, and naming it here would pin this crate to a number it does not
-/// own.
-fn has_a_rule_row(src: &str) -> bool {
-    src.lines().any(|line| {
-        let row = line.trim();
-        let mut bytes = row.bytes();
-        let Some(first) = bytes.next() else {
-            return false;
-        };
-        matches!(first, b'-' | b'=' | b'_') && bytes.all(|byte| byte == first)
-    })
-}
-
 #[test]
 fn nothing_but_the_aozora_pass_stands_between_the_dialect_and_gfm() {
     // The dialect is not `gfm()` plus the notation pass: it also carries
@@ -205,39 +167,21 @@ fn nothing_but_the_aozora_pass_stands_between_the_dialect_and_gfm() {
 
 #[test]
 fn the_dialect_renders_every_spec_example_as_gfm_does_once_hardbreaks_is_off() {
+    // No tolerance and no pinned count. Both were here until the rule-row
+    // protection reached this half of the crate: four documents — CommonMark
+    // example 83 and its GFM twin 53, bare and in a list item — used to come
+    // out as `<p>Foo</p><hr />` where the spec says `<h2>Foo</h2>`, because
+    // the sibling parser pushed the 25-character setext underline onto a
+    // stanza of its own and comrak read the split form.
     let dialect = strict_dialect();
     let gfm = Options::gfm();
-
-    let mut divergences = Vec::new();
     for (where_, doc) in every_spec_document() {
-        if render(&doc, &dialect).html == render(&doc, &gfm).html {
-            continue;
-        }
-        // Two things are demanded of a divergence before it may be counted
-        // rather than failed. It has to carry a rule row — necessary and not
-        // sufficient, which is why the count below is what has the teeth —
-        // and `canonicalize` has to reproduce the very same document
-        // verbatim, which is the statement that the protection exists and
-        // that this path is simply outside it.
-        assert!(
-            has_a_rule_row(&doc),
-            "{where_} diverged with no rule row in it — a failure mode this file has not seen\n  \
-             src = {doc:?}"
-        );
         assert_eq!(
-            canonicalize(&doc).as_deref(),
-            Ok(doc.as_str()),
-            "{where_} is not a document `canonicalize` protects either"
+            render(&doc, &dialect).html,
+            render(&doc, &gfm).html,
+            "{where_} does not render as GFM does\n  src = {doc:?}"
         );
-        divergences.push(where_);
     }
-    assert_eq!(
-        divergences.len(),
-        EXPECTED_RENDER_DIVERGENCES,
-        "the set of spec examples the dialect does not render as GFM does moved. If it shrank, \
-         the defect is being fixed — lower EXPECTED_RENDER_DIVERGENCES, and delete it at 0:\n  {}",
-        divergences.join("\n  ")
-    );
 }
 
 #[test]
@@ -278,27 +222,23 @@ fn hardbreaks_is_why_the_headline_claim_needs_a_condition() {
 }
 
 #[test]
-fn the_rule_row_protection_covers_canonicalize_and_leaves_render_open() {
-    // THE SURVIVING DEFECT, stated where it can be measured.
-    //
+fn a_rule_row_renders_in_the_block_that_owns_it() {
     // `crate::verbatim_regions` holds a rule row out of the reach of the
     // CommonMark-blind sibling parser, which would otherwise push one onto a
     // stanza of its own and split whichever block CommonMark had given the
     // bytes to. `serialize_commonmark_identity`'s
     // `a_rule_row_stays_in_the_block_that_owns_it` runs exactly the matrix
-    // below and is green.
+    // below for `canonicalize`; this is the same matrix for `render`.
     //
-    // It is green for `canonicalize` alone. `verbatim_regions` has one
-    // caller, `canonicalise_pass`; `render` masks with `code_block_mask`
-    // instead, which hides 青空文庫 triggers inside fences and knows nothing
-    // about rule rows. So the protection covers the half of the crate that
-    // owes a caller its source back and not the half that every caller
-    // actually uses — and the assertion inside the loop is that statement:
-    // every cell `render` corrupts is one `canonicalize` reproduces verbatim.
+    // It used to be green for `canonicalize` alone, at 52 of these 270 cells
+    // corrupted, every one of them at a width of ten or thirty-five: the
+    // module had one caller, `canonicalise_pass`, and `render` masked with
+    // `code_block_mask`, which knows only about fences. Widths 1, 3 and 9 are
+    // still the control group — below whatever threshold the sibling parser
+    // applies, and they never moved even while the defect stood.
     let dialect = strict_dialect();
     let gfm = Options::gfm();
 
-    let mut corrupted = 0usize;
     let mut cells = 0usize;
     for rule in ['-', '=', '_'] {
         for &width in RULE_WIDTHS {
@@ -306,15 +246,11 @@ fn the_rule_row_protection_covers_canonicalize_and_leaves_render_open() {
             for context in BLOCK_CONTEXTS {
                 let src = context.replace('@', &row);
                 cells += 1;
-                if render(&src, &dialect).html == render(&src, &gfm).html {
-                    continue;
-                }
                 assert_eq!(
-                    canonicalize(&src).as_deref(),
-                    Ok(src.as_str()),
-                    "a rule row `canonicalize` does not protect either, in {context:?}"
+                    render(&src, &dialect).html,
+                    render(&src, &gfm).html,
+                    "a rule row left the block CommonMark gave it to, in {context:?}"
                 );
-                corrupted += 1;
             }
         }
     }
@@ -323,19 +259,14 @@ fn the_rule_row_protection_covers_canonicalize_and_leaves_render_open() {
         3 * RULE_WIDTHS.len() * BLOCK_CONTEXTS.len(),
         "the matrix stopped covering what it enumerates"
     );
-    assert_eq!(
-        corrupted, RULE_ROWS_RENDER_CORRUPTS,
-        "the render-side rule-row corruption moved. If it shrank, the defect is being fixed — \
-         lower RULE_ROWS_RENDER_CORRUPTS, and delete this test at 0"
-    );
 
-    // The shape, spelled out, because a count says nothing about severity:
-    // a setext H2 whose underline is ten characters long stops being a
-    // heading, through the crate's own one-liner entry point.
+    // The shape, spelled out, because a matrix says nothing about severity:
+    // a setext H2 whose underline is ten characters long stayed a paragraph
+    // and a `<hr>`, through the crate's own one-liner entry point.
     assert_eq!(
         to_html("Foo\n----------\n"),
-        "<p>Foo</p>\n<hr />\n",
-        "pinning the defect: a long setext underline splits the heading it belongs to"
+        "<h2>Foo</h2>\n",
+        "a long setext underline underlines the heading it belongs to"
     );
     assert_eq!(
         render("Foo\n----------\n", &gfm).html,
@@ -345,6 +276,132 @@ fn the_rule_row_protection_covers_canonicalize_and_leaves_render_open() {
     assert_eq!(
         render("Foo\n---\n", &dialect).html,
         "<h2>Foo</h2>\n",
-        "a short underline is below the sibling's threshold and survives"
+        "a short underline never crossed the sibling's threshold and still works"
+    );
+}
+
+#[test]
+fn a_source_that_carries_the_substitution_gets_no_rule_row_protection() {
+    // THE SURVIVING DEFECT of the fix above, stated where it can be measured.
+    //
+    // `verbatim_regions::hide_rule_rows` substitutes one byte for one so the
+    // parser's offsets keep addressing the caller's own text, and the bytes it
+    // substitutes are U+0001..U+0003. A source that already carries one of the
+    // three would make the reveal claim a byte the author wrote, so the
+    // protection stands down for the whole document and the rule row goes back
+    // to leaving the block CommonMark gave it to. Same shape and same reason as
+    // `code_block_mask` standing down on a source-typed U+E000; unlike that
+    // one, this one is not a documented contract at the public surface, because
+    // a C0 control is not a codepoint this crate reserves — it is ordinary (if
+    // strange) CommonMark text.
+    //
+    // Asserted as an inequality, in the idiom `serialize_commonmark_identity`
+    // uses for the doubled BOM: a defect named by a green test is a defect that
+    // cannot be rediscovered as a surprise.
+    let dialect = strict_dialect();
+    let gfm = Options::gfm();
+    for hidden in ['\u{1}', '\u{2}', '\u{3}'] {
+        let src = format!("{hidden}\nFoo\n----------\n");
+        assert_ne!(
+            render(&src, &dialect).html,
+            render(&src, &gfm).html,
+            "U+{:04X} in the source no longer switches the protection off — if the mechanism \
+             stopped needing to stand down, delete this test rather than weaken it",
+            hidden as u32
+        );
+        assert_eq!(
+            render(&src, &dialect).html,
+            format!("<p>{hidden}\nFoo</p>\n<hr />\n"),
+            "and what it costs is exactly the pre-fix reading of the row"
+        );
+    }
+    // A neighbouring control character is not part of the substitution, so it
+    // costs nothing: the bail-out is keyed to the three bytes the reveal would
+    // claim rather than to C0 in general.
+    let src = "\u{4}\nFoo\n----------\n";
+    assert_eq!(
+        render(src, &dialect).html,
+        render(src, &gfm).html,
+        "the carve-out widened past the three bytes it is about"
+    );
+}
+
+#[test]
+fn every_reserved_codepoint_is_neutralised_on_the_render_path() {
+    // The render-side mirror of `serialize_commonmark_identity`'s
+    // `every_reserved_codepoint_in_the_source_comes_back_as_written`, over the
+    // same five codepoints and the same 18 contexts.
+    //
+    // It is deliberately NOT the same assertion. `canonicalize` owes its caller
+    // the source it was handed, so it preserves all five; `render` owes nobody
+    // an offset into a text with a substituted sentinel in it, and the sibling
+    // parser neutralises the four it lexes with. The two halves answering
+    // differently is the whole of DEV-235, and the decision taken there is
+    // "destroyed by design" — recorded on `sentinels` at the public surface and
+    // in both READMEs. This is the test that makes it un-silent.
+    //
+    // Every cell is stated exactly rather than counted: what comes out is what
+    // GFM renders with the codepoint rewritten to U+FFFD, which for `MASK` is
+    // the identity because masking stands down on such a source.
+    let dialect = strict_dialect();
+    let gfm = Options::gfm();
+
+    let mut destroyed = 0usize;
+    let mut cells = 0usize;
+    for reserved in sentinels::ALL {
+        for context in BLOCK_CONTEXTS {
+            let src = context.replace('@', &format!("a{reserved}b"));
+            let commonmark = render(&src, &gfm).html;
+            let expected = if reserved == sentinels::MASK {
+                commonmark.clone()
+            } else {
+                commonmark.replace(reserved, "\u{FFFD}")
+            };
+            let out = render(&src, &dialect).html;
+            assert_eq!(
+                out, expected,
+                "reserved U+{:04X} did not reach the output as `sentinels` promises, in {context:?}",
+                reserved as u32
+            );
+            cells += 1;
+            if out != commonmark {
+                destroyed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        cells,
+        sentinels::ALL.len() * BLOCK_CONTEXTS.len(),
+        "the matrix stopped covering what it enumerates"
+    );
+
+    // The 68-of-90 figure DEV-235 asked to have reproduced, derived rather than
+    // measured: 90 cells, less the 18 where `MASK` comes back as written, less
+    // the one context per destroyed codepoint where the difference cannot show
+    // — a raw HTML block, which comrak collapses to `<!-- raw HTML omitted -->`
+    // whatever is inside it.
+    assert_eq!(
+        destroyed,
+        BLOCK_CONTEXTS.len() * (sentinels::ALL.len() - 1) - (sentinels::ALL.len() - 1),
+        "the render-side reserved-codepoint contract moved"
+    );
+    assert_eq!(destroyed, 68, "…and 68 is what that arithmetic comes to");
+    let raw_html = "<div>\na\u{E001}b\n</div>\n";
+    assert_eq!(
+        render(raw_html, &dialect).html,
+        render(raw_html, &gfm).html,
+        "the four cells that agree do so because neither dialect emits the byte at all"
+    );
+
+    // The shape, spelled out at the one-liner entry point, for both answers.
+    assert_eq!(
+        to_html("a\u{E001}b"),
+        "<p>a\u{FFFD}b</p>\n",
+        "an author-typed sentinel is destroyed, and `sentinels` says so"
+    );
+    assert_eq!(
+        to_html("a\u{E000}b"),
+        "<p>a\u{E000}b</p>\n",
+        "the mask is the one that comes back, masking having stood down"
     );
 }
