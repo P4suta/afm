@@ -60,6 +60,23 @@ moment they join the ladder. The release.yml cargo-dist pipeline (binaries) is
 untouched and runs off the same `v<semver>` tag; crates.io publish is a
 separate, manually-triggered step.
 
+**Packaging is a per-PR gate (amended).** The dry run below is `just package`,
+a `[group('gate')]` recipe holding `cargo publish --workspace --dry-run
+--locked`, and `publish-crates.yml`'s preflight calls that recipe instead of
+carrying a second copy of the command. Until this amendment that workflow was
+the only thing in the repository that ever built the published form of these
+crates, and it runs on `workflow_dispatch` — so the tarball a consumer receives
+was verified when somebody decided to publish and at no other moment, and the
+dependency graph a consumer resolves had never been built on `main` at all
+while `comrak` was a path dependency (ADR-0024). Every pull request packages
+and verify-builds the whole ladder now (DEV-224). The recipe adds
+`--allow-dirty`, which suppresses one check — "is every file in this package
+committed" — and changes nothing about what is packaged or built: `just ci` is
+what a developer runs before the commit exists, and a gate that declines to
+answer there is a gate that only ever runs on a runner. The live
+`cargo publish` carries no such flag, so the tarball that is uploaded is still
+required to correspond to a commit.
+
 **Measured before the ladder was deleted.** On the pinned toolchain,
 `cargo 1.96.0 (30a34c682 2026-05-25)`, inside the dev image (ADR-0002),
 `cargo publish --workspace --dry-run --locked` selected exactly the four

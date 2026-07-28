@@ -1302,6 +1302,48 @@ dist-assets-check:
     {{_dev}} cargo build --locked --package aozora-flavored-markdown-cli --quiet
     {{_dev}} cargo run --locked --package xtask --quiet -- gen-dist-assets --check
 
+# The four published crates, built the way a consumer receives them.
+#
+# Every other compile gate in this file builds the WORKSPACE: `--all-targets`
+# over one target directory, path dependencies resolved in place, every file on
+# disk reachable from every crate. A consumer gets a tarball per crate and a
+# registry version per dependency, and the difference is a class of failure
+# nothing above can see — a file the build reads and the package does not
+# carry (an `include_str!` reaching above the crate directory is the usual
+# one), a path dependency with no version to fall back on, a manifest missing
+# something crates.io requires, or a rung that only builds because the rung
+# under it was resolved out of the workspace instead of a registry.
+#
+# Nothing was asking. `publish-crates.yml` is `workflow_dispatch`-only, so the
+# tarballs are verified when someone decides to publish and at no other moment;
+# and while `comrak` was a path dependency (retired by ADR-0024) the graph a
+# consumer resolves had never been built on `main` at all. This recipe is that
+# workflow's preflight, lifted to where every PR runs it — the workflow calls
+# this same recipe rather than spelling the command out a second time.
+#
+# `--dry-run` packages each member into a temporary registry under
+# `target/package/` and resolves the next member against it (ADR-0015), which
+# is why all four rungs are answerable here even though two of them have never
+# been on crates.io. It also downgrades "this version already exists" to a
+# warning, so the gate keeps working after the first publish.
+#
+# `--allow-dirty` suppresses exactly one check — "is every file in this package
+# committed to git" — and changes nothing else: the same files are packaged and
+# the same tarball is verify-built either way. It is here because that question
+# is not this gate's question, and asking it anyway would remove the gate from
+# the one place it earns its time. `just ci` is what a developer runs BEFORE
+# the commit, so without the flag cargo stops on the first edited file and the
+# packaging question never gets asked locally at all — a gate that only ever
+# runs on a runner, which is the shape this repo keeps deleting. On a runner
+# the tree is a fresh checkout and the flag is inert. Where committedness does
+# matter — the upload, which stamps `.cargo_vcs_info.json` with the revision a
+# published tarball claims to come from — `publish-crates.yml`'s live
+# `cargo publish` carries no such flag.
+[group('gate')]
+[group('release')]
+package:
+    {{_dev}} cargo publish --workspace --dry-run --locked --allow-dirty
+
 # --- playground (browser try-it-online) --------------------------------------
 
 # Vite dev/preview server container — `--service-ports` is required so
@@ -1517,7 +1559,7 @@ ci:
 
     # Why this shape (no gate is weakened vs. the old sequential loop):
     #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/doc-public/
-    #     semver/coverage/udeps)
+    #     semver/coverage/udeps/package)
     #     all share ONE cargo target dir, so they contend on its build lock and
     #     CANNOT truly run in parallel — they stay sequential, ordered
     #     cheap-to-expensive so a failure surfaces fast. `msrv` leads: inside the
@@ -1543,6 +1585,14 @@ ci:
     #     it does invoke rustc (and clang, for libFuzzer), so it stays in the
     #     foreground rather than joining the background lane. It runs after
     #     `udeps`, the other recipe that reaches for the nightly image.
+    #   * `package` closes the host-target half of the lane. It is the one
+    #     compile here that starts from the tarball instead of the working
+    #     tree: each of the four published crates is unpacked under
+    #     `target/package/` and built from its own manifest against the ones
+    #     packaged ahead of it. Those verify builds inherit `CARGO_TARGET_DIR`,
+    #     so they take the same lock and find the same warm cache as the chain
+    #     above — sequential, not beside it — and it runs after that chain
+    #     because everything cheaper has had its chance to fail by then.
     #   * test-wasm and the three playground gates are the wasm-pack gates and
     #     run LAST in the foreground lane, in that order: wasm-pack invokes
     #     rustc and shares the target dir, so they cannot overlap anything —
@@ -1584,7 +1634,7 @@ ci:
               zizmor actionlint vale comment-discipline commitlint \
               msrv clippy build dist-assets-check \
               test test-doc prop spec doc doc-public semver coverage udeps \
-              fuzz-build test-wasm \
+              fuzz-build package test-wasm \
               playground-lint playground-test playground-build)
 
     # --- manifest assert: these two lanes ARE the gate set -------------------

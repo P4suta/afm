@@ -88,12 +88,18 @@ jobs:
   # regression surfaces before anything is uploaded — and an upload is the one
   # operation crates.io will not let anybody take back.
   #
-  # The semver step is the SAME recipe the PR gate runs, not a second spelling
-  # of it: `AOZORA_MD_IN_CONTAINER` tells the Justfile's `_in` switch this job
-  # is already outside the dev image, so the recipe resolves its tool from what
-  # `install-action` put on the runner. Asking it again here is not redundant
-  # with the PR gate — a tag is what gets published, and a tag is not required
+  # Both steps are the SAME recipes the PR gates run, not a second spelling of
+  # them: `AOZORA_MD_IN_CONTAINER` tells the Justfile's `_in` switch this job
+  # is already outside the dev image, so each recipe resolves its tool from what
+  # `install-action` put on the runner. Asking them again here is not redundant
+  # with the PR gates — a tag is what gets published, and a tag is not required
   # to be a commit any PR ever ran.
+  #
+  # `just package` used to be this job's own `cargo publish --workspace
+  # --dry-run --locked`, which made this file the only place the packaging
+  # check existed — and this file runs on dispatch. It is a `[group('gate')]`
+  # recipe now (DEV-224), so every pull request packages the ladder and this
+  # job calls the recipe rather than keeping a second copy of its command.
   package:
     runs-on: ubuntu-latest
     env:
@@ -116,7 +122,7 @@ jobs:
           tool: cargo-semver-checks,just
 
       - name: Dry-run the ladder (packages and verifies every publishable crate)
-        run: cargo publish --workspace --dry-run --locked
+        run: just package
 
       - name: Semver preflight (public API against the baseline)
         run: just semver

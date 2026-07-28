@@ -408,7 +408,13 @@ const RESOLUTION_FLOOR: &[(&str, usize)] = &[
     // `cargo doc` became `just doc`, and to none when the wasm-pack build and
     // the bun install became `just playground-build` (DEV-310). Every flag it
     // needs is in the Justfile, where the floor above covers it.
-    (".github/workflows/publish-crates.yml", 2),
+    //
+    // publish-crates.yml went the same way, 2 to 1: its preflight dry run is
+    // `just package` now (DEV-224), so the flag on that resolution is the
+    // Justfile's. What is left here is the upload, and that one stays — no
+    // recipe may push to crates.io, so it is spelled where it runs and its
+    // `--locked` has to be read here.
+    (".github/workflows/publish-crates.yml", 1),
 ];
 
 fn repo_root() -> PathBuf {
