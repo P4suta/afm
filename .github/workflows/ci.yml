@@ -35,67 +35,43 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  # Change-aware gating. `dorny/paths-filter` classifies the PR (or push) diff
-  # so the heavy compile/test/lint matrix is skipped on docs-only changes; the
-  # `ci-success` aggregator (bottom) tolerates the resulting "skipped" results.
-  # Unlike aozora, aozora-flavored-markdown has no build-once `dev-image` job to skip (every job
-  # self-provisions cheaply via the GHCR pull), so this mainly saves the
-  # compile / test / coverage matrix, not an image build.
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
-        id: filter
-        with:
-          filters: |
-            rust:
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'deny.toml'
-              - 'rustfmt.toml'
-              - 'clippy.toml'
-              - 'Dockerfile'
-              - 'docker-compose*.yml'
-              - 'Justfile'
-              - 'playground/**'
-              - '.github/**'
-              # The workflow linters' own policy: editing it has to run them.
-              - 'zizmor.yml'
-              # The release policy, for the same reason. `gate_wiring` reads
-              # this file to decide that no release this repo can run uploads
-              # to crates.io by itself, and that `just release` is held to the
-              # steps that only write files. Both are answers about a file
-              # whose whole purpose is to be read by a tool, so a diff that
-              # edits it alone is exactly the diff those rules exist for.
-              - 'release.toml'
-              # Same rule for the prose linter's policy — and, unlike every
-              # other entry here, for the documents it reads. A Markdown file
-              # used to be outside every gate this repo has, which is why this
-              # filter could call a docs-only change "not rust" and skip the
-              # matrix outright. `just vale` reads them now, so a change to one
-              # is a change a gate can fail on, and the matrix is where it
-              # fails. The heavier legs riding along on a typo fix is the price
-              # of the filter staying one boolean, and it is the cheaper
-              # mistake: the other way round is a gate that cannot see the file
-              # kind it was added for.
-              - '.vale.ini'
-              - 'styles/**'
-              - '**/*.md'
+  # NOTHING HERE CLASSIFIES THE DIFF, AND THAT IS THE DECISION (issue #210).
+  # A `changes` job used to run dorny/paths-filter and publish one boolean the
+  # whole compile/test/lint matrix hung off, so a diff the filter did not
+  # recognise skipped every gate in the repository. It is gone. Neither trigger
+  # above carries `paths:`, which is the same skip spelled a second way, so the
+  # matrix runs on every pull request and every push to main.
+  #
+  # Why the saving was the wrong thing to keep. Three gates read every tracked
+  # file with no pathspec at all — the prose linter, the typo scan, and the
+  # comment scan that also walks the tree for retired repo paths — and two more
+  # own whole trees: the conformance run reads `spec/`, and the packaged-asset
+  # diff reads `dist/`. A gate shaped like that has exactly one correct filter,
+  # which is no filter.
+  #
+  # And by the end the filter was not buying what it was written to buy. It
+  # already watched `crates/**`, `.github/**`, `Justfile`, the manifests, the
+  # playground, and every `.md`, which between them cover every diff anybody
+  # sends. What it still skipped was 27 tracked files and nothing else
+  # (#210 says 26; the set is measured now, and it was 27 on the day it was
+  # written):
+  # `spec/**`, `dist/**`, the per-gate configuration at the root,
+  # `lefthook.yml`, `.config/**`, `bin/**`, `.devcontainer/**`, `.editorconfig`,
+  # `.gitattributes`, `.gitignore`, the two licences and `NOTICE` — each one a
+  # file some gate reads. So the behaviour left in it was the wrong half: it
+  # skipped only where it must not. The sharpest was `.gitattributes`, since
+  # the repo-path scan exists BECAUSE a retired path once survived in that
+  # file, and a change to it skipped the matrix that runs the scan.
+  #
+  # The cost, therefore, is runner time on the diffs that were being skipped
+  # wrongly and on no others: everything else already ran the full matrix. The
+  # direction is held in `crates/xtask/tests/gate_wiring.rs` — reintroducing a
+  # classifier, or a `paths:` on a trigger, fails a test rather than passing
+  # quietly.
 
   # The gate manifest, read straight out of the Justfile. `[group('gate')]` is
   # the declaration; this job is only the reader, and the matrix below is its
   # expansion. Nothing in this file names a gate.
-  #
-  # Deliberately NOT gated on `changes`: a skipped job produces no outputs, and
-  # an empty `fromJSON` in a matrix is a workflow-level error rather than a
-  # skipped job. It is a checkout and one tool install.
   gates:
     runs-on: ubuntu-latest
     outputs:
@@ -135,8 +111,6 @@ jobs:
   # compile error costs one runner instead of every leg.
   check:
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -152,8 +126,7 @@ jobs:
   gate:
     name: gate (${{ matrix.gate }})
     runs-on: ubuntu-latest
-    needs: [changes, gates, check]
-    if: needs.changes.outputs.rust == 'true'
+    needs: [gates, check]
     strategy:
       fail-fast: false
       matrix:
@@ -191,8 +164,6 @@ jobs:
   msrv:
     name: msrv (rust 1.96.0)
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
     env:
       AOZORA_MD_IN_CONTAINER: "1"
     steps:
@@ -253,13 +224,14 @@ jobs:
   # contexts), so adding / removing / renaming a job above never needs a branch
   # protection settings change — and now that the gates are one matrix, adding
   # a gate does not even add a job. Fails iff a job that actually RAN failed or
-  # was cancelled; change-aware SKIPPED jobs report "skipped" and are fine. A
-  # matrix result aggregates its legs, so `gate` covers all of them.
+  # was cancelled; a job that did not run reports "skipped" and is fine, which
+  # since the diff classifier went is `commitlint` on a push to main and
+  # nothing else. A matrix result aggregates its legs, so `gate` covers all of
+  # them.
   ci-success:
     name: ci-success
     if: always()
     needs:
-      - changes
       - gates
       - check
       - gate

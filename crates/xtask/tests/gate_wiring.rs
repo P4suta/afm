@@ -57,6 +57,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fmt;
 use std::fs;
 use std::iter;
 use std::mem;
@@ -9292,163 +9293,607 @@ fn the_prose_rule_is_written_at_a_level_that_makes_the_gate_exit_non_zero() {
     assert!(rules > 0, "there is no rule in `styles/Aozora` to run");
 }
 
-/// The globs the `changes` job classifies a diff with. A skipped `rust` means
-/// no gate in the matrix runs at all.
-fn change_filter_globs(workflow: &str) -> Vec<String> {
-    let lines = job_lines(workflow, "changes")
-        .unwrap_or_else(|| panic!("ci.yml has no `changes` job to read"));
-    let mut out = Vec::new();
-    let mut in_rust = false;
-    for line in lines {
-        let body = line.trim();
-        if let Some(glob) = body.strip_prefix("- ") {
-            let glob = glob.trim();
-            if let Some(literal) = quoted_literal(glob, '\'').filter(|_| in_rust) {
-                out.push(literal.to_owned());
-            }
+/// The `if:` conditions that decide whether a JOB runs, as opposed to a step.
+/// The key is the same at both depths and only the outer one can take a whole
+/// job out of the run, so the depth is what separates them here. The inner one
+/// is not thereby harmless — it is read by [`step_condition`] and held to
+/// [`CONDITIONAL_GATE_STEPS_IN_CI`], because a skipped step leaves the job
+/// reporting success.
+fn job_level_conditions(workflow: &str, job: &str) -> Vec<String> {
+    let lines =
+        job_lines(workflow, job).unwrap_or_else(|| panic!("ci.yml has no `{job}:` job any more"));
+    lines
+        .iter()
+        .filter(|line| line.starts_with("    ") && !line.starts_with("     "))
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .map(|condition| condition.trim().to_owned())
+        .collect()
+}
+
+/// The steps of one job, each as its own lines.
+///
+/// Kept apart rather than read out of the job whole: an `if:` belongs to the
+/// step it is written in, and the question below is which step it takes out of
+/// the run. A reader handed the job would answer for a neighbour's condition —
+/// `commitlint` has one on its tool install and one on its gate, and they are
+/// not the same fact.
+fn job_steps<'a>(workflow: &'a str, job: &str) -> Vec<Vec<&'a str>> {
+    let lines =
+        job_lines(workflow, job).unwrap_or_else(|| panic!("ci.yml has no `{job}:` job any more"));
+    let mut out: Vec<Vec<&str>> = Vec::new();
+    let mut at: Option<usize> = None;
+    for line in nested_block(&lines, "steps") {
+        let body = strip_comment(line);
+        let text = body.trim_start();
+        if text.is_empty() {
             continue;
         }
-        if body.ends_with(':') {
-            in_rust = body == "rust:";
+        let indent = body.len() - text.len();
+        // A `- ` deeper in is a list item inside a step (`with:` inputs, a
+        // shell heredoc); only one at the column the first step opened starts
+        // another step.
+        if text.starts_with("- ") && at.is_none_or(|first| indent == first) {
+            at = Some(indent);
+            out.push(Vec::new());
+        }
+        if let Some(step) = out.last_mut() {
+            step.push(line);
         }
     }
     out
 }
 
-#[test]
-fn the_change_filter_watches_the_files_the_prose_gate_was_added_to_read() {
-    // A gate that cannot be reached is a gate that does not exist, and this
-    // filter is the only thing in the repo that can decide a gate is not
-    // reached. It classified a Markdown-only diff as "not rust" and skipped
-    // the whole matrix — so the gate added because no gate could open a `.md`
-    // file would not have run on a change to one. `just ci` would have been
-    // green locally for a reason CI never checked.
-    //
-    // The filter was already wrong before Vale: `typos` and
-    // `comment-discipline` both read `.md`, and a docs-only diff skipped both.
-    let workflow = read(".github/workflows/ci.yml");
-    let globs = change_filter_globs(&workflow);
-    assert!(
-        globs.len() > 5,
-        "the `changes` filter came out as {globs:?}; the reader is not finding it"
-    );
-    let watched = |path: &str| globs.iter().any(|glob| glob_to_regex(glob).is_match(path));
-
-    // The policy: what the gate bans, and what says which files it reads.
-    for policy in [".vale.ini", "styles/Aozora/RetiredPaths.yml"] {
-        assert!(
-            watched(policy),
-            "a change to `{policy}` does not set the `rust` filter, so editing the prose gate's \
-             own policy skips every gate — the rule `zizmor.yml` is in the filter for."
-        );
+/// The `if:` that decides whether one step runs.
+///
+/// Read at the step's own key column, which is the `- ` column plus two. A
+/// `run: |` script says `if [[ ... ]]` in the middle of a step and means
+/// nothing about whether the step runs, so a substring match would report a
+/// condition where there is none — and a rule that fires on shell would be
+/// carved out until it fired on nothing.
+fn step_condition(step: &[&str]) -> Option<String> {
+    let head = strip_comment(step.first()?);
+    let column = head.len() - head.trim_start().len() + 2;
+    for line in step {
+        let body = strip_comment(line);
+        let text = body.trim_start();
+        let indent = body.len() - text.len();
+        let (indent, text) = text
+            .strip_prefix("- ")
+            .map_or((indent, text), |rest| (indent + 2, rest));
+        if indent == column
+            && let Some(condition) = text.strip_prefix("if:")
+        {
+            return Some(condition.trim().to_owned());
+        }
     }
-
-    // And the documents, which is the part no other entry covers.
-    let mut unwatched: Vec<String> = git_tracked(&["*.md".to_owned()])
-        .into_iter()
-        .filter(|path| !watched(path))
-        .collect();
-    unwatched.sort();
-    assert!(
-        unwatched.is_empty(),
-        "a change to these Markdown files skips the entire gate matrix: {unwatched:?}\n\
-         `just vale`, `just typos` and `just comment-discipline` all read them, so all three \
-         can fail on a diff CI never runs them over."
-    );
+    None
 }
 
-/// Tracked paths the `changes` filter does not watch, each with the gate that
-/// reads it anyway.
+/// The conditions written on steps that run a recipe, in one job.
 ///
-/// Every row is a live hole, not an exemption: a diff touching only these
-/// files skips the whole gate matrix, and the gate named beside it is one
-/// `just ci` would fail on locally. They are pinned so the set cannot grow
-/// while nobody is looking, and so removing one is a visible edit rather than
-/// an accident.
-const UNWATCHED_BY_THE_CHANGE_FILTER: &[(&str, &str)] = &[
+/// A `run:` naming `just`, whatever it hands it: the matrix leg runs
+/// `just "$GATE"`, so a reader that wanted a recipe name would have skipped
+/// the one step that is every gate at once. `uses:` steps are out — the
+/// `tool: committed,just` install puts the runner on the box and runs nothing.
+fn conditional_recipe_steps(workflow: &str, job: &str) -> Vec<String> {
+    job_steps(workflow, job)
+        .into_iter()
+        .filter(|step| {
+            step.iter().any(|line| strip_comment(line).contains("run:"))
+                && step
+                    .iter()
+                    .any(|line| words(strip_comment(line)).any(|word| word == "just"))
+        })
+        .filter_map(|step| step_condition(&step))
+        .collect()
+}
+
+/// Where a condition is written, which is what decides what a skip looks
+/// like from outside: a skipped job reports "skipped", a skipped step leaves
+/// its job reporting success.
+#[derive(Clone, Copy)]
+enum Depth {
+    Job,
+    Step,
+}
+
+impl fmt::Display for Depth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Job => "job",
+            Self::Step => "gate step",
+        })
+    }
+}
+
+/// Every `if:` in ci.yml that can take a gate out of the run, at either depth.
+fn conditions_that_can_skip_a_gate(workflow: &str) -> Vec<(String, String, Depth)> {
+    let mut out = Vec::new();
+    for job in job_keys(workflow) {
+        for condition in job_level_conditions(workflow, &job) {
+            out.push((job.clone(), condition, Depth::Job));
+        }
+        for condition in conditional_recipe_steps(workflow, &job) {
+            out.push((job.clone(), condition, Depth::Step));
+        }
+    }
+    out
+}
+
+/// Lines that use an action whose job is to sort a diff.
+///
+/// A list of names, and the weaker of the two readings for exactly that
+/// reason: an action nobody has heard of leaves nothing to grep for. It earns
+/// its place on the case the glob reader cannot see — an action pointed at a
+/// filter file, whose globs are not in this workflow at all.
+fn path_classifier_actions(workflow: &str) -> Vec<&str> {
+    const SORTERS: &[&str] = &["paths-filter", "changed-files"];
+    jobs_block(workflow)
+        .into_iter()
+        .filter(|line| {
+            let body = strip_comment(line);
+            SORTERS.iter().any(|action| {
+                body.split_whitespace()
+                    .any(|word| word.contains(action) && word.contains('/'))
+            })
+        })
+        .collect()
+}
+
+/// `paths:` / `paths-ignore:` written on a trigger rather than inside a job.
+fn trigger_path_filters(workflow: &str) -> Vec<&str> {
+    top_level_block(workflow, "on")
+        .into_iter()
+        .filter(|line| {
+            let key = strip_comment(line).trim().trim_end_matches(':');
+            key == "paths" || key == "paths-ignore"
+        })
+        .collect()
+}
+
+/// Every job in ci.yml whose execution is conditional, with the condition and
+/// the reason it is not a diff being sorted out of the run.
+///
+/// The list is the rule: a job-level `if:` that is not written here fails,
+/// whatever it says. The `changes` filter was three of these at once, and each
+/// read plausibly on its own line.
+const CONDITIONAL_JOBS_IN_CI: &[(&str, &str, &str)] = &[
     (
-        "spec/**",
-        "`just spec` reads the conformance sources and the expectation JSON",
+        "commitlint",
+        "github.event_name == 'pull_request'",
+        "the event kind, not the diff. The recipe lints a base..head range, and a push to main \
+         has no such range — the job is skipped where its question does not exist, not where \
+         somebody decided the answer was cheap.",
     ),
     (
-        "dist/**",
-        "`just dist-assets-check` regenerates the completions and man page and diffs them",
-    ),
-    (
-        "{_typos,bacon,cliff,committed,dist-workspace,mise}.toml",
-        "a gate's own configuration: `just typos` reads one of these, `just commitlint` another",
-    ),
-    (
-        "lefthook.yml",
-        "the hook manifest `gate_wiring` reads to decide a tool is executed",
-    ),
-    (
-        ".config/**",
-        "the second half of the mise declaration `just setup` installs from",
-    ),
-    ("bin/**", "the wrappers a contributor runs the CLI through"),
-    (
-        ".devcontainer/**",
-        "the container definition ADR-0002 makes the only place code runs",
-    ),
-    (
-        "{.editorconfig,.gitattributes,.gitignore,LICENSE-APACHE,LICENSE-MIT,NOTICE}",
-        "read by `just vale` and by `comment-discipline`'s repo-path scan, which was written \
-         for `.gitattributes` and CODEOWNERS in the first place",
+        "ci-success",
+        "always()",
+        "the aggregator, and the only condition here that widens rather than narrows: without it \
+         a failed upstream job would leave the one required check unreported, which reads as \
+         pending forever instead of red.",
     ),
 ];
 
-#[test]
-fn the_files_a_diff_can_hide_behind_are_the_ones_measured_here() {
-    // The debt the rule above stops short of. Widening the filter to `.md`
-    // fixed the file kind Vale was added for and left the shape intact: three
-    // gates read every tracked file, and the filter watches a hand-written
-    // subset of them, so there is still a diff that skips every gate in the
-    // repo. The sharpest of them is `.gitattributes` — `comment-discipline`'s
-    // repo-path scan exists *because* a retired path survived there, and a
-    // change to it skips the matrix that runs the scan.
-    //
-    // Pinned rather than fixed: the correct filter for three whole-worktree
-    // gates is one that never skips, and deleting change-gating is a decision
-    // about CI cost rather than a test's to make. What this holds is the
-    // direction — the set below may shrink, and may not grow.
-    let workflow = read(".github/workflows/ci.yml");
-    let globs = change_filter_globs(&workflow);
-    let unwatched: BTreeSet<String> = git_tracked(&[])
-        .into_iter()
-        .filter(|path| !globs.iter().any(|glob| glob_to_regex(glob).is_match(path)))
-        .collect();
+/// Every step in ci.yml that runs a recipe and does not always run.
+///
+/// One row, and it is a hole rather than an exemption. A conditional step is
+/// the `changes` filter one level down and strictly worse: the job it sits in
+/// still reports SUCCESS, so `ci-success` goes green over a gate that never
+/// executed, where a skipped job at least shows as skipped.
+const CONDITIONAL_GATE_STEPS_IN_CI: &[(&str, &str, &str)] = &[(
+    "commitlint",
+    "github.event.pull_request.user.login != 'dependabot[bot]'",
+    "the one gate this repo knowingly does not run, and it is written down because it is not \
+     free: a bot PR merges with its commit subjects unlinted, on the grounds that the squash \
+     subject a maintainer writes is what actually lands on main.",
+)];
 
-    let known: Vec<Regex> = UNWATCHED_BY_THE_CHANGE_FILTER
-        .iter()
-        .map(|(glob, _)| glob_to_regex(glob))
-        .collect();
-    let mut fresh: Vec<&String> = unwatched
-        .iter()
-        .filter(|path| !known.iter().any(|known| known.is_match(path)))
-        .collect();
-    fresh.sort();
+#[test]
+fn nothing_classifies_a_diff_into_a_run_with_no_gates_in_it() {
+    // A gate that cannot be reached is a gate that does not exist, and for a
+    // year the only thing in this repo that could decide a gate was not
+    // reached was a `changes` job: dorny/paths-filter, one `rust` boolean, and
+    // the whole compile/test/lint matrix hanging off it. It classified a
+    // Markdown-only diff as "not rust" and skipped everything — so the prose
+    // gate, added because no gate could open a `.md` file, would not have run
+    // on a change to one. Widening the filter to `**/*.md` (#208) fixed that
+    // file kind and left the shape: three gates read every tracked file with
+    // no pathspec at all, `spec` and `dist-assets-check` read whole trees of
+    // their own, and the filter still watched a hand-written subset. Twenty-
+    // seven tracked files were left that a diff could hide behind, the
+    // sharpest of them `.gitattributes` — the repo-path scan exists BECAUSE a
+    // retired path survived in that file, and a change to it skipped the
+    // matrix that runs the scan.
+    //
+    // The filter is gone (#210), and this is the direction that keeps it gone.
+    // Four ways back in: the classifier itself, a `paths:` on a trigger, a job
+    // that runs only under some condition, and a STEP that does. The last one
+    // is the sharpest and was the one this rule first left open — a skipped
+    // job reports "skipped", a skipped step leaves its job reporting success.
+    //
+    // The two condition rules are lists rather than shapes on purpose. Reading
+    // the condition and judging it — banning `needs.`, say — passes anything
+    // spelled a different way, and the ways are not enumerable: a label, a
+    // commit subject, an output of a step in the same job. What is enumerable
+    // is the conditions this file is meant to have.
+    let workflow = read(".github/workflows/ci.yml");
+    let jobs = job_keys(&workflow);
     assert!(
-        fresh.is_empty(),
-        "these tracked files joined the set a diff can hide behind: {fresh:?}\n\
-         A change to one of them skips the entire gate matrix while `just ci` still reads it. \
-         Add the path to ci.yml's `changes` filter, or to UNWATCHED_BY_THE_CHANGE_FILTER with \
-         the gate that reads it."
+        jobs.len() >= 5,
+        "ci.yml came out with jobs {jobs:?}; the reader is not finding the `jobs:` mapping"
     );
 
-    let dead: Vec<&str> = UNWATCHED_BY_THE_CHANGE_FILTER
+    // Asked twice, because either half alone names a vendor or a spelling.
+    let classifiers = path_classifier_actions(&workflow);
+    assert!(
+        classifiers.is_empty(),
+        "ci.yml classifies the diff again: {classifiers:?}\n\
+         `just vale`, `just typos` and `just comment-discipline` read every tracked file, so the \
+         only filter that is right for them is no filter — and the one this replaced skipped \
+         exactly the files it should not have."
+    );
+    assert!(
+        diff_classifier(&workflow).is_empty(),
+        "ci.yml carries globs that sort a diff. Which files they name is the next rule's \
+         question; this one is that sorting a diff at all is what was decided against — a filter \
+         wide enough to be harmless is a filter somebody will narrow."
+    );
+
+    // The same skip spelled at the trigger instead of in a job, where nothing
+    // downstream would show it: a workflow that never starts reports nothing
+    // at all, and branch protection is satisfied by a check that never ran.
+    let trigger_paths = trigger_path_filters(&workflow);
+    assert!(
+        trigger_paths.is_empty(),
+        "ci.yml's `on:` block filters by path: {trigger_paths:?}\n\
+         A diff outside the list does not skip the matrix, it skips the workflow — so there is \
+         no `ci-success` to be required at all."
+    );
+
+    let mut conditional: BTreeSet<(String, String)> = BTreeSet::new();
+    for (job, condition, depth) in conditions_that_can_skip_a_gate(&workflow) {
+        let (accounted, list, cost) = match depth {
+            Depth::Job => (
+                CONDITIONAL_JOBS_IN_CI,
+                "CONDITIONAL_JOBS_IN_CI",
+                "A gate something can answer away is a gate: the `changes` filter was three of \
+                 these, and `if: always()` on the aggregator is why every one of them stayed \
+                 green.",
+            ),
+            Depth::Step => (
+                CONDITIONAL_GATE_STEPS_IN_CI,
+                "CONDITIONAL_GATE_STEPS_IN_CI",
+                "The step is skipped and the job it is in succeeds, so the check reports green \
+                 having executed nothing — the #210 defect with the evidence removed.",
+            ),
+        };
+        assert!(
+            accounted
+                .iter()
+                .any(|(named, allowed, _)| *named == job && *allowed == condition),
+            "ci.yml's `{job}` {depth} runs only when `{condition}`, which is not a condition this \
+             workflow is meant to carry. {cost} Add it to {list} with what it costs, or take the \
+             condition off."
+        );
+        conditional.insert((job, condition));
+    }
+
+    // Both lists the other way round. A row for a condition that is no longer
+    // written is a rule that has stopped being a measurement — and it is the
+    // shape that lets the next one in, since a list nobody has to keep true is
+    // a list nobody reads before adding to.
+    let dead: Vec<String> = CONDITIONAL_JOBS_IN_CI
         .iter()
-        .map(|(glob, _)| *glob)
-        .filter(|glob| {
-            let pattern = glob_to_regex(glob);
-            !unwatched.iter().any(|path| pattern.is_match(path))
+        .chain(CONDITIONAL_GATE_STEPS_IN_CI)
+        .filter(|(job, condition, _)| {
+            !conditional.contains(&((*job).to_owned(), (*condition).to_owned()))
         })
+        .map(|(job, condition, _)| format!("{job}: `{condition}`"))
         .collect();
     assert!(
         dead.is_empty(),
-        "these are recorded as unwatched and are not: {dead:?}\n\
-         The filter caught up with them; drop the row so the list stays the measurement it \
-         claims to be."
+        "these jobs are accounted for as conditional and are not: {dead:?}\n\
+         Drop the row, so the list stays the account of this workflow it claims to be."
+    );
+}
+
+/// Three steps, and every way the step reader can be wrong in one job: a `- `
+/// nested inside a step, a shell `if` inside a `run:` script, and a condition
+/// on the step after the one it would be blamed on.
+const STEPS_THE_READER_HAS_TO_TELL_APART: &str = concat!(
+    "jobs:\n",
+    "  gate:\n",
+    "    steps:\n",
+    "      - uses: actions/checkout@0000000\n",
+    "        with:\n",
+    "          persist-credentials: false\n",
+    "      - name: Read the gate manifest\n",
+    "        run: |\n",
+    "          if [[ \"$native\" != \"commitlint\" ]]; then\n",
+    "            exit 1\n",
+    "          fi\n",
+    "          just gates\n",
+    "      - name: Run the gate\n",
+    "        if: steps.filter.outputs.rust == 'true'\n",
+    "        run: just \"$GATE\"\n",
+);
+
+#[test]
+fn a_step_condition_is_read_off_its_own_step_and_not_a_neighbours() {
+    // The rule above is only as good as where it thinks a step starts and
+    // ends. Two ways it could report nothing on the workflow that has the
+    // defect: reading `if [[ ... ]]` in a script as a condition makes the rule
+    // fire on an honest file until somebody carves it out, and blaming the
+    // wrong step makes it name a step that would pass review.
+    let steps = job_steps(STEPS_THE_READER_HAS_TO_TELL_APART, "gate");
+    assert_eq!(
+        steps.len(),
+        3,
+        "the reader split the job into {} steps; `with:` inputs and a shell script are inside a \
+         step, not steps of their own",
+        steps.len()
+    );
+    assert_eq!(step_condition(&steps[0]), None);
+    assert_eq!(
+        step_condition(&steps[1]),
+        None,
+        "a shell `if` in a `run:` script was read as the step's own condition"
+    );
+    assert_eq!(
+        step_condition(&steps[2]).as_deref(),
+        Some("steps.filter.outputs.rust == 'true'"),
+        "the condition that takes the whole gate matrix out of the run was not read"
+    );
+}
+
+/// What ci.yml sorts a diff with: the globs that make a diff worth running
+/// for, and the globs that make one not.
+struct DiffClassifier {
+    watched: Vec<Regex>,
+    ignored: Vec<Regex>,
+}
+
+impl DiffClassifier {
+    /// Does this workflow sort a diff at all?
+    ///
+    /// Not the same question as whether anything is hidden today. A filter
+    /// widened until it watches everything hides nothing and is still a filter
+    /// — the state this one was in when it was deleted, with the wrong 27
+    /// files left in it.
+    fn is_empty(&self) -> bool {
+        self.watched.is_empty() && self.ignored.is_empty()
+    }
+
+    /// Would a diff touching only `path` be sorted out of the run?
+    ///
+    /// Both halves, because the two spellings answer opposite ways: an
+    /// unmatched glob hides a file only when there is an inclusive list to be
+    /// outside of, and a matched one hides it only when the list is the
+    /// `-ignore` kind. A reader that folded them together would call a
+    /// `paths-ignore` of the whole tree "everything is watched".
+    fn hides(&self, path: &str) -> bool {
+        if self.ignored.iter().any(|glob| glob.is_match(path)) {
+            return true;
+        }
+        !self.watched.is_empty() && !self.watched.iter().any(|glob| glob.is_match(path))
+    }
+}
+
+/// Every glob ci.yml classifies a diff with, in every spelling one can be
+/// written in: `paths:` / `paths-ignore:` on a trigger, and the `filters:` or
+/// `files:` a path-classifier action takes as its input.
+///
+/// One reader for all of them because it is one question — which diffs this
+/// workflow decides are worth running for — and because naming the action
+/// that asks it is how a rule ends up meaning "not that vendor" instead of
+/// "not this".
+fn diff_classifier(workflow: &str) -> DiffClassifier {
+    const WATCHES: &[&str] = &["paths", "filters", "files"];
+    const IGNORES: &[&str] = &["paths-ignore", "files-ignore"];
+    let mut watched = Vec::new();
+    let mut ignored = Vec::new();
+    let mut opened: Option<(usize, bool)> = None;
+    for raw in workflow.lines() {
+        let body = strip_comment(raw);
+        let text = body.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let indent = body.len() - body.trim_start().len();
+        if let Some((column, subtracts)) = opened {
+            if indent > column {
+                // A list item, or — where the action takes its globs as one
+                // newline-separated scalar rather than a list — a line that is
+                // not a mapping key. `filters:` nests its globs under a name
+                // and `files:` does not, so a reader that knew only the list
+                // form would read one vendor's classifier and be blind to the
+                // next one's.
+                let item = match text.strip_prefix("- ") {
+                    Some(rest) => Some(rest.trim()),
+                    None if text.ends_with(':') || text.contains(": ") => None,
+                    None => Some(text),
+                };
+                if let Some(item) = item {
+                    // A `!glob` subtracts from what a filter watches, so it
+                    // belongs with the other spelling of "not this one".
+                    let item = unquoted(item);
+                    match item.strip_prefix('!') {
+                        Some(negated) => ignored.push(negated.to_owned()),
+                        None if subtracts => ignored.push(item),
+                        None => watched.push(item),
+                    }
+                }
+                continue;
+            }
+            opened = None;
+        }
+        let Some((key, rest)) = text.split_once(':') else {
+            continue;
+        };
+        let subtracts = IGNORES.contains(&key);
+        if !subtracts && !WATCHES.contains(&key) {
+            continue;
+        }
+        // `filters: |` opens a block scalar and `paths:` a plain list; either
+        // way the globs are the items indented under it.
+        let rest = rest.trim().trim_start_matches(['|', '>', '-', '+']).trim();
+        if rest.is_empty() {
+            opened = Some((indent, subtracts));
+            continue;
+        }
+        let Some(items) = rest
+            .strip_prefix('[')
+            .and_then(|list| list.strip_suffix(']'))
+        else {
+            continue;
+        };
+        for item in items
+            .split(',')
+            .map(|item| unquoted(item.trim()))
+            .filter(|item| !item.is_empty())
+        {
+            if subtracts || item.starts_with('!') {
+                ignored.push(item.trim_start_matches('!').to_owned());
+            } else {
+                watched.push(item);
+            }
+        }
+    }
+    let compile = |globs: Vec<String>| globs.iter().map(|glob| glob_to_regex(glob)).collect();
+    DiffClassifier {
+        watched: compile(watched),
+        ignored: compile(ignored),
+    }
+}
+
+/// A YAML scalar with its quotes off, if it had any.
+fn unquoted(value: &str) -> String {
+    quoted_literal(value, '\'')
+        .or_else(|| quoted_literal(value, '"'))
+        .unwrap_or(value)
+        .to_owned()
+}
+
+/// The classifier this repository actually shipped, kept as the reader's
+/// control. Both spellings are in it: the trigger form, which skips the
+/// workflow outright, and the action form, which skipped every job that hung
+/// off its one boolean.
+const CLASSIFIER_THAT_WAS_DELETED: &str = concat!(
+    "on:\n",
+    "  pull_request:\n",
+    "    branches: [main]\n",
+    "    paths: ['spec/**']\n",
+    "\n",
+    "jobs:\n",
+    "  changes:\n",
+    "    steps:\n",
+    "      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2\n",
+    "        id: filter\n",
+    "        with:\n",
+    "          filters: |\n",
+    "            rust:\n",
+    "              - 'crates/**'\n",
+    "              - 'Cargo.toml'\n",
+    "              - '.github/**'\n",
+    "              - '**/*.md'\n",
+);
+
+/// The same classification by another vendor, whose globs are a newline-
+/// separated scalar and not a list. The rule is "nothing sorts a diff", not
+/// "not that action" — and this is the shape the first reader was blind to.
+const THE_SAME_SORTING_BY_ANOTHER_HAND: &str = concat!(
+    "jobs:\n",
+    "  changes:\n",
+    "    steps:\n",
+    "      - uses: tj-actions/changed-files@0000000\n",
+    "        id: sorted\n",
+    "        with:\n",
+    "          files: |\n",
+    "            crates/**\n",
+    "            **/*.md\n",
+);
+
+#[test]
+fn a_diff_sorted_out_of_the_run_is_one_the_reader_reports() {
+    // The rule below answers "nothing is hidden", and the cheapest way for it
+    // to answer that is to have found nothing to read. This is what says it
+    // did not: the same reader, over the classifier that was actually here,
+    // reporting the same files the issue counted.
+    let classifier = diff_classifier(CLASSIFIER_THAT_WAS_DELETED);
+    for hidden in [
+        ".gitattributes",
+        "NOTICE",
+        "lefthook.yml",
+        "bin/aozora-flavored-markdown",
+        ".config/mise/config.toml",
+    ] {
+        assert!(
+            classifier.hides(hidden),
+            "the reader says a diff touching only `{hidden}` reached the gate matrix under the \
+             filter that skipped it. Reading nothing looks exactly like this."
+        );
+    }
+    // `spec/**` is watched by the trigger and by nothing else, so it is the
+    // one that says both spellings were read and not just the first.
+    for watched in [
+        "spec/commonmark-0.31.2.json",
+        "Cargo.toml",
+        "README.md",
+        "crates/xtask/src/main.rs",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            !classifier.hides(watched),
+            "the reader says `{watched}` was hidden by a filter that watched it — it is reporting \
+             more than it read, which would make the rule below pass on a filter that is really \
+             there."
+        );
+    }
+
+    let elsewhere = diff_classifier(THE_SAME_SORTING_BY_ANOTHER_HAND);
+    assert!(
+        !elsewhere.is_empty() && elsewhere.hides(".gitattributes"),
+        "a classifier written as a newline-separated scalar read as no classifier at all. Every \
+         rule here would pass on the workflow that has the defect, which is how a net comes to \
+         mean `not that vendor` instead of `not this`."
+    );
+}
+
+#[test]
+fn no_tracked_file_can_hide_a_diff_from_the_gate_matrix() {
+    // Acceptance, stated over files rather than over mechanisms: a diff
+    // touching only `.gitattributes` runs the gate matrix. The mechanisms are
+    // held above; this is the thing they were held for, and it is the half a
+    // reader can check against the repository rather than against the
+    // workflow's own vocabulary.
+    //
+    // Twenty-seven tracked files failed this before #210 — `spec/`, `dist/`,
+    // every per-gate configuration at the root, `lefthook.yml`, `.config/`,
+    // `bin/`, `.devcontainer/`, `.editorconfig`, `.gitattributes`,
+    // `.gitignore`, the licences and `NOTICE`. Each one is read by a gate that
+    // would have failed on it locally. The issue counted 26 by hand, which is
+    // the other half of what this rule replaces: the set was written down once
+    // and is measured now.
+    let tracked = git_tracked(&[]);
+    assert!(
+        tracked.contains(".gitattributes"),
+        "the repository no longer tracks `.gitattributes`, so this rule is measuring a tree that \
+         does not contain the file it was written for"
+    );
+
+    let classifier = diff_classifier(&read(".github/workflows/ci.yml"));
+    let hidden: Vec<&String> = tracked
+        .iter()
+        .filter(|path| classifier.hides(path))
+        .collect();
+    let shown: Vec<&&String> = hidden.iter().take(20).collect();
+    assert!(
+        hidden.is_empty(),
+        "a diff touching only one of these {} tracked files skips the gate matrix: {shown:?}\n\
+         `just vale`, `just typos` and `just comment-discipline` read every tracked file with no \
+         pathspec at all, and `just spec` and `just dist-assets-check` own whole trees, so a gate \
+         can fail locally on a file CI never ran it over.",
+        hidden.len()
     );
 }
 
