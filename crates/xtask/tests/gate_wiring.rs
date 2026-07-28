@@ -5377,13 +5377,28 @@ fn derived_sweeps(justfile: &str) -> BTreeSet<String> {
 
 /// Whole-set fuzz recipes that read no target list, each with the reason the
 /// list is not theirs to read.
-const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[(
-    "fuzz-build",
-    "`cargo fuzz build` with no target argument compiles every `[[bin]]` the fuzz \
-     manifest declares. That enumeration is cargo-fuzz's own and is one step closer \
-     to the registry than `cargo fuzz list` is, so reading the list here would be a \
-     copy rather than a cure",
-)];
+const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[
+    (
+        "fuzz-build",
+        "`cargo fuzz build` with no target argument compiles every `[[bin]]` the fuzz \
+         manifest declares. That enumeration is cargo-fuzz's own and is one step closer \
+         to the registry than `cargo fuzz list` is, so reading the list here would be a \
+         copy rather than a cure",
+    ),
+    (
+        "fuzz-lock",
+        "it acts on the fuzz workspace's lockfile and not on its targets: one \
+         `cargo update` re-resolves the single graph all four `[[bin]]`s are built \
+         from, so there is no per-target step for a list to drive. Recorded here \
+         rather than filtered out of `whole_set_fuzz_recipes`, and that carve-out is \
+         a real cost — the classifier's premise, that a recipe taking no argument \
+         acts on every registered target, is false for this one. Narrowing the \
+         premise is worse: any rule that let this recipe out (\"names no target \
+         directory\", \"never reaches cargo-fuzz\") would also let out a sweep that \
+         globbed `fuzz/corpus/*` instead of asking `cargo fuzz list`, which is the \
+         hand-written listing the whole check exists to keep from growing back",
+    ),
+];
 
 /// Fuzz recipes that spell a target's name themselves, each with the reason.
 /// Every entry is a LIVE DEFECT rather than an exemption: the name is a
@@ -5807,26 +5822,27 @@ fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
 fn the_lockfile_that_stands_in_for_the_missing_flag_is_one_a_clone_would_get() {
     // cargo-fuzz has no `--locked` and no way to hand one to the `cargo build`
     // it shells out to, so the fuzz workspace's resolution is bound by a
-    // committed lockfile instead, and `just fuzz-build` fails when a build
-    // rewrote it. That substitute is `git diff --quiet -- fuzz/Cargo.lock` —
-    // which says nothing at all about a file git is not tracking. An ignored
-    // or simply un-added lockfile makes the gate a silent no-op with every
-    // message in it still perfectly accurate, and `fuzz/.gitignore` listed
-    // `Cargo.lock` until this PR.
+    // committed lockfile instead. Committed is the whole of it: a file a clone
+    // does not get is re-resolved from scratch on the next build, and every
+    // question the repo asks about the fuzz graph — `just fuzz-build`'s "did
+    // this build rewrite it", `just verify-version-pins`' "do the two lockfiles
+    // agree" — is then asked of whatever that resolution happened to produce.
+    // `fuzz/.gitignore` listed `Cargo.lock` until DEV-293, so this is a state
+    // the repo has really been in, with every message in those gates still
+    // perfectly accurate.
     //
-    // What this asks is "would a clone get it", which covers the ignore rule
-    // and does not yet cover the index: on the branch that first adds the file,
-    // it is carried and still untracked, and `git diff` reports nothing about
-    // an untracked path either. That gap closes when the file is committed and
-    // stays closed — nothing can make a tracked file untracked by accident —
-    // but until then the recipe's check is the weaker of the two.
+    // "Would a clone get it" rather than "is it committed": the ignore rule is
+    // what silently un-ships a file, and it is the half a person does not
+    // look at. On the branch that first adds the file it is carried and still
+    // untracked, which this cannot tell apart — a gap that closes at the first
+    // commit and cannot reopen.
     let carried = git_carried(FUZZ_LOCK);
     assert!(
         carried.contains(FUZZ_LOCK),
-        "git would not carry {FUZZ_LOCK} to the next clone. `just fuzz-build` detects a \
-         re-resolution with `git diff` against that file, and `git diff` over an untracked or \
-         ignored path reports nothing — so the check passes on every build, including the ones \
-         that resolved a different graph than the library ships."
+        "git would not carry {FUZZ_LOCK} to the next clone. It is the only thing binding the \
+         fuzz workspace's resolution — cargo-fuzz takes no `--locked` — so without it every \
+         build resolves its own graph and the gates over that file compare a fresh resolution \
+         against itself."
     );
 }
 

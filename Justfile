@@ -328,23 +328,90 @@ _fuzz-targets:
 # `fuzz/Cargo.toml` reach rustc only when something compiles the crate, and
 # before this recipe nothing did.
 #
-# The `git diff` at the end is this repo's `--locked` (see the policy header
+# The comparison at the end is this repo's `--locked` (see the policy header
 # above): cargo-fuzz has no such flag, so a re-resolution is detected by the
 # file it rewrote instead of refused before it happened.
+#
+# Against a copy taken a line earlier, and NOT against HEAD. `git diff --quiet`
+# stood here and answers a different question — "does this file differ from the
+# last commit" — which is the same answer on a clean CI checkout and the wrong
+# one everywhere else. A branch carrying a lockfile this build did not touch
+# (`just fuzz-lock` run, diff under review, nothing committed yet: the exact
+# workflow the recipe below asks for) failed this gate with the file's checksum
+# unchanged across the build and a message saying the build had rewritten it.
+# A gate that is red on the correct state is a gate people learn to scroll
+# past. The committed-ness of the file is not this recipe's question either:
+# `lock_binding.rs` asks whether a clone would get it, and the two lockfiles
+# disagreeing is what `verify-version-pins` fails on.
 [group('gate')]
 [group('fuzz')]
 fuzz-build:
     #!/usr/bin/env bash
     set -euo pipefail
     lock="crates/aozora-flavored-markdown/fuzz/Cargo.lock"
+    before=$(mktemp)
+    trap 'rm -f "$before"' EXIT
+    cp "$lock" "$before"
     {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo +nightly fuzz build --target {{_FUZZ_TRIPLE}}'
-    if ! git diff --quiet -- "$lock"; then
+    if ! cmp -s "$before" "$lock"; then
         printf 'fuzz-build: the build re-resolved %s\n' "$lock" >&2
         printf '  The fuzz workspace is pinned by that lockfile the way the workspace is by\n' >&2
         printf '  its own. Review the diff below and commit it, or restore the file.\n' >&2
-        git --no-pager diff -- "$lock" >&2
+        printf '  `just fuzz-lock` is the same re-resolution without the build.\n' >&2
+        diff -u "$before" "$lock" >&2 || true
         exit 1
     fi
+
+# `crates/aozora-flavored-markdown/fuzz/Cargo.lock` is a SECOND lockfile, and
+# nothing moves it when the first one moves. Every cargo bump — Dependabot's
+# `Cargo.lock` edit, `cargo xtask
+# aozora-bump`'s `cargo update -p aozora`, a pin changed by hand — leaves
+# `fuzz/Cargo.lock` on the version before, and a fuzz target built from it
+# fuzzes a parser this repo does not ship. That drift is what
+# `verify-version-pins` and `lock_binding.rs` fail on; this is the one command
+# that clears it, and both messages name it.
+#
+# Dependabot cannot own this file, which is why the fix is a recipe and not a
+# `directories:` entry in `.github/dependabot.yml`: the fuzz manifest declares
+# `libfuzzer-sys`, `aozora` and two path dependencies, and NONE of the versions
+# that drift are among them. `comrak` reaches this graph through the path
+# dependency on `aozora-flavored-markdown`, whose `comrak.workspace = true`
+# reads the ROOT manifest — so there is nothing in `fuzz/Cargo.toml` for
+# Dependabot to raise a comrak PR against, and a bump that arrives any other
+# way (aozora-bump, a hand edit) was never Dependabot's to carry either.
+#
+# `cargo update --workspace` rather than a re-generate: it is the sub-command
+# whose whole job is rewriting a lockfile (hence its exemption from the
+# `--locked` policy at the top of this file), in its minimal form. It re-locks
+# the workspace member and touches a registry pin only where the recorded
+# version has stopped satisfying a requirement — which is exactly the bumped
+# crate, because the workspace pin moving is what put the old entry out of
+# range. `libfuzzer-sys`, `arbitrary` and `jobserver`, the packages only this
+# graph has, keep the versions they had.
+#
+# `just fuzz-build` also rewrites the file, as a side effect of compiling four
+# targets against libFuzzer under nightly, and then fails because it did. That
+# is the gate; this is the fix.
+#
+# Re-resolve the fuzz workspace's lockfile onto the graph the workspace ships.
+[group('fuzz')]
+fuzz-lock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lock="crates/aozora-flavored-markdown/fuzz/Cargo.lock"
+    # What this run changed, which is not the same question as what differs
+    # from HEAD: on a branch that already carries the re-resolution, a
+    # `git diff` is non-empty and this recipe did nothing.
+    before=$(mktemp)
+    cp "$lock" "$before"
+    {{_dev}} cargo update --manifest-path crates/aozora-flavored-markdown/fuzz/Cargo.toml --workspace
+    if cmp -s "$before" "$lock"; then
+        printf 'fuzz-lock: %s already resolved the graph the workspace ships; unchanged\n' "$lock"
+    else
+        printf 'fuzz-lock: re-resolved %s — review the diff below and commit it\n' "$lock"
+        git --no-pager diff -- "$lock"
+    fi
+    rm -f "$before"
 
 # Run the named fuzz target with arbitrary args (escape hatch for advanced use).
 [group('fuzz')]
@@ -1101,7 +1168,7 @@ verify-version-pins:
                 printf '[OK] %s resolved: %s (Cargo.lock / fuzz/Cargo.lock agree)\n' \
                     "$dep" "$dep_ws"
             else
-                printf '[!!] %s resolution drift: Cargo.lock=%s fuzz/Cargo.lock=%s\n' \
+                printf '[!!] %s resolution drift: Cargo.lock=%s fuzz/Cargo.lock=%s — run `just fuzz-lock`\n' \
                     "$dep" "$dep_ws" "$dep_fuzz" >&2
                 fail=1
             fi
