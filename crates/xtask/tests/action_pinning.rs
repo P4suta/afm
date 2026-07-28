@@ -60,9 +60,11 @@ const USES_FLOOR: &[(&str, usize)] = &[
     // `report-failure` action now. A floor tracks the file as it is.
     (".github/workflows/audit.yml", 7),
     // ci.yml fell from 20 to 14 when eleven hand-written jobs collapsed into
-    // one matrix generated from the Justfile's `[group('gate')]`. Fewer jobs,
-    // not less reading: a floor tracks the file as it is.
-    (".github/workflows/ci.yml", 14),
+    // one matrix generated from the Justfile's `[group('gate')]`, and from 14
+    // to 12 when the `changes` job went (#210) and took a checkout and the
+    // paths-filter that classified the diff with it. Fewer jobs, not less
+    // reading: a floor tracks the file as it is.
+    (".github/workflows/ci.yml", 12),
     (".github/workflows/codeql.yml", 3),
     (".github/workflows/dependency-review.yml", 2),
     (".github/workflows/dev-image.yml", 5),
