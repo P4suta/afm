@@ -50,14 +50,17 @@ That nightly run also **files a GitHub issue per newly disclosed
 advisory** (`rustsec/audit-check`), rather than only turning a workflow
 red where nobody is looking. Dependabot alerts and Dependabot security
 updates are both enabled, so GitHub raises the same finding independently
-and opens the version-bump pull request for it.
+and opens the version-bump pull request for it. Both of those are
+repository settings rather than files, so the same workflow asks GitHub
+for them on every run and fails when either is switched off or paused:
+the sentence before this one is checked rather than asserted.
 
-That reporter answers for RustSec advisories and stops there, so the other
-two jobs of that workflow — the cargo-deny leg, and the watch over
-`dependency-review.yml`'s per-package licence exemptions — each file a
-rolling issue of their own on a failed scheduled run. Every leg of the
-nightly has somewhere to report, and a repeat failure updates nothing
-while the first issue is still open.
+That reporter answers for RustSec advisories and stops there, so every
+other job of that workflow — the cargo-deny leg, the watch over
+`dependency-review.yml`'s per-package licence exemptions, and the
+Dependabot posture check — files a rolling issue of its own on a failed
+scheduled run. Every leg of the nightly has somewhere to report, and a
+repeat failure updates nothing while the first issue is still open.
 
 `just audit` runs with `--deny warnings`, so an `unmaintained`, `unsound`
 or `yanked` crate fails it too and not just a live vulnerability —

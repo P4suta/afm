@@ -7369,6 +7369,118 @@ fn grants_write(permissions: &[&str], permission: &str) -> bool {
         .any(|line| strip_comment(line).trim() == wanted)
 }
 
+/// Every step of a job that files something, paired with the [`Filer`] it
+/// files by. Every one of them, in the order they run: which is the whole
+/// difference between this and the `position` it replaced.
+fn filer_steps(lines: &[&str]) -> Vec<(usize, &'static Filer)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| {
+            let reference = step_uses(line)?;
+            let filer = FILERS.iter().find(|filer| reference.contains(filer.uses))?;
+            Some((at, filer))
+        })
+        .collect()
+}
+
+/// What one reporter's `if:` narrows it to, when that is a comparison against
+/// a step output: the output read, whether the test is `==`, and the literal
+/// it is read against.
+///
+/// A condition on the EVENT is deliberately not one of these. Every reporter
+/// here carries `github.event_name == 'schedule'`, and the rule below is only
+/// ever asked about the scheduled run — so that half is this rule's own scope
+/// rather than a gap in the job's coverage.
+fn output_test(step: &[&str]) -> Option<(String, bool, String)> {
+    let compare =
+        Regex::new(r"(steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'")
+            .expect("the comparison pattern is a literal");
+    step.iter()
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .find_map(|expression| {
+            compare.captures(expression).map(|caught| {
+                (
+                    caught[1].to_owned(),
+                    &caught[2] == "==",
+                    caught[3].to_owned(),
+                )
+            })
+        })
+}
+
+/// Do a job's reporters, between them, answer for every way that job can fail?
+///
+/// Asked only of a job [`reporting_channel`] has already said yes about, so
+/// every step read here is one that can run on a failing run. What is left is
+/// the second question a job with more than one reporter raises and a job with
+/// one cannot: a reporter behind `steps.<id>.outputs.<name> == 'x'` answers
+/// for SOME failures, and the rest of them reach whoever is watching the other
+/// conditions.
+///
+/// audit.yml's `dependabot` job is the first here to split that way, and the
+/// split is the point of it — "the posture is off" and "the posture could not
+/// be read" are different findings for different people, and filing the second
+/// under the first is the false alarm that teaches a reader to stop opening the
+/// channel. A pair like that is a channel only while it is a PARTITION.
+/// Conditions that both narrow leave whatever neither names reaching nobody;
+/// conditions that overlap file two issues for one run, which is the duplicate
+/// the rolling reporter was built to prevent.
+fn every_failure_reaches_a_channel(lines: &[&str]) -> Result<(), String> {
+    let mut narrowed: BTreeMap<String, Vec<(bool, String)>> = BTreeMap::new();
+    let mut answers_for_everything = false;
+    for (at, _) in filer_steps(lines) {
+        match output_test(&step_around(lines, at)) {
+            None => answers_for_everything = true,
+            Some((output, equals, literal)) => {
+                narrowed.entry(output).or_default().push((equals, literal));
+            }
+        }
+    }
+    if answers_for_everything || narrowed.is_empty() {
+        return Ok(());
+    }
+
+    for (output, tests) in &narrowed {
+        let mut seen = BTreeSet::new();
+        for (equals, literal) in tests {
+            if !seen.insert((equals, literal)) {
+                let operator = if *equals { "==" } else { "!=" };
+                return Err(format!(
+                    "puts two of its reporters behind the same `{output} {operator} '{literal}'`, \
+                     so one failure opens two issues — the duplicate a rolling reporter exists to \
+                     prevent, and the surest way to teach a reader to stop reading the channel"
+                ));
+            }
+        }
+    }
+    let complementary = narrowed.values().any(|tests| {
+        tests.iter().any(|(equals, literal)| {
+            *equals
+                && tests
+                    .iter()
+                    .any(|(other, value)| !other && value == literal)
+        })
+    });
+    if complementary {
+        return Ok(());
+    }
+    let listed: Vec<String> = narrowed
+        .iter()
+        .flat_map(|(output, tests)| {
+            tests.iter().map(move |(equals, literal)| {
+                let operator = if *equals { "==" } else { "!=" };
+                format!("`{output} {operator} '{literal}'`")
+            })
+        })
+        .collect();
+    Err(format!(
+        "narrows every one of its reporters to a step output ({}) and no two of those are \
+         complements, so a failure matching none of them is filed by neither",
+        listed.join(", ")
+    ))
+}
+
 /// How ONE JOB of a workflow gets its finding off the runner and in front of
 /// somebody, or what it is missing.
 ///
@@ -7386,13 +7498,16 @@ fn reporting_channel(workflow: &str, job: &str) -> Result<&'static str, String> 
     };
     let permissions = job_permissions(workflow, &lines);
     let mut missing = Vec::new();
+    let mut works = None;
     let mut calls_one = false;
-    for filer in FILERS {
-        let Some(at) = lines.iter().position(|line| {
-            step_uses(line).is_some_and(|reference| reference.contains(filer.uses))
-        }) else {
-            continue;
-        };
+    // EVERY filing step of the job, rather than the first one per filer that
+    // answers. `position` was right for as long as a job had one reporter, and
+    // wrong from the moment audit.yml's `dependabot` job arrived with two: the
+    // second sat entirely outside this net, so the finding it exists for — a
+    // posture that could not be READ, as against one read and wrong — could
+    // stop being filed with this rule still green on the strength of the
+    // reporter above it. A job with two channels has to keep both.
+    for (at, filer) in filer_steps(&lines) {
         calls_one = true;
         if let Some(needed) = filer.grant
             && !grants_write(&permissions, needed)
@@ -7404,13 +7519,19 @@ fn reporting_channel(workflow: &str, job: &str) -> Result<&'static str, String> 
             continue;
         }
         if !filer.after_an_earlier_failure || runs_after_a_failure(&step_around(&lines, at)) {
-            return Ok(filer.does);
+            works = works.or(Some(filer.does));
+            continue;
         }
         missing.push(format!(
             "calls `{}` behind an `if:` that names no status function, so GitHub applies the \
              implicit `success()` and skips it on exactly the run it reports",
             filer.uses
         ));
+    }
+    if let Some(does) = works
+        && missing.is_empty()
+    {
+        return Ok(does);
     }
     // Read off FILERS rather than listed again, and only where the job calls
     // nothing at all: a grant held beside a step that IS called has already
@@ -7460,6 +7581,19 @@ fn jobs_with_no_channel(workflows: &[(String, String)]) -> Vec<String> {
                     "  {label}: `{job}` runs on a cron, blocks no merge, and {why}. A red square \
                      on a workflow nobody is required to read is not a control, and a sibling \
                      job's reporter is not this job's channel."
+                ));
+                continue;
+            }
+            // The job has a channel. What is left is whether that channel
+            // answers for every way the job can fail — the question a job with
+            // one reporter never raised and a job that splits its reporting
+            // over two conditions raises immediately.
+            let lines = job_lines(text, &job).expect("the channel was read off this job's lines");
+            if let Err(gap) = every_failure_reaches_a_channel(&lines) {
+                silent.push(format!(
+                    "  {label}: `{job}` runs on a cron, blocks no merge, and {gap}. A failure \
+                     that matches none of a job's reporters reaches nobody by exactly the route a \
+                     job with no reporter at all does."
                 ));
             }
         }
@@ -7741,6 +7875,113 @@ fn a_channel_is_read_off_the_job_that_would_need_it() {
         reporting_channel(&elsewhere, "licences").is_err(),
         "an upload step in a sibling job was read as this job's evidence"
     );
+}
+
+/// The job that made the reading above insufficient: the first here to report
+/// through two channels rather than one.
+const TWO_CHANNEL_JOB: &str = "dependabot";
+
+/// What narrows its second reporter, as written. The FIRST reporter is the
+/// complement of this, so a mutation that names this string names exactly one
+/// of the two.
+const SECOND_REPORTER: &str = "steps.posture.outputs.posture != 'off'";
+
+#[test]
+fn a_second_reporter_that_cannot_run_is_not_covered_by_the_first() {
+    // The hole the fourth job of audit.yml opened in the rule above it. That
+    // rule asked each `Filer` for the FIRST step using it and stopped there, so
+    // a job with two reporters was judged on one: break the second and the
+    // first still answers, the workflow still reads as having a channel, and
+    // the finding the second exists for — a posture that could not be read,
+    // as against read and wrong — silently stops being filed.
+    //
+    // The failure mode is the one the test above this section already
+    // measures, one level down: `if: ${{ failure() && … }}` is what puts a
+    // reporter on the failing run, and GitHub supplies `success()` for an
+    // expression that names no status function.
+    let text = read(LICENCE_WATCH);
+    assert_eq!(
+        reporting_channel(&text, TWO_CHANNEL_JOB).as_deref(),
+        Ok("opens a rolling issue"),
+        "the tree this mutation starts from does not have the channel it is about to break"
+    );
+    let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the job the channel was just read off");
+    assert_eq!(
+        filer_steps(&lines).len(),
+        2,
+        "`{TWO_CHANNEL_JOB}` is the job with two reporters this test is about. Either it stopped \
+         splitting its reporting or the step reader stopped finding the steps; either way what \
+         follows measures nothing."
+    );
+
+    let guarded = format!("failure() && github.event_name == 'schedule' && {SECOND_REPORTER}");
+    let unguarded = guarded
+        .strip_prefix("failure() && ")
+        .expect("the guard is the prefix of the string just built");
+    let broken = text.replace(&guarded, unguarded);
+    assert_ne!(
+        broken, text,
+        "no second reporter guarded by `failure() && …` was found to break, so this proves nothing"
+    );
+    assert!(
+        reporting_channel(&broken, TWO_CHANNEL_JOB)
+            .is_err_and(|why| why.contains("implicit `success()`")),
+        "a job whose second reporter cannot run on a failing run was read as having its channel, \
+         on the strength of the first: {:?}",
+        reporting_channel(&broken, TWO_CHANNEL_JOB)
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, broken));
+    assert!(
+        named(&silent, TWO_CHANNEL_JOB),
+        "the rule did not name the job whose second channel is gone:\n{silent:?}"
+    );
+}
+
+#[test]
+fn reporters_that_all_narrow_leave_whatever_neither_names_unreported() {
+    // The other half of splitting one job's reporting in two, and the one no
+    // reading of the STEPS can see: both steps are present, both can run on a
+    // failing run, and between them they still answer for only some of the
+    // ways the job fails. `== 'off'` and `!= 'off'` partition every run;
+    // `== 'off'` and `== 'blind'` leave the third answer reaching nobody, and
+    // `== 'off'` twice files two issues for one failure.
+    let text = read(LICENCE_WATCH);
+    let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the two-channel job");
+    assert_eq!(
+        every_failure_reaches_a_channel(&lines),
+        Ok(()),
+        "the tree this mutation starts from is already uncovered, so nothing below is about the \
+         mutation"
+    );
+
+    for (mutation, shape) in [
+        (
+            "steps.posture.outputs.posture == 'blind'",
+            "a gap neither reporter names",
+        ),
+        (
+            "steps.posture.outputs.posture == 'off'",
+            "an overlap both reporters name",
+        ),
+    ] {
+        let mutated = text.replace(SECOND_REPORTER, mutation);
+        assert_ne!(
+            mutated, text,
+            "the second reporter's condition was not found, so {shape} was never introduced"
+        );
+        assert!(
+            reporting_channel(&mutated, TWO_CHANNEL_JOB).is_ok(),
+            "the mutation broke the reporting STEPS as well as their conditions, so it cannot \
+             show what the coverage half of the rule sees on its own"
+        );
+        let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, mutated));
+        assert!(
+            named(&silent, TWO_CHANNEL_JOB),
+            "{shape} went unreported — two reporting steps were counted as reporting, without \
+             anything asking what they report on:\n{silent:?}"
+        );
+    }
 }
 
 /// The body of a `key: |` block scalar, dedented to column zero.
@@ -8117,6 +8358,426 @@ fn a_denial_of_a_schedule_is_read_and_a_description_of_one_is_not() {
             "prose describing a schedule was read as denying one: {description}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// a control that is a SETTING rather than a file
+// ---------------------------------------------------------------------------
+//
+// The sixth way a check checks nothing, and the one every rule above is blind
+// to by construction: each of them reads a file, and a repository setting is
+// not in one.
+//
+// `SECURITY.md` asserted that Dependabot alerts and Dependabot security
+// updates were both enabled. It was true when written and verified by hand
+// once, in a pull request comment. Both are toggles in a menu that anyone with
+// admin rights can flip, that arrive in no diff, and that GitHub itself pauses
+// after a long quiet spell — so the sentence could stop being true with every
+// gate in this repository green, and the only assertion the tree could make
+// about it was that the sentence was there. That is a claim about the claim.
+//
+// The rule below is the other direction of the prose rule above it,
+//   `no_document_denies_a_scheduled_run_this_repo_makes`
+// which catches a document DENYING a control that exists. This one catches a
+// document ASSERTING a control that nothing evaluates: the same defect with
+// the sign flipped, and the one this repository actually shipped.
+
+/// A GitHub repository setting this repo's prose rests on: a control flipped
+/// in a menu rather than committed, and the endpoint that answers what it is
+/// set to.
+///
+/// Listed by hand because the endpoint for a setting is GitHub's vocabulary
+/// rather than this repository's. Every field is held against the tree below,
+/// though, so a row cannot quietly stop naming a claim somebody reads or a
+/// check something runs — it fails in both directions rather than rotting.
+struct RepositorySetting {
+    /// What the documents call it. Matched against unwrapped prose, so a
+    /// phrase broken over a line wrap still reads as one phrase.
+    claimed: &'static str,
+    /// The path under `repos/<this repository>/` that answers for it.
+    endpoint: &'static str,
+    /// What silently stops happening while nobody asks.
+    at_stake: &'static str,
+}
+
+const REPOSITORY_SETTINGS: &[RepositorySetting] = &[
+    RepositorySetting {
+        claimed: "Dependabot alerts",
+        endpoint: "vulnerability-alerts",
+        at_stake: "GitHub stops reading this repository's graph against the advisory database on \
+                   its own, and two independent readings of it become one",
+    },
+    RepositorySetting {
+        claimed: "Dependabot security updates",
+        endpoint: "automated-security-fixes",
+        at_stake: "no version-bump pull request is opened for an advisory any more, and the \
+                   nightly issue is the whole of the response to one",
+    },
+];
+
+/// The ways a `gh api` path can name THIS repository: the expression itself,
+/// and any shell variable a workflow binds to it.
+///
+/// Both, because the second is the one that appears. An expression
+/// interpolated straight into a `run:` is a template injection and zizmor says
+/// so, so a job that queries its own repository passes the value in `env:` and
+/// writes `$GH_REPO` — and a reader that knew only `${{ github.repository }}`
+/// would find no query at all in the one job doing the querying.
+fn this_repository_names(workflow: &str) -> BTreeSet<String> {
+    const EXPRESSION: &str = "${{ github.repository }}";
+    let mut names = BTreeSet::from([EXPRESSION.to_owned()]);
+    for line in workflow.lines() {
+        let Some((key, value)) = strip_comment(line).trim().split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if value.trim() != EXPRESSION || key.is_empty() || key.contains(char::is_whitespace) {
+            continue;
+        }
+        names.insert(format!("${key}"));
+        names.insert(format!("${{{key}}}"));
+    }
+    names
+}
+
+/// Every setting of THIS repository a workflow asks GitHub for: the first path
+/// segment under each `gh api repos/<this repository>/…`.
+///
+/// The call has to be on the line, which is the difference between reading
+/// what a workflow RUNS and reading what it says. `report-failure`'s issue
+/// bodies name endpoints in prose, and prose counting as enforcement is the
+/// defect this whole file exists to reject.
+fn settings_read_by(workflow: &str) -> BTreeSet<String> {
+    let names = this_repository_names(workflow);
+    let mut out = BTreeSet::new();
+    for line in workflow.lines() {
+        let body = strip_comment(line);
+        if !body.contains("gh api") {
+            continue;
+        }
+        for name in &names {
+            let opens = format!("repos/{name}/");
+            for (at, _) in body.match_indices(&opens) {
+                let path: String = body[at + opens.len()..]
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+                    .collect();
+                if !path.is_empty() {
+                    out.insert(path);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The job of `workflow` that asks for `endpoint`, if one does.
+fn job_reading_setting(workflow: &str, endpoint: &str) -> Option<String> {
+    job_keys(workflow).into_iter().find(|job| {
+        job_lines(workflow, job)
+            .is_some_and(|lines| settings_read_by(&lines.join("\n")).contains(endpoint))
+    })
+}
+
+/// Settings this repo's prose rests on that nothing scheduled asks GitHub
+/// about, and rows that have outlived the claim they watch. One sentence each.
+///
+/// Split out from the rule so the rule can be asked about a tree other than
+/// this one: a rule only ever run against the tree it passes on is a rule
+/// nobody has watched say no.
+fn settings_nothing_reads(
+    documents: &[(String, String)],
+    workflows: &[(String, String)],
+) -> Vec<String> {
+    let mut unread = Vec::new();
+    for setting in REPOSITORY_SETTINGS {
+        let RepositorySetting {
+            claimed,
+            endpoint,
+            at_stake,
+        } = *setting;
+        let claiming: Vec<&str> = documents
+            .iter()
+            .filter(|(_, text)| unwrapped_prose(text).contains(claimed))
+            .map(|(label, _)| label.as_str())
+            .collect();
+        if claiming.is_empty() {
+            unread.push(format!(
+                "  `{claimed}` is watched here and no document in force names it any more. Either \
+                 the claim was rewritten and this row and the job behind it go with it, or the \
+                 reader has stopped finding the documents and everything below passes vacuously."
+            ));
+            continue;
+        }
+        let read_on_a_clock = workflows
+            .iter()
+            .filter(|(_, text)| runs_on_a_cron(text))
+            .any(|(_, text)| job_reading_setting(text, endpoint).is_some());
+        if !read_on_a_clock {
+            unread.push(format!(
+                "  `{claimed}` is asserted by {claiming:?} and no job on a clock asks \
+                 `repos/<this repository>/{endpoint}` for it. It is a repository setting: \
+                 switched off in a menu, carried in no diff, and once it is off {at_stake} — \
+                 with every gate here green and that sentence still on the page."
+            ));
+        }
+    }
+    unread
+}
+
+#[test]
+fn every_repository_setting_this_repos_prose_rests_on_is_one_a_scheduled_job_reads() {
+    let documents = ci_prose_files();
+    assert!(
+        documents.iter().any(|(label, _)| label == "SECURITY.md"),
+        "the reader is not finding the documents; it found {:?}",
+        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
+    assert!(
+        !REPOSITORY_SETTINGS.is_empty(),
+        "the settings this repo's prose rests on are the whole net of this rule, and there are \
+         none listed — the rule cannot fail"
+    );
+
+    // Whether the failure of such a job reaches a human is not asked again
+    // here: the job is on a clock and blocks no merge, so
+    // `a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes` is
+    // already the rule that answers it, per job and per reporter.
+    let unread = settings_nothing_reads(&documents, &read_workflows());
+    assert!(
+        unread.is_empty(),
+        "repository settings this repo's documents rest on and nothing evaluates:\n{}\n\
+         Every other rule in this file compares two files. A setting is in neither, so a claim \
+         about one is worth exactly what the last person to look at the menu remembers.",
+        unread.join("\n")
+    );
+}
+
+#[test]
+fn a_setting_the_prose_rests_on_and_no_scheduled_job_reads_is_named() {
+    // Four ways the check can die while the claim stays on the page, each run
+    // rather than reasoned about.
+    let documents = ci_prose_files();
+    let text = read(LICENCE_WATCH);
+    let alerts = "Dependabot alerts";
+    let updates = "Dependabot security updates";
+    assert!(
+        settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, text.clone())).is_empty(),
+        "the workflow this test mutates does not answer for these settings to begin with"
+    );
+
+    // 1. The query is aimed somewhere else. Nothing about the job's shape
+    //    changes: it still calls `gh api`, still fails on a bad answer, and
+    //    answers for a repository that is not this one.
+    let elsewhere = text.replace(
+        "GH_REPO: ${{ github.repository }}",
+        "GH_REPO: P4suta/somewhere-else",
+    );
+    assert_ne!(
+        elsewhere, text,
+        "no `GH_REPO: ${{{{ github.repository }}}}` binding was found to redirect"
+    );
+    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, elsewhere));
+    assert!(
+        named(&unread, alerts) && named(&unread, updates),
+        "a posture check pointed at another repository was read as checking this one:\n{unread:?}"
+    );
+
+    // 2. One endpoint of the two stops being asked for. The rule has to name
+    //    that one and leave the other alone, or it is answering "somebody
+    //    queried something" rather than "this claim is checked".
+    let partial = text.replace(
+        "repos/$GH_REPO/vulnerability-alerts",
+        "repos/$GH_REPO/topics",
+    );
+    assert_ne!(
+        partial, text,
+        "the alerts endpoint was not found to redirect"
+    );
+    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, partial));
+    assert!(
+        named(&unread, alerts),
+        "the setting nothing asks about went unnamed:\n{unread:?}"
+    );
+    assert!(
+        !named(&unread, updates),
+        "the setting that IS still asked about was named too, so the rule is not reading per \
+         setting:\n{unread:?}"
+    );
+
+    // 3. The check survives on a push and stops being scheduled. A setting
+    //    moves without a commit, so a check that only runs on a diff answers
+    //    only about the diffs somebody pushes.
+    let unscheduled = text.replace("    - cron:", "    # - cron:");
+    assert!(
+        !runs_on_a_cron(&unscheduled) && runs_on_a_cron(&text),
+        "the mutation did not stop the workflow reading as scheduled, so it proves nothing"
+    );
+    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, unscheduled));
+    assert!(
+        named(&unread, alerts) && named(&unread, updates),
+        "a posture check that no clock runs was read as a scheduled one:\n{unread:?}"
+    );
+
+    // 4. The claim goes and the row stays. A watch over a sentence nobody
+    //    makes any more is the licence table's failure mode, one file over.
+    let rewritten: Vec<(String, String)> = documents
+        .iter()
+        .map(|(label, body)| (label.clone(), body.replace("Dependabot alerts and ", "")))
+        .collect();
+    assert_ne!(
+        rewritten, documents,
+        "no document was changed, so the row has not outlived anything"
+    );
+    let unread = settings_nothing_reads(&rewritten, &one_workflow(LICENCE_WATCH, text));
+    assert!(
+        named(&unread, alerts),
+        "a row watching a claim no document makes any more went unreported:\n{unread:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the wire between a step and the condition that reads it
+// ---------------------------------------------------------------------------
+
+/// The `id:` a step declares, in either shape a step is written in.
+fn step_id(line: &str) -> Option<&str> {
+    let body = strip_comment(line).trim();
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    let id = body.strip_prefix("id:")?.trim();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Every `steps.<id>.outputs.<name>` a workflow reads, with the job reading it.
+fn output_references(workflow: &str) -> Vec<(String, String, String)> {
+    let reference = Regex::new(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+        .expect("the reference pattern is a literal");
+    let mut out = Vec::new();
+    for job in job_keys(workflow) {
+        let Some(lines) = job_lines(workflow, &job) else {
+            continue;
+        };
+        for line in lines {
+            for caught in reference.captures_iter(strip_comment(line)) {
+                out.push((job.clone(), caught[1].to_owned(), caught[2].to_owned()));
+            }
+        }
+    }
+    out
+}
+
+/// References that name a step the job has not got, or an output the step they
+/// name never writes.
+fn unresolved_outputs(workflows: &[(String, String)]) -> Vec<String> {
+    let mut dangling = Vec::new();
+    for (label, text) in workflows {
+        for (job, id, name) in output_references(text) {
+            let lines = job_lines(text, &job).expect("the reference was read out of this job");
+            let Some(at) = lines
+                .iter()
+                .position(|line| step_id(line) == Some(id.as_str()))
+            else {
+                dangling.push(format!(
+                    "  {label}: `{job}` reads `steps.{id}.outputs.{name}` and holds no step with \
+                     `id: {id}`"
+                ));
+                continue;
+            };
+            let step = step_around(&lines, at).join("\n");
+            // A step that `uses:` an action gets its outputs from that action's
+            // own `action.yml`, which is not this repository's to read for a
+            // third-party pin. A `run:` step has one way to produce one, and it
+            // is in the script.
+            if !step.contains("run:") {
+                continue;
+            }
+            let written = step.contains("GITHUB_OUTPUT")
+                && (step.contains(&format!("{name}=")) || step.contains(&format!("{name}<<")));
+            if !written {
+                dangling.push(format!(
+                    "  {label}: `{job}` reads `steps.{id}.outputs.{name}` and the script under \
+                     `id: {id}` writes no `{name}` to `$GITHUB_OUTPUT`"
+                ));
+            }
+        }
+    }
+    dangling
+}
+
+#[test]
+fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
+    // The seam the two-channel job runs on, and the quietest one in this
+    // repository. An unset `steps.<id>.outputs.<name>` is not an error at run
+    // time: it is the empty string. So a renamed `id:`, or a script that stops
+    // writing the output, leaves `== 'off'` false for ever and `!= 'off'` true
+    // for ever — and the job goes on reporting, through the wrong one of its
+    // two channels, on every failure it ever has. Every gate stays green: the
+    // steps are all there, the guards all name `failure()`, and the reporters
+    // still hold `issues: write`.
+    let workflows = read_workflows();
+    let references: Vec<(String, String, String)> = workflows
+        .iter()
+        .flat_map(|(_, text)| output_references(text))
+        .collect();
+    assert!(
+        references.len() >= 8,
+        "only {} step-output reference(s) were read out of {} workflow(s); the reader has stopped \
+         finding them and this rule passes on nothing",
+        references.len(),
+        workflows.len()
+    );
+    assert!(
+        references
+            .iter()
+            .any(|(_, id, name)| id == "posture" && name == "posture"),
+        "the reference the two reporting channels of audit.yml split on was not among the {} \
+         found",
+        references.len()
+    );
+
+    let dangling = unresolved_outputs(&workflows);
+    assert!(
+        dangling.is_empty(),
+        "step outputs read by a condition that nothing sets:\n{}\n\
+         An unset output is the empty string rather than an error, so every condition resting on \
+         one answers the same way for ever and no run says a word about it.",
+        dangling.join("\n")
+    );
+}
+
+#[test]
+fn a_renamed_step_and_an_unwritten_output_are_both_read_as_dangling() {
+    let text = read(LICENCE_WATCH);
+    assert!(
+        unresolved_outputs(&one_workflow(LICENCE_WATCH, text.clone())).is_empty(),
+        "the workflow these mutations start from already reads as dangling"
+    );
+
+    // The `id:` moves and the two conditions reading it do not.
+    let renamed = text.replace("id: posture", "id: settings");
+    assert_ne!(renamed, text, "no `id: posture` was found to rename");
+    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, renamed));
+    assert!(
+        dangling
+            .iter()
+            .any(|sentence| sentence.contains("holds no step with `id: posture`")),
+        "a condition reading a step that is not in the job any more was read as wired:\n\
+         {dangling:?}"
+    );
+
+    // The step keeps its name and stops writing what the conditions read.
+    let silent = text.replace("printf 'posture=off\\n' >> \"$GITHUB_OUTPUT\"", ":");
+    assert_ne!(
+        silent, text,
+        "no write to `$GITHUB_OUTPUT` was found to cut"
+    );
+    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, silent));
+    assert!(
+        dangling
+            .iter()
+            .any(|sentence| sentence.contains("writes no `posture`")),
+        "a condition reading an output no script sets was read as wired:\n{dangling:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
