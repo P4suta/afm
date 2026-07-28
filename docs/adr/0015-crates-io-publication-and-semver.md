@@ -31,17 +31,62 @@ is byte-identical to registry `comrak` v0.52.0 (ADR-0001's 0-line-diff gate).
   it — it is `publish = false` and never on crates.io. The resulting `*` path
   requirement is allowed by `deny.toml`'s `allow-wildcard-paths`.
 
-**Publishable set & order.** Only `aozora-flavored-markdown` then `aozora-flavored-markdown-cli` are published,
-in that topological order. `aozora-flavored-markdown-wasm` (npm/wasm-pack), `aozora-flavored-markdown-test-support`
-and `xtask` (dev-only) are `publish = false`.
+**Publishable set & order (amended).** All four non-dev members are published:
+`aozora-flavored-markdown` and `aozora-flavored-markdown-cli` on the workspace
+0.5.x line, `aozora-flavored-markdown-epub` and
+`aozora-flavored-markdown-epub-cli` on their own 0.1.x line. This ADR first
+named only the first two, because the EPUB pair was a sibling repository when
+it was written; consolidating it into this workspace (ADR-0018) left nothing
+holding them back, and a crate nobody can `cargo add` is the same problem this
+ADR exists to fix. `aozora-flavored-markdown-wasm` (npm/wasm-pack),
+`aozora-flavored-markdown-test-support` and `xtask` (dev-only) stay
+`publish = false`, and `cargo publish --workspace` skips them on that fact
+rather than on a list kept in step by hand.
 
-**Automation.** `.github/workflows/publish-crates.yml` (manual
-`workflow_dispatch`, `dry_run` default true, resumable + rate-limit aware)
-runs the 2-crate ladder. The release.yml cargo-dist pipeline (binaries) is
+The order is no longer written down anywhere. Cargo derives it from the
+dependency graph and uploads a crate only once everything it depends on is
+confirmed present in the index, so the ladder cannot be laddered wrong — a
+stronger property than the loop it replaced had, since that loop's order was a
+pair of literals in a shell `for`.
+
+**Automation (amended).** `.github/workflows/publish-crates.yml` (manual
+`workflow_dispatch`, `dry_run` default true) runs one command:
+`cargo publish --workspace --locked`. It replaced a shell function that probed
+crates.io per version over `curl`, slept and retried on HTTP 429, and walked a
+two-name `for` loop. All of that restated what cargo already does, and its
+version came from `grep`ping the first `version` out of the root `Cargo.toml`
+— a single workspace version, which the 0.1.x EPUB crates make wrong the
+moment they join the ladder. The release.yml cargo-dist pipeline (binaries) is
 untouched and runs off the same `v<semver>` tag; crates.io publish is a
-separate, manually-triggered step. `cargo-dist` ladders are aozora's
-13-crate machinery scaled down — aozora-flavored-markdown's single-library workspace needs only two
-rungs.
+separate, manually-triggered step.
+
+**Measured before the ladder was deleted.** On the pinned toolchain,
+`cargo 1.96.0 (30a34c682 2026-05-25)`, inside the dev image (ADR-0002),
+`cargo publish --workspace --dry-run --locked` selected exactly the four
+publishable members, skipped the three `publish = false` ones unprompted, and
+staged them in dependency order:
+
+```text
+   Packaging aozora-flavored-markdown v0.5.0
+   Packaging aozora-flavored-markdown-cli v0.5.0
+   Packaging aozora-flavored-markdown-epub v0.1.0
+   Packaging aozora-flavored-markdown-epub-cli v0.1.0
+   Verifying aozora-flavored-markdown v0.5.0
+   Verifying aozora-flavored-markdown-cli v0.5.0
+   Verifying aozora-flavored-markdown-epub v0.1.0
+   Verifying aozora-flavored-markdown-epub-cli v0.1.0
+   Uploading aozora-flavored-markdown v0.5.0
+   Uploading aozora-flavored-markdown-cli v0.5.0
+   Uploading aozora-flavored-markdown-epub v0.1.0
+   Uploading aozora-flavored-markdown-epub-cli v0.1.0
+warning: aborting upload due to dry run
+```
+
+Each `Verifying` step compiled against a temporary registry under
+`target/package/` holding the crates packaged ahead of it — the epub-cli build
+logged `Unpacking aozora-flavored-markdown-epub v0.1.0 (registry
+.../tmp-registry)` — which is why the whole ladder dry-runs even though two of
+these crates have never been on crates.io.
 
 **Semver policy (pre-1.0).** Under `0.y.z`, the **minor** position is the
 breaking-change axis (cargo treats `0.y`→`0.(y+1)` as breaking). Breaking =
@@ -86,9 +131,25 @@ version this workspace is merely a patch ahead of.
 - The `aozora` upgrade discipline shifts from rev pinning to registry version
   bumps — slightly looser, but `Cargo.lock` still pins the exact build and a
   bump is still one reviewed PR.
-- A first publish is greenfield (both crates 404 today); the leaf
-  `aozora-flavored-markdown` dry-run is the pre-flight gate (verified green), while
-  `aozora-flavored-markdown-cli` can only be verified live after aozora-flavored-markdown lands.
+- The whole ladder is pre-flightable, not just the leaf. This ADR said only
+  `aozora-flavored-markdown` could be dry-run before anything was on the
+  registry and that its CLI could only be verified live afterwards. That was a
+  property of publishing one crate per command, not of cargo.
+- Resumability is cargo's now, and it is weaker. The deleted loop skipped a
+  version already on crates.io, so a re-dispatch continued a partial publish.
+  Cargo instead checks every selected member up front and errors on the first
+  one already there — before it packages or uploads anything — so a second
+  dispatch stops on what did land rather than continuing with what did not.
+  Finish a partial run by hand: one `cargo publish -p <crate> --locked` per
+  crate still missing, in dependency order. The 429 back-off goes with it, so
+  a rate-limited upload now fails the run instead of sleeping ten minutes
+  inside it.
+- The EPUB pair is not on crates.io, so neither crate can be given a Trusted
+  Publishing configuration yet — crates.io has nothing to attach one to until
+  the crate exists. One `cargo publish --workspace` carries one token, which
+  makes that a fact about the whole ladder: the run that first uploads them
+  goes through the legacy `CARGO_TOKEN` path (`-f use_oidc=false`), and OIDC
+  resumes once all four are registered.
 
 ## Alternatives considered
 
@@ -99,14 +160,22 @@ the registry version is a drop-in.
 **Publish a vendored-comrak fork crate.** Rejected while the diff budget is 0
 (ADR-0014) — depending on the registry crate is simpler and equivalent.
 
-**`cargo publish --workspace`.** Rejected: on the pinned toolchain it does not
-order interdependent first-publishes topologically (same finding as aozora's
-ladder). The explicit two-rung loop is deterministic.
+**`cargo publish --workspace`.** Rejected here, and adopted a cycle later —
+see the amended **Automation** above. The stated reason was that the pinned
+toolchain does not order interdependent first-publishes topologically, carried
+over from aozora's ladder. It was not re-measured here, and it was wrong when
+written: `-Zpackage-workspace` stabilised in Cargo **1.89**
+(`cargo::core::features`), while this repository pinned 1.95.0 and then 1.96.0
+on the very day this ADR was accepted. So the finding never described a
+toolchain this workspace ran on, and no version bump was needed to reverse it
+— only the dry-run above, which is what the reversal now rests on. The
+inherited half of a decision is the half worth re-measuring.
 
 ## References
 
 - ADR-0001 (vendored comrak), ADR-0010 (aozora extraction), ADR-0012
   (diagnostics schema), ADR-0013 (IR `#[non_exhaustive]`), ADR-0014 (comrak
-  upgrade policy)
+  upgrade policy), ADR-0018 (EPUB consolidation — why the ladder is four
+  rungs, on two version lines)
 - `.github/workflows/publish-crates.yml`, `deny.toml`
 - Plan: `~/.claude/plans/aozora-dapper-hopper.md`
