@@ -9975,6 +9975,191 @@ fn every_file_a_published_source_includes_is_one_its_own_tarball_carries() {
     );
 }
 
+/// Every figure the conformance runners measure and this repository's prose
+/// restates, as (what the figure is, a pattern whose one capture is the number
+/// stating it).
+///
+/// Patterns rather than a table of document-and-value: the figures are allowed
+/// to change — a spec refresh moves them — and no manifest declares where a
+/// sentence lives. What is not allowed is two documents answering the same
+/// question differently.
+const CONFORMANCE_FIGURES: &[(&str, &str)] = &[
+    (
+        "the CommonMark suite total",
+        r"all (\d+) CommonMark 0\.31\.2",
+    ),
+    (
+        "the CommonMark suite total",
+        r"CommonMark 0\.31\.2 \((\d+) cases",
+    ),
+    ("the CommonMark suite total", r"pass = (\d+)/\d+"),
+    ("the CommonMark suite total", r"pass = \d+/(\d+)"),
+    ("the GFM suite total", r"all (\d+) GFM 0\.29"),
+    ("the GFM suite total", r"GFM 0\.29 \((\d+),"),
+    ("the GFM suite total", r"of the (\d+) come out verbatim"),
+    (
+        "the GFM examples that come back verbatim",
+        r"(\d+) of the \d+ come out verbatim",
+    ),
+    (
+        "the GFM examples that come back verbatim",
+        r"(\d+) verbatim,",
+    ),
+    (
+        "the GFM examples pinned to a later authority",
+        r"the last (\d+) are pinned",
+    ),
+    (
+        "the GFM examples pinned to a later authority",
+        r"(\d+) pinned to what supersedes",
+    ),
+    (
+        "the GFM examples pinned to a later authority",
+        r"of which (\d+) are pinned",
+    ),
+    (
+        "the GFM examples pinned to a later authority",
+        r"the list of (\d+)",
+    ),
+];
+
+/// The one document whose figures are held against the measurement itself, by
+/// `conformance::the_crate_page_states_the_figures_this_file_measures` — which
+/// can reach it because it is the page inside the package the suite lives in.
+/// Every other copy is checked against this one, so agreement is agreement
+/// with something that was measured rather than between two guesses.
+const PAGE_PINNED_TO_THE_MEASUREMENT: &str = "crates/aozora-flavored-markdown/README.md";
+
+/// One document on one line, with a leading `#` dropped from each. Where a
+/// paragraph wraps is a typesetting decision, and the `Justfile` states its
+/// figures in a comment block whose line breaks mean no more than a README's.
+fn unwrapped_prose(text: &str) -> String {
+    text.lines()
+        .flat_map(|line| line.trim_start().trim_start_matches('#').split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Every document a reader could meet a conformance figure in: the prose at
+/// the repository root, each member's own page, the `docs/` index, and the
+/// `Justfile`, whose recipe comments are what `just --list` prints.
+///
+/// Walked rather than listed, because the defect this rule exists for is a
+/// copy nobody knew about. The library crate's page was created by copying the
+/// landing README's compatibility claim into it, and a list written that day
+/// would have named one document.
+///
+/// `CHANGELOG.md` and `docs/adr/` are out for the reason the retired-path gate
+/// leaves them out: history is allowed to say what was true then.
+fn documents_that_could_state_a_figure() -> Vec<String> {
+    let mut directories = vec![String::new(), "docs".to_owned()];
+    directories.extend(
+        workspace_members()
+            .iter()
+            .map(|member| crate_dir(&member.path).to_owned()),
+    );
+    let mut out = vec!["Justfile".to_owned()];
+    for directory in directories {
+        let path = repo_root().join(&directory);
+        let entries =
+            fs::read_dir(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for entry in entries {
+            let file = entry
+                .unwrap_or_else(|e| panic!("reading an entry of {}: {e}", path.display()))
+                .path();
+            if file.extension().is_some_and(|extension| extension == "md") {
+                let Some(name) = file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                if name == "CHANGELOG.md" {
+                    continue;
+                }
+                out.push(if directory.is_empty() {
+                    name
+                } else {
+                    format!("{directory}/{name}")
+                });
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn every_document_that_states_a_conformance_figure_states_the_same_one() {
+    // The compatibility claim is this repository's headline and it is written
+    // down three times: the landing README, the library crate's page, and the
+    // comment on the recipe that proves it. One of the three was wrong for
+    // months — it said the GFM suite passed verbatim while the runner asserted
+    // 22 of 672 — and every gate stayed green, because prose is not compiled
+    // and no two of those files are read by the same thing.
+    //
+    // `conformance.rs` now holds ONE of them against the measurement. That is
+    // the half a `#[cfg(test)]` module inside a published package can do:
+    // reaching the other two would mean including files the tarball does not
+    // carry, which is its own defect one directory up. This is the other half
+    // — every copy says what the pinned copy says — and together they are the
+    // claim, its proof, and the fact that they are about each other.
+    let documents = documents_that_could_state_a_figure();
+    let mut stated: BTreeMap<&str, BTreeSet<(String, String)>> = BTreeMap::new();
+    for document in &documents {
+        let prose = unwrapped_prose(&read(document));
+        for &(figure, pattern) in CONFORMANCE_FIGURES {
+            let reader = Regex::new(pattern).unwrap_or_else(|e| panic!("`{pattern}`: {e}"));
+            for capture in reader.captures_iter(&prose) {
+                stated
+                    .entry(figure)
+                    .or_default()
+                    .insert((capture[1].to_owned(), document.clone()));
+            }
+        }
+    }
+
+    assert!(
+        documents.len() >= 8,
+        "only {documents:?} read; the walk is not finding this repository's prose"
+    );
+    let asked: BTreeSet<&str> = CONFORMANCE_FIGURES
+        .iter()
+        .map(|&(figure, _)| figure)
+        .collect();
+    assert_eq!(
+        stated.keys().copied().collect::<BTreeSet<&str>>(),
+        asked,
+        "a figure below is stated nowhere any more. Either the prose that carried it was cut — in \
+         which case cut its patterns too — or it was reworded past every reader here, which is \
+         the state this rule exists to make impossible."
+    );
+
+    for (figure, sightings) in &stated {
+        let values: BTreeSet<&str> = sightings.iter().map(|(value, _)| value.as_str()).collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "{figure} is stated more than one way: {sightings:?}. One of these documents is out of \
+             date, and a reader has no way to tell which."
+        );
+        let pages: BTreeSet<&str> = sightings
+            .iter()
+            .map(|(_, document)| document.as_str())
+            .collect();
+        assert!(
+            pages.len() >= 2,
+            "{figure} is stated in {pages:?} alone, so this rule compares nothing for it"
+        );
+        assert!(
+            pages.contains(PAGE_PINNED_TO_THE_MEASUREMENT),
+            "{figure} is stated in {pages:?}, and none of those is \
+             {PAGE_PINNED_TO_THE_MEASUREMENT} — the one page held against what the suite actually \
+             measures. Agreeing with each other is not the same as being right."
+        );
+    }
+}
+
 // --- the readers above, on the shapes that would fool them ------------------
 
 #[test]
