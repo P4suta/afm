@@ -58,6 +58,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::iter;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -393,6 +394,44 @@ fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
         }
     }
     out
+}
+
+/// The lines nested under `key:` inside a block that is already indented —
+/// a job's `permissions:`, say, out of the lines of that job.
+///
+/// The indentation is what makes it that block and not a neighbouring one:
+/// `job_lines` hands back the whole job, steps included, and a reader that
+/// went looking for a permission anywhere inside it would answer for a `with:`
+/// value that happened to be spelled alike.
+fn nested_block<'a>(lines: &[&'a str], key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
+    let mut out = Vec::new();
+    let mut opened_at = None;
+    for line in lines {
+        let body = strip_comment(line);
+        if body.trim().is_empty() {
+            continue;
+        }
+        let indent = body.len() - body.trim_start().len();
+        match opened_at {
+            Some(open) if indent > open => out.push(*line),
+            Some(_) => break,
+            None if body.trim() == header => opened_at = Some(indent),
+            None => {}
+        }
+    }
+    out
+}
+
+/// Is `key:` written in this block at all? Separate from what is under it,
+/// because a job that declares `permissions:` REPLACES the workflow's grant
+/// rather than adding to it — so an empty one is a statement, and the absence
+/// of one is a different statement.
+fn declares_key(lines: &[&str], key: &str) -> bool {
+    let header = format!("{key}:");
+    lines
+        .iter()
+        .any(|line| strip_comment(line).trim().starts_with(header.as_str()))
 }
 
 /// The lines under the workflow's `jobs:` mapping.
@@ -7219,39 +7258,213 @@ fn every_licence_exemption_is_pinned_to_the_licence_it_was_written_for() {
     }
 }
 
-/// Scheduled workflows whose only output is a red square, each with why it is
-/// still like that. Every entry is a LIVE DEFECT, not an exemption: a cron
-/// that blocks no merge and reports nowhere is a control only for whoever
-/// remembers to go and look at it, and nobody does.
-const CRON_WITHOUT_A_CHANNEL: &[(&str, &str)] = &[(
-    ".github/workflows/release-pins.yml",
-    "predates this rule. Its `freshness` job compares dist-workspace.toml's hand-maintained \
-     action pins against upstream and exits 1 into a workflow that blocks no merge, uploads \
-     nothing and files nothing — the exact shape audit.yml's `report` job exists to avoid. It \
-     needs the same treatment and that is its own change",
-)];
+/// The reporter a scheduled job calls when it has none of its own: a local
+/// composite action that files ONE rolling issue per title.
+const LOCAL_REPORTER: &str = "./.github/actions/report-failure";
 
-/// How a workflow gets a finding off the runner and in front of somebody.
-fn reporting_channel(workflow: &str) -> Option<&'static str> {
-    let grants = |permission: &str| {
-        let wanted = format!("{permission}: write");
-        workflow
-            .lines()
-            .any(|line| strip_comment(line).trim() == wanted)
-    };
-    if grants("issues") {
-        return Some("opens an issue");
+/// Where that action is written.
+const LOCAL_REPORTER_FILE: &str = ".github/actions/report-failure/action.yml";
+
+/// A step that gets a finding off the runner and in front of somebody, and
+/// what it takes for one to be able to.
+///
+/// A channel is a STEP, which is the second half of this rule and was missing
+/// from the first. `issues: write` on a job used to be read as "this job files
+/// an issue", and that is a claim about what the job COULD do: three jobs hold
+/// that grant now for the sake of one step each, so deleting any one of those
+/// steps leaves the grant behind, and a rule that stopped at the grant would
+/// go on reporting a channel that is gone.
+struct Filer {
+    /// What a step's `uses:` names. Matched inside the reference, so the
+    /// commit a pin carries does not have to be restated here.
+    uses: &'static str,
+    /// The write permission it cannot file with, where it needs one.
+    /// `upload-artifact` needs none — an artifact belongs to the run that
+    /// wrote it.
+    grant: Option<&'static str>,
+    /// What it does, in the words this rule reports.
+    does: &'static str,
+    /// Does it report a failure an EARLIER step produced?
+    ///
+    /// GitHub applies an implicit `success()` to any `if:` that names no
+    /// status function, so a step that reports somebody else's failure and
+    /// does not say `failure()` is skipped on precisely the run it exists for.
+    /// The two scanners below are not in that position: each one IS the check,
+    /// and files what it found on its way to failing.
+    after_an_earlier_failure: bool,
+}
+
+/// Everything this repo has that can put a finding in front of a human. A way
+/// of reporting that is not here reads as no channel at all — which fails
+/// loudly and is added to in one line, the direction this rule would rather
+/// be wrong in.
+const FILERS: &[Filer] = &[
+    Filer {
+        uses: LOCAL_REPORTER,
+        grant: Some("issues"),
+        does: "opens a rolling issue",
+        after_an_earlier_failure: true,
+    },
+    Filer {
+        uses: ADVISORY_REPORTER,
+        grant: Some("issues"),
+        does: "opens an issue per advisory",
+        after_an_earlier_failure: false,
+    },
+    Filer {
+        uses: "github/codeql-action/analyze",
+        grant: Some("security-events"),
+        does: "raises a code-scanning alert",
+        after_an_earlier_failure: false,
+    },
+    Filer {
+        uses: "actions/upload-artifact",
+        grant: None,
+        does: "uploads the evidence",
+        after_an_earlier_failure: true,
+    },
+];
+
+/// What one step's `uses:` names, in either shape a step is written in.
+/// `None` for every other line, which is what keeps a `uses:` discussed in a
+/// comment or quoted in a `body:` out of the answer.
+fn step_uses(line: &str) -> Option<&str> {
+    let body = strip_comment(line).trim();
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    body.strip_prefix("uses:").map(str::trim)
+}
+
+/// Can this step run on a run where an earlier step already failed? Only a
+/// status function makes it so: an `if:` without one, and an absent `if:`,
+/// both mean `success()`.
+fn runs_after_a_failure(step: &[&str]) -> bool {
+    step.iter()
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .any(|expression| {
+            ["failure()", "always()", "!cancelled()"]
+                .iter()
+                .any(|reaches| expression.contains(reaches))
+        })
+}
+
+/// The `permissions:` block that governs one job.
+///
+/// A job's own replaces the workflow's outright rather than adding to it, and
+/// a job without one inherits the workflow's whole. Reading the grant off the
+/// job's own lines alone would get the second case right by accident and the
+/// first wrong.
+fn job_permissions<'a>(workflow: &'a str, lines: &[&'a str]) -> Vec<&'a str> {
+    if declares_key(lines, "permissions") {
+        nested_block(lines, "permissions")
+    } else {
+        top_level_block(workflow, "permissions")
     }
-    if grants("security-events") {
-        return Some("raises a code-scanning alert");
-    }
-    if jobs_block(workflow)
+}
+
+/// Is `permission` granted for writing by this block?
+fn grants_write(permissions: &[&str], permission: &str) -> bool {
+    let wanted = format!("{permission}: write");
+    permissions
         .iter()
-        .any(|line| strip_comment(line).contains("upload-artifact"))
-    {
-        return Some("uploads the evidence");
+        .any(|line| strip_comment(line).trim() == wanted)
+}
+
+/// How ONE JOB of a workflow gets its finding off the runner and in front of
+/// somebody, or what it is missing.
+///
+/// Per job, because the workflow was the wrong unit and said so: audit.yml
+/// passed this rule on the strength of its `report` job while its `licences`
+/// job — the watch over the dependency-review waivers — failed into exactly
+/// the red square the rule forbids, one level below where the rule could see
+/// it. A channel does not transfer between jobs. They are separate runners
+/// with separate tokens, `report` files what `rustsec/audit-check` finds and
+/// nothing else, and a job that goes red ends wherever its own `permissions:`
+/// and its own steps leave it.
+fn reporting_channel(workflow: &str, job: &str) -> Result<&'static str, String> {
+    let Some(lines) = job_lines(workflow, job) else {
+        return Err(format!("has no `{job}:` job to read a channel off"));
+    };
+    let permissions = job_permissions(workflow, &lines);
+    let mut missing = Vec::new();
+    let mut calls_one = false;
+    for filer in FILERS {
+        let Some(at) = lines.iter().position(|line| {
+            step_uses(line).is_some_and(|reference| reference.contains(filer.uses))
+        }) else {
+            continue;
+        };
+        calls_one = true;
+        if let Some(needed) = filer.grant
+            && !grants_write(&permissions, needed)
+        {
+            missing.push(format!(
+                "calls `{}` without the `{needed}: write` it files with",
+                filer.uses
+            ));
+            continue;
+        }
+        if !filer.after_an_earlier_failure || runs_after_a_failure(&step_around(&lines, at)) {
+            return Ok(filer.does);
+        }
+        missing.push(format!(
+            "calls `{}` behind an `if:` that names no status function, so GitHub applies the \
+             implicit `success()` and skips it on exactly the run it reports",
+            filer.uses
+        ));
     }
-    None
+    // Read off FILERS rather than listed again, and only where the job calls
+    // nothing at all: a grant held beside a step that IS called has already
+    // been reported on above, by the sentence about that step.
+    if !calls_one {
+        let held: BTreeSet<&str> = FILERS
+            .iter()
+            .filter_map(|filer| filer.grant)
+            .filter(|permission| grants_write(&permissions, permission))
+            .collect();
+        for permission in held {
+            missing.push(format!(
+                "holds `{permission}: write` and calls nothing that uses it — a permission is \
+                 what a channel would need, not a channel"
+            ));
+        }
+    }
+    Err(if missing.is_empty() {
+        "neither files an issue, raises a code-scanning alert nor uploads an artifact".to_owned()
+    } else {
+        missing.join("; and ")
+    })
+}
+
+/// The scheduled jobs whose failure reaches nobody, one sentence each.
+///
+/// Split out from the rule below so the rule can be asked about a tree other
+/// than this one. A rule only ever run against the tree it passes on is a rule
+/// nobody has watched say no, and that is the half of #200's acceptance the
+/// mutation tests underneath cover.
+fn jobs_with_no_channel(workflows: &[(String, String)]) -> Vec<String> {
+    let mut silent = Vec::new();
+    for (label, text) in workflows.iter().filter(|(_, text)| runs_on_a_cron(text)) {
+        // The floor that matters once the unit is a job, and derived rather
+        // than counted: a workflow defines at least one job or it runs
+        // nothing, so finding none in one is the reader having stopped reading
+        // that file — the way a per-job rule passes vacuously.
+        let jobs = job_keys(text);
+        assert!(
+            !jobs.is_empty(),
+            "{label} runs on a cron and no job was read out of it. The jobs reader is not finding \
+             them, so this workflow answers this rule with nothing."
+        );
+        for job in jobs {
+            if let Err(why) = reporting_channel(text, &job) {
+                silent.push(format!(
+                    "  {label}: `{job}` runs on a cron, blocks no merge, and {why}. A red square \
+                     on a workflow nobody is required to read is not a control, and a sibling \
+                     job's reporter is not this job's channel."
+                ));
+            }
+        }
+    }
+    silent
 }
 
 #[test]
@@ -7262,61 +7475,567 @@ fn a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes() {
     // either failing stops a merge or lands in a pull request. Whatever
     // reaches a human has to be arranged by the workflow itself.
     //
-    // The rule is per WORKFLOW, which is where it stops short: audit.yml
-    // passes on the strength of its `report` job, and that job reports
-    // cargo-audit findings alone. Its `licences` job — the watch over the
-    // dependency-review waivers — fails into exactly the red square this test
-    // is about, one level below where the test can see it.
-    let mut silent = Vec::new();
+    // Every JOB of one, which is the half this rule used to miss. A reporter
+    // answers for what it ran: audit.yml's `report` files RustSec advisories,
+    // and that made the whole file pass while its `licences` job — the watch
+    // over the dependency-review waivers — and its cargo-deny leg both failed
+    // into the red square this test is about.
+    //
+    // And a channel is a STEP that files, which is the half a per-job reading
+    // does not fix by itself. `issues: write` was the whole of the evidence
+    // once; three jobs hold that grant now for the sake of one step each, so a
+    // reading that stopped at the permission would have gone on reporting a
+    // channel for as long as the grant outlived the step that used it.
+    //
+    // There is no carve-out list any more. The one entry it carried,
+    // release-pins.yml, files its own issue now, and the workflow that
+    // outgrew the per-workflow reading files two. An exception belongs back
+    // here as a named entry with the reason beside it — not as an empty shape
+    // waiting for one.
     let workflows = read_workflows();
-    let scheduled: Vec<&(String, String)> = workflows
+    let scheduled = workflows
         .iter()
         .filter(|(_, text)| runs_on_a_cron(text))
-        .collect();
+        .count();
     assert!(
-        scheduled.len() >= 3,
-        "only {} workflow(s) read as running on a cron; the trigger reader has stopped finding \
-         them and everything below passes vacuously",
-        scheduled.len()
+        scheduled >= 3,
+        "only {scheduled} workflow(s) read as running on a cron; the trigger reader has stopped \
+         finding them and everything below passes vacuously"
     );
 
-    for (label, text) in &scheduled {
-        if CRON_WITHOUT_A_CHANNEL
-            .iter()
-            .any(|&(known, _)| known == label)
-        {
-            continue;
-        }
-        if reporting_channel(text).is_none() {
-            silent.push(format!(
-                "  {label}: runs on a cron, blocks no merge, and neither files an issue, raises a \
-                 code-scanning alert nor uploads an artifact. A red square on a workflow nobody \
-                 is required to read is not a control."
-            ));
-        }
-    }
+    let silent = jobs_with_no_channel(&workflows);
     assert!(
         silent.is_empty(),
-        "scheduled runs whose findings reach nobody:\n{}",
+        "scheduled jobs whose findings reach nobody:\n{}",
         silent.join("\n")
     );
+}
 
-    // A recorded defect that has been fixed is worse than an unrecorded one:
-    // it is a live entry vouching for a state that no longer exists.
-    for &(label, why) in CRON_WITHOUT_A_CHANNEL {
-        let text = read(label);
+/// `text` with the `key:` block of `job` taken out, located by the readers the
+/// rule itself uses rather than by a line number that drifts.
+fn without_a_block(text: &str, job: &str, key: &str) -> String {
+    let lines = job_lines(text, job).unwrap_or_else(|| panic!("no `{job}:` job to mutate"));
+    let header = format!("{key}:");
+    let opens = lines
+        .iter()
+        .find(|line| strip_comment(line).trim() == header)
+        .unwrap_or_else(|| panic!("`{job}` declares no `{key}:` to take out"));
+    let mut block = vec![*opens];
+    block.extend(nested_block(&lines, key));
+    let cut = block.join("\n");
+    assert!(
+        text.contains(&cut),
+        "the `{key}:` block of `{job}` is not the run of consecutive lines this mutation assumed"
+    );
+    text.replacen(&cut, "", 1)
+}
+
+/// `text` with the step of `job` that `uses:` `reference` taken out.
+fn without_a_step(text: &str, job: &str, reference: &str) -> String {
+    let lines = job_lines(text, job).unwrap_or_else(|| panic!("no `{job}:` job to mutate"));
+    let at = lines
+        .iter()
+        .position(|line| step_uses(line).is_some_and(|uses| uses.contains(reference)))
+        .unwrap_or_else(|| panic!("`{job}` has no step using `{reference}` to take out"));
+    let cut = step_around(&lines, at).join("\n");
+    assert!(
+        text.contains(&cut),
+        "the `{reference}` step of `{job}` is not the run of consecutive lines this mutation \
+         assumed"
+    );
+    text.replacen(&cut, "", 1)
+}
+
+/// One workflow, in the shape [`jobs_with_no_channel`] reads.
+fn one_workflow(label: &str, text: String) -> Vec<(String, String)> {
+    vec![(label.to_owned(), text)]
+}
+
+/// Is `job` among the jobs these sentences are about?
+fn named(silent: &[String], job: &str) -> bool {
+    silent
+        .iter()
+        .any(|sentence| sentence.contains(&format!("`{job}`")))
+}
+
+/// The other scheduled workflow these mutations are cut from. The nightly one
+/// is [`LICENCE_WATCH`] — the same file under the name the licence rule reads
+/// it by, spelled once rather than twice.
+const WEEKLY_PINS: &str = ".github/workflows/release-pins.yml";
+
+#[test]
+fn the_rule_names_the_job_the_per_workflow_reading_let_through() {
+    // #200's third acceptance criterion, run rather than reasoned: the tightened
+    // rule has to be watched saying NO to the tree it was tightened for, and a
+    // rule that has only ever been asked about a tree it passes on is a rule
+    // whose reader could have stopped reading.
+    //
+    // The mutation IS that tree: audit.yml with the channel taken back off its
+    // `licences` job, which is what #198 shipped and what the per-workflow
+    // reading called fine on the strength of `report` two jobs above.
+    let text = read(LICENCE_WATCH);
+    let before = without_a_step(&text, "licences", LOCAL_REPORTER);
+    let before = without_a_block(&before, "licences", "permissions");
+    assert_ne!(
+        before, text,
+        "the mutation changed nothing, so it proves nothing"
+    );
+    assert!(
+        runs_on_a_cron(&before),
+        "the mutated workflow no longer reads as scheduled, so this rule would skip it for a \
+         reason that has nothing to do with what is being measured"
+    );
+    assert_eq!(
+        reporting_channel(&before, "report").as_deref(),
+        Ok("opens an issue per advisory"),
+        "the mutated workflow has to keep the sibling reporter that made the old reading pass — \
+         without it this test would be measuring a workflow with no channel anywhere"
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, before));
+    assert!(
+        named(&silent, "licences"),
+        "a cron job with no channel of its own went unreported while a sibling job held one. That \
+         is the per-workflow reading this rule replaced:\n{silent:?}"
+    );
+    assert!(
+        !named(&silent, "report"),
+        "the job that does report was reported too, so the rule is not reading per job at all:\n\
+         {silent:?}"
+    );
+}
+
+#[test]
+fn a_permission_no_step_uses_is_not_a_channel() {
+    // The half a per-job rule still misses if a channel is read off
+    // `permissions:`. Three jobs hold `issues: write` for one step each; delete
+    // the step and the grant stays behind, describing a channel that is gone.
+    let text = read(LICENCE_WATCH);
+    let stripped = without_a_step(&text, "licences", LOCAL_REPORTER);
+    let lines = job_lines(&stripped, "licences").expect("the mutation kept the job");
+    assert!(
+        grants_write(&job_permissions(&stripped, &lines), "issues"),
+        "the mutation removed the grant as well as the step, so it cannot show what reading the \
+         grant alone would have concluded"
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, stripped));
+    assert!(
+        named(&silent, "licences"),
+        "a job holding `issues: write` with nothing in it that files an issue was read as having \
+         a channel:\n{silent:?}"
+    );
+}
+
+#[test]
+fn a_reporter_that_cannot_run_after_the_failure_is_not_a_channel() {
+    // The other way the wiring dies quietly. `if: ${{ failure() && … }}` is
+    // what puts the reporter on the failing run; drop the status function and
+    // GitHub supplies `success()`, so the step is skipped exactly when there is
+    // something to report — with the permission granted, the action called, the
+    // workflow green in review and the finding still in the Actions tab.
+    let text = read(WEEKLY_PINS);
+    assert_eq!(
+        reporting_channel(&text, "freshness").as_deref(),
+        Ok("opens a rolling issue"),
+        "the tree this mutation starts from does not have the channel it is about to break"
+    );
+
+    let unguarded = text.replace("failure() && ", "");
+    assert_ne!(
+        unguarded, text,
+        "no `failure() && …` guard was found to drop, so the mutation proves nothing"
+    );
+    let silent = jobs_with_no_channel(&one_workflow(WEEKLY_PINS, unguarded));
+    assert!(
+        named(&silent, "freshness"),
+        "a reporting step that cannot run on a failing run was read as a channel:\n{silent:?}"
+    );
+}
+
+#[test]
+fn a_channel_is_read_off_the_job_that_would_need_it() {
+    // The reader, against the shapes that decide what a grant belongs to.
+    // Every one of them was answered wrong by the scan this replaced, which
+    // asked whether the WORKFLOW TEXT contained `issues: write` anywhere.
+    let workflow = concat!(
+        "name: probe\n",
+        "\n",
+        "on:\n",
+        "  schedule:\n",
+        "    - cron: \"40 15 * * *\"\n",
+        "\n",
+        "permissions:\n",
+        "  contents: read\n",
+        "\n",
+        "jobs:\n",
+        "  report:\n",
+        "    permissions:\n",
+        "      contents: read\n",
+        "      issues: write\n",
+        "    steps:\n",
+        "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+        "  licences:\n",
+        "    steps:\n",
+        "      - name: Compare each exemption against what crates.io now declares\n",
+        "        run: ./check\n",
+    );
+    assert_eq!(
+        reporting_channel(workflow, "report").as_deref(),
+        Ok("opens an issue per advisory"),
+        "the job that has a channel was not read as having one, so nothing below means anything"
+    );
+    assert!(
+        reporting_channel(workflow, "licences").is_err(),
+        "a sibling job's grant was read as this job's channel"
+    );
+
+    // A workflow-level grant reaches a job that declares no `permissions:` of
+    // its own, and is REPLACED — not extended — by one that does.
+    let reporting = concat!(
+        "        run: ./check\n",
+        "      - uses: ./.github/actions/report-failure\n",
+        "        if: ${{ failure() }}\n",
+    );
+    let inheriting = workflow
+        .replace(
+            "permissions:\n  contents: read\n",
+            "permissions:\n  issues: write\n",
+        )
+        .replace("        run: ./check\n", reporting);
+    assert_eq!(
+        reporting_channel(&inheriting, "licences").as_deref(),
+        Ok("opens a rolling issue"),
+        "a workflow-level grant did not reach the job that declares no `permissions:` of its own"
+    );
+    let replacing = inheriting.replace(
+        "  licences:\n    steps:\n",
+        "  licences:\n    permissions:\n      contents: read\n    steps:\n",
+    );
+    assert!(
+        reporting_channel(&replacing, "licences").is_err(),
+        "a job's own `permissions:` replaces the workflow's outright, so `contents: read` there \
+         means the workflow's `issues: write` is gone — it was read as still in force"
+    );
+
+    // A step's `with:` input is indented like a permission and is not one, and
+    // an upload in a sibling job is that job's evidence and not this one's.
+    let misread = workflow.replace(
+        "        run: ./check\n",
+        &format!("{reporting}        with:\n          issues: write\n"),
+    );
+    assert!(
+        reporting_channel(&misread, "licences")
+            .is_err_and(|why| why.contains("without the `issues: write` it files with")),
+        "a `with:` input spelled like a permission was counted as the grant"
+    );
+    let elsewhere = workflow.replace(
+        "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+        concat!(
+            "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+            "      - if: failure()\n",
+            "        uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567\n",
+        ),
+    );
+    assert!(
+        reporting_channel(&elsewhere, "licences").is_err(),
+        "an upload step in a sibling job was read as this job's evidence"
+    );
+}
+
+/// The body of a `key: |` block scalar, dedented to column zero.
+fn block_scalar(text: &str, key: &str) -> Option<String> {
+    let opens = |line: &str| {
+        let body = line.trim();
+        body == format!("{key}: |") || body == format!("{key}: |-")
+    };
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines.iter().position(|line| opens(line))?;
+    let open_indent = indent(lines[at]);
+    let body: Vec<&str> = lines[at + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indent(line) > open_indent)
+        .copied()
+        .collect();
+    let margin = body
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| indent(line))
+        .min()?;
+    Some(
+        body.iter()
+            .map(|line| line.get(margin..).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The one shell script the local reporter runs.
+///
+/// Run rather than read, because nothing else in this repo reads it at all:
+/// `just actionlint` discovers `.github/workflows/` and not `.github/actions/`,
+/// and it is invoked with `-shellcheck=` off on purpose. The dedup this script
+/// implements is the whole of #199's "repeated runs do not duplicate", and
+/// until here that promise was a sentence in a comment.
+fn reporter_script() -> String {
+    let action = read(LOCAL_REPORTER_FILE);
+    let script = block_scalar(&action, "run").unwrap_or_else(|| {
+        panic!(
+            "no `run: |` block in {LOCAL_REPORTER_FILE}; the reporter is not a shell step any more"
+        )
+    });
+    assert!(
+        script.contains("gh issue create"),
+        "the script read out of {LOCAL_REPORTER_FILE} files nothing, so every case below would \
+         pass on an empty string"
+    );
+    script
+}
+
+/// A `gh` that answers out of files instead of out of GitHub.
+///
+/// A shell function rather than a program on `PATH`: bash resolves a function
+/// before it searches `PATH`, so what runs underneath it is the action's own
+/// text with nothing altered and no executable bit to set. `cat` gives the
+/// same SIGPIPE behaviour a real `gh` would, which is the point of the third
+/// case below.
+const GH_STUB: &str = r#"
+gh() {
+  printf '%s\n' "${*:-}" >> "$STUB_CALLS"
+  case "${1:-} ${2:-}" in
+    'issue list') cat "$STUB_TITLES" ;;
+    'issue create')
+      shift 2
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --title) printf '%s\n' "$2" >> "$STUB_FILED"; shift 2 ;;
+          --body-file) cat "$2" >> "$STUB_BODY"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      ;;
+  esac
+}
+"#;
+
+const REPORTED_RUN: &str = "https://github.invalid/P4suta/aozora-flavored-markdown/actions/runs/42";
+const REPORTED_BODY: &str = "A pin in dist-workspace.toml is behind its upstream.";
+
+/// What one run of the reporter did.
+struct Reported {
+    ok: bool,
+    stderr: String,
+    /// The title of each issue it created.
+    filed: Vec<String>,
+    body: String,
+    /// Every `gh` command line it ran.
+    calls: Vec<String>,
+}
+
+/// Run the reporter against an issue list of `open_titles`, reporting `title`.
+fn run_the_reporter(open_titles: &[String], title: &str) -> Reported {
+    let dir = scratch("report-failure");
+    let write = |name: &str, content: String| {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+        path
+    };
+    let titles = write("open-titles", open_titles.join("\n") + "\n");
+    let calls = write("calls", String::new());
+    let filed = write("filed", String::new());
+    let body = write("body", String::new());
+
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!("{GH_STUB}\n{}", reporter_script()))
+        .env("STUB_TITLES", &titles)
+        .env("STUB_CALLS", &calls)
+        .env("STUB_FILED", &filed)
+        .env("STUB_BODY", &body)
+        .env("RUNNER_TEMP", &dir)
+        .env("GH_TOKEN", "probe")
+        .env("GH_REPO", "P4suta/aozora-flavored-markdown")
+        .env("TITLE", title)
+        .env("BODY", REPORTED_BODY)
+        .env("RUN_URL", REPORTED_RUN)
+        .output()
+        .unwrap_or_else(|e| panic!("running the reporter: {e}"));
+
+    let lines = |path: &Path| {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<String>>()
+    };
+    let reported = Reported {
+        ok: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        filed: lines(&filed),
+        body: fs::read_to_string(&body).unwrap_or_default(),
+        calls: lines(&calls),
+    };
+    drop(fs::remove_dir_all(&dir));
+    reported
+}
+
+#[test]
+fn the_rolling_reporter_files_once_and_stays_quiet_while_that_issue_is_open() {
+    let title = "audit: a licence exemption no longer holds";
+
+    let first = run_the_reporter(&[], title);
+    assert!(
+        first.ok,
+        "the reporter exited non-zero against an empty issue list:\n{}",
+        first.stderr
+    );
+    assert!(
+        first
+            .calls
+            .iter()
+            .any(|call| call.starts_with("issue list")),
+        "nothing asked which issues are open, so what ran is not the script in \
+         {LOCAL_REPORTER_FILE}"
+    );
+    assert_eq!(
+        first.filed,
+        [title],
+        "the first failing run filed {:?} rather than one issue titled {title:?}",
+        first.filed
+    );
+    assert!(
+        first.body.contains(REPORTED_RUN),
+        "the filed issue does not name the run that produced it, so the reader has the finding \
+         and no way to see it:\n{}",
+        first.body
+    );
+
+    let again = run_the_reporter(&[title.to_owned()], title);
+    assert!(again.ok, "the reporter exited non-zero:\n{}", again.stderr);
+    assert!(
+        again.filed.is_empty(),
+        "a repeat failure filed {:?} while an issue of that title was already open. Drift recurs \
+         every run until somebody fixes it, and a weekly copy of a report that is already open is \
+         how a channel stops being read (#199).",
+        again.filed
+    );
+
+    // The hazard the script's own comment names, measured. `gh … | grep -q`
+    // leaves gh writing into a pipe grep has closed, and under `pipefail` that
+    // reads back as "no such issue" — which files the duplicate above on every
+    // run whose issue list outgrows a pipe buffer.
+    let crowded: Vec<String> = iter::once(title.to_owned())
+        .chain((0..5_000).map(|n| format!("some unrelated open issue, number {n}")))
+        .collect();
+    let under_load = run_the_reporter(&crowded, title);
+    assert!(
+        under_load.ok,
+        "the reporter died reading a long issue list:\n{}",
+        under_load.stderr
+    );
+    assert!(
+        under_load.filed.is_empty(),
+        "an issue list too long for a pipe buffer made the reporter file {:?}, which is the \
+         duplicate it read the whole list to avoid",
+        under_load.filed
+    );
+}
+
+#[test]
+fn the_rolling_reporters_key_is_the_whole_title_read_literally() {
+    let title = "release-pins: a hand-maintained release pin has frozen behind upstream";
+    let wider = run_the_reporter(&[format!("{title} on the macOS runner")], title);
+    assert_eq!(
+        wider.filed,
+        [title],
+        "an open issue whose title merely CONTAINS this one suppressed the report. Without a \
+         whole-line match every longer title is a wildcard over the shorter ones, and the report \
+         nobody filed is the one nobody reads."
+    );
+
+    let dotted = "release-pins: dist v1.0 is behind";
+    let alike = run_the_reporter(&["release-pins: dist v1X0 is behind".to_owned()], dotted);
+    assert_eq!(
+        alike.filed,
+        [dotted],
+        "the title was matched as a regular expression, so an open issue that merely looks alike \
+         swallowed the report"
+    );
+}
+
+/// The `with:` input `key` of one step, unquoted.
+fn step_input(step: &[&str], key: &str) -> Option<String> {
+    let header = format!("{key}:");
+    nested_block(step, "with").iter().find_map(|line| {
+        strip_comment(line)
+            .trim()
+            .strip_prefix(header.as_str())
+            .map(|value| value.trim().trim_matches('"').to_owned())
+    })
+}
+
+#[test]
+fn every_rolling_report_is_keyed_on_a_title_that_cannot_change_between_runs() {
+    // What makes the reporter roll is that a repeat failure computes the SAME
+    // key. Two ways that stops being true, neither of which changes a line of
+    // the action: a title carrying `${{ github.run_id }}` files one issue per
+    // run, and two jobs sharing a title file one issue between them — where
+    // whichever fails first suppresses the other for as long as it stays open.
+    let workflows = read_workflows();
+    let mut keys: Vec<(String, String)> = Vec::new();
+    for (label, text) in &workflows {
+        for job in job_keys(text) {
+            let lines = job_lines(text, &job).unwrap_or_default();
+            for (at, line) in lines.iter().enumerate() {
+                if step_uses(line) != Some(LOCAL_REPORTER) {
+                    continue;
+                }
+                let step = step_around(&lines, at);
+                let site = format!("{label}: `{job}`");
+                let title = step_input(&step, "title").unwrap_or_else(|| {
+                    panic!(
+                        "{site} calls the reporter with no `title:`, which is the key it files \
+                            under"
+                    )
+                });
+                assert!(
+                    step_input(&step, "body").is_some(),
+                    "{site} calls the reporter with no `body:`, so the issue it files says only \
+                     that something failed"
+                );
+                keys.push((site, title));
+            }
+        }
+    }
+    assert!(
+        keys.len() >= 3,
+        "only {} scheduled step(s) call `{LOCAL_REPORTER}`. Three jobs have no reporter of their \
+         own and reach a human through it; fewer than that and either one has lost its channel or \
+         this reader has stopped finding the calls, and every assertion below passes vacuously.",
+        keys.len()
+    );
+
+    for (site, title) in &keys {
         assert!(
-            runs_on_a_cron(&text),
-            "{label} no longer runs on a cron, so it is not in scope for this rule any more — \
-             drop its CRON_WITHOUT_A_CHANNEL entry ({why})"
+            !title.contains("${{"),
+            "{site} keys its rolling issue on `{title}`, which is computed per run. A key that \
+             changes with the run is a new issue every run, which is the duplicate flood the \
+             rolling design exists to avoid."
         );
         assert!(
-            reporting_channel(&text).is_none(),
-            "{label} now {} — the defect its CRON_WITHOUT_A_CHANNEL entry describes is fixed, so \
-             delete the entry rather than leaving it to vouch for a state that is gone",
-            reporting_channel(&text).unwrap_or_default()
+            !title.trim().is_empty(),
+            "{site} files under an empty title, so every report matches every other"
         );
     }
+
+    let distinct: BTreeSet<&String> = keys.iter().map(|(_, title)| title).collect();
+    assert_eq!(
+        distinct.len(),
+        keys.len(),
+        "two scheduled jobs file under one title, so whichever fails first suppresses the other's \
+         report for as long as its issue is open:\n{keys:?}"
+    );
 }
 
 #[test]
