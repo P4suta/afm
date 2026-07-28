@@ -20,6 +20,17 @@
 
 #![forbid(unsafe_code)]
 
+// The repository's landing README, compiled as a doctest by `just test-doc`.
+// It lives here because the crate whose API it demonstrates cannot hold it:
+// an `include_str!` reaching outside a package is not carried by
+// `cargo publish`, so the library's own include points at its own README now
+// (DEV-225). This crate is `publish = false` and has a lib target, which makes
+// it the one place in the workspace that can reach the repository root and
+// still be a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct RootReadmeDoctests;
+
 pub mod config;
 pub mod generators;
 

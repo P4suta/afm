@@ -22,7 +22,13 @@ repository    = "https://github.com/P4suta/aozora-flavored-markdown"
 homepage      = "https://p4suta.github.io/aozora-flavored-markdown/"
 documentation = "https://p4suta.github.io/aozora-flavored-markdown/api/"
 authors       = ["aozora-flavored-markdown contributors"]
-readme        = "README.md"
+# No `readme` here on purpose. An inherited one is resolved against the
+# WORKSPACE root, so `readme.workspace = true` put THIS file — the repository
+# landing page — on all four crates.io pages, which is how the EPUB crate came
+# to be described by a document that never says EPUB and how every relative
+# link in it came to 404 (DEV-225). Each member names its own instead, and
+# leaving the key undefined is what makes the inheriting spelling a hard error
+# rather than a plausible-looking mistake.
 keywords      = ["markdown", "aozora", "japanese", "typography", "parser"]
 categories    = ["parser-implementations", "text-processing", "localization"]
 

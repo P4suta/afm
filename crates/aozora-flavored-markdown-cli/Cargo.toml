@@ -1,15 +1,25 @@
 [package]
 name        = "aozora-flavored-markdown-cli"
 description = "Aozora Flavored Markdown (aozora-flavored-markdown): command-line interface"
-version.workspace     = true
-edition.workspace     = true
-rust-version.workspace = true
-license.workspace     = true
-repository.workspace  = true
-authors.workspace     = true
-readme.workspace      = true
-keywords.workspace    = true
-categories.workspace  = true
+version.workspace       = true
+edition.workspace       = true
+rust-version.workspace  = true
+license.workspace       = true
+repository.workspace    = true
+homepage.workspace      = true
+documentation.workspace = true
+authors.workspace       = true
+keywords.workspace      = true
+categories.workspace    = true
+
+# This crate's own README — an inherited `readme` resolves against the
+# WORKSPACE root, which is how all four crates.io pages came to be the same
+# repository landing page. See the library's manifest.
+readme = "README.md"
+
+# The CLI integration suite is this repository's, not a consumer's. See the
+# library's manifest for the licence symlinks beside this file.
+exclude = ["tests/"]
 
 # Same docs.rs build as the library (see its manifest for why). docs.rs itself
 # documents nothing here — for a crate with no lib target it answers

@@ -7,10 +7,18 @@ license       = { workspace = true }
 description   = "CLI front-end for the aozora-flavored-markdown-epub library"
 repository    = { workspace = true }
 homepage      = { workspace = true }
+documentation = { workspace = true }
 authors       = { workspace = true }
-readme        = { workspace = true }
 keywords      = ["epub", "epub3", "markdown", "aozora", "japanese"]
 categories    = ["command-line-utilities"]
+
+# This crate's own README — an inherited `readme` resolves against the
+# WORKSPACE root. See the library's manifest.
+readme  = "README.md"
+
+# The CLI integration suite is this repository's, not a consumer's. See the
+# library's manifest for the licence symlinks beside this file.
+exclude = ["tests/"]
 
 # Binary distribution via cargo-dist is deferred: the epub CLI is independently
 # versioned (0.1.x) and not yet part of the workspace's cargo-dist release

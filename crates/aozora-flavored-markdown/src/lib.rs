@@ -16,12 +16,19 @@
 
 #![forbid(unsafe_code)]
 
-// Compile every fenced `rust` block in README.md as a doctest (run by
-// `just test-doc`) so the published quick-start can't drift from the API —
+// Compile every fenced `rust` block in this crate's README as a doctest (run
+// by `just test-doc`) so the published quick-start can't drift from the API —
 // the drift this guards against actually happened once. `#[cfg(doctest)]`
-// keeps the `include_str!` out of normal builds and `cargo package`.
+// keeps the `include_str!` out of normal builds and out of `cargo doc`.
+//
+// The path is inside the package. It used to reach three directories up to the
+// repository's landing README, which no tarball carries — so the crate a
+// consumer unpacked could not run its own doctests, and the README that
+// consumer read on crates.io was the landing page rather than this one
+// (DEV-225). The landing README is doctested by the test-support crate, which
+// is never published and can therefore keep reaching for it.
 #[cfg(doctest)]
-#[doc = include_str!("../../../README.md")]
+#[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
 mod ast_splice;
