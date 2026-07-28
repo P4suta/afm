@@ -787,7 +787,7 @@ pub enum Error {
 /// rule row and a codepoint this crate reserves come back as written, at any
 /// container depth. Plain CommonMark therefore passes through verbatim, up to
 /// what CommonMark does not itself distinguish and the parser normalises
-/// document-wide — CRLF becomes LF, a leading BOM goes, blank lines collapse.
+/// document-wide — any line ending becomes LF, a leading BOM goes, blank lines collapse.
 ///
 /// # Examples
 ///

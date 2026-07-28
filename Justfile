@@ -198,6 +198,19 @@ fuzz-seed:
         taking { gsub(/→/, "\t"); body = body $0 "\n" }
     ' spec/sources/*.txt
 
+    # CommonMark has LF, CRLF and lone CR line endings, but the tracked
+    # source fixtures are LF-normalised. Keep one generated seed per
+    # CR-sensitive structure so libFuzzer does not have to invent the byte
+    # before it can exercise fence fidelity.
+    printf 'a\rb\n\n```\nc\n\n\nd\n```\n' \
+        >"$work/seeds/eol-cr-in-prose-shifts-a-later-fence"
+    printf '```\r｜青梅《おうめ》\r［＃改ページ］\r```\r' \
+        >"$work/seeds/eol-cr-is-the-only-ending"
+    printf '```\r\n｜青梅《おうめ》\r｜漢字《かんじ》\r\n```\n' \
+        >"$work/seeds/eol-all-three-in-one-fence"
+    printf '> ```\r> ｜青梅《おうめ》\r> ```\r\n\n    ｜青梅《おうめ》\r    ｜漢字《かんじ》\n' \
+        >"$work/seeds/eol-cr-behind-a-container-and-an-indent"
+
     cd crates/aozora-flavored-markdown
     while IFS= read -r target; do
         dir="../../$corpus/$target"

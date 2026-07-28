@@ -335,9 +335,31 @@ fn byte_range(source: &str, line_starts: &[usize], pos: Sourcepos) -> Option<Ran
     (!text.is_empty()).then_some(start..start + text.len())
 }
 
+// CommonMark ends a line at any of three terminators and comrak counts all
+// three, so a table built from `'\n'` alone numbered every line after a lone
+// `'\r'` one too low. Each `byte_range` above then resolved against the line
+// before the one comrak meant: a region landed on the wrong bytes or failed to
+// slice at all, and a fence that was never lifted got canonicalised — its
+// blank-line runs squeezed and its own lone `'\r'` rewritten, which is the one
+// thing `protect` exists to prevent. A single `'\r'` after the miscount is
+// enough to carry the drift into every later region, so an unrelated fence
+// further down the source breaks along with the one that holds the CR.
+//
+// `"\r\n"` is one terminator rather than two: the `'\n'` arm answers for the
+// pair, and the `'\r'` arm stands down when a `'\n'` follows it.
 fn line_starts(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
     once(0)
-        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .chain(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(at, &byte)| match byte {
+                    b'\n' => Some(at + 1),
+                    b'\r' if bytes.get(at + 1) != Some(&b'\n') => Some(at + 1),
+                    _ => None,
+                }),
+        )
         .collect()
 }
 

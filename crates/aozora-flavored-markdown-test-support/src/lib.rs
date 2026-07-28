@@ -641,7 +641,7 @@ fn fence_interiors(src: &str) -> Vec<&str> {
     let mut interiors = Vec::new();
     let mut open: Option<(u8, usize, usize)> = None;
     let mut pos = 0;
-    for line in src.split_inclusive('\n') {
+    for line in lines_inclusive(src) {
         let end = pos + line.len();
         match open {
             // A raw-HTML block swallows the lines after it for a span only a
@@ -662,6 +662,33 @@ fn fence_interiors(src: &str) -> Vec<&str> {
         pos = end;
     }
     interiors
+}
+
+// CommonMark §2.1 ends a line at LF, at CRLF, or at a lone CR, and comrak
+// counts all three. This walk counted one — `split_inclusive('\n')` — so a
+// document whose lines end in a bare CR arrived as a SINGLE line: no fence
+// opened, no interior was collected, and I5 returned `Ok` over a fence whose
+// body had been rewritten. `"```\r｜青梅《おうめ》\r```\r"` came back with the
+// ruby's base marker gone — the acceptance case of the whole fence-fidelity
+// family, silently passing, because the net was woven per LF.
+//
+// `"\r\n"` is one ending rather than two, which is the whole reason this is a
+// scan and not `split_inclusive(['\n', '\r'])`: that would cut between the CR
+// and the LF and hand `fence_close` a line holding nothing but the LF.
+fn lines_inclusive(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while !rest.is_empty() {
+        let end = match rest.find(['\n', '\r']) {
+            None => rest.len(),
+            Some(at) if rest[at..].starts_with("\r\n") => at + 2,
+            Some(at) => at + 1,
+        };
+        let (line, tail) = rest.split_at(end);
+        out.push(line);
+        rest = tail;
+    }
+    out
 }
 
 // Deliberately a second implementation of the fence rules rather than a call
@@ -1688,6 +1715,44 @@ mod tests {
             let err = check_fence_fidelity(src, "").expect_err("must fire");
             assert!(matches!(err, Violation::FenceRewritten { .. }), "{src:?}");
         }
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_reads_a_fence_whose_lines_end_in_a_lone_cr() {
+        // DEV-233. The scanner split on LF alone, so a document whose lines end
+        // in a bare CR arrived as ONE line: it opened no fence, collected no
+        // interior, and answered `Ok` — over nothing. That is how the first
+        // source below passed I5 while `canonicalize` dropped the ruby's base
+        // marker out of the fence, which is the acceptance case this whole
+        // predicate exists for. The second mixes the endings, because a fence
+        // opened on a CRLF line and closed on a CR one is the shape a scanner
+        // that handles only its favourite ending still gets wrong.
+        for src in [
+            "```\r｜青梅《おうめ》\r```\r",
+            "```\r\n｜青梅《おうめ》\r```\n",
+            "```\n｜青梅《おうめ》\rx\n```\n",
+        ] {
+            let err =
+                check_fence_fidelity(src, "```\n青梅《おうめ》\n```\n").expect_err("must fire");
+            assert!(matches!(err, Violation::FenceRewritten { .. }), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn invariant_unit_check_fence_fidelity_reads_crlf_as_one_line_ending_not_two() {
+        // The half the test above cannot state: teaching the scanner about CR
+        // by splitting on `['\n', '\r']` would cut CRLF down the middle, and
+        // every interior would then start one byte early — a violation reported
+        // against the correct output, which is the failure mode that teaches
+        // people to merge red. The reported interior is asserted whole, so a
+        // scanner that fires for the wrong reason is not mistaken for one that
+        // works.
+        let src = "```\r\n｜青梅《おうめ》\r\n```\r\n";
+        let err = check_fence_fidelity(src, "").expect_err("must fire");
+        let Violation::FenceRewritten { interior, .. } = err else {
+            panic!("wrong violation for {src:?}: {err:?}")
+        };
+        assert_eq!(interior, "｜青梅《おうめ》\r\n");
     }
 
     #[test]

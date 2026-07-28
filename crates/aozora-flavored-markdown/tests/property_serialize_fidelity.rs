@@ -59,11 +59,11 @@ fn canonical(src: &str) -> String {
 /// to come back as nothing.
 ///
 /// Whitespace, plus the BOM — which `canonicalize`'s own rustdoc names as one
-/// of the three document-wide normalisations the parser applies, beside CRLF
-/// and blank-line collapsing. A `\u{FEFF}`-only source is the input the
-/// property below shrank to, and it is that documented behaviour rather than
-/// a hole: the exemption is over the *whole* source, so `a\u{FEFF}b` still
-/// owes a document back.
+/// of the three document-wide normalisations the parser applies, beside the
+/// line endings and blank-line collapsing. A `\u{FEFF}`-only source is the
+/// input the property below shrank to, and it is that documented behaviour
+/// rather than a hole: the exemption is over the *whole* source, so
+/// `a\u{FEFF}b` still owes a document back.
 fn is_blank(src: &str) -> bool {
     src.chars().all(|c| c.is_whitespace() || c == '\u{FEFF}')
 }
@@ -120,9 +120,7 @@ fn code_node_sources(src: &str) -> Vec<&str> {
     options.render.hardbreaks = true;
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, src, &options);
-    let line_starts: Vec<usize> = once(0)
-        .chain(src.match_indices('\n').map(|(at, _)| at + 1))
-        .collect();
+    let line_starts = line_starts(src);
     root.descendants()
         .filter_map(|node| {
             let data = node.data.borrow();
@@ -130,6 +128,33 @@ fn code_node_sources(src: &str) -> Vec<&str> {
                 .then(|| source_slice(src, &line_starts, data.sourcepos))
                 .flatten()
         })
+        .collect()
+}
+
+/// The byte each of comrak's 1-based lines starts at.
+///
+/// Counting `'\n'` alone — which this did — is the very defect DEV-233 fixed
+/// in the library, reproduced in the harness that was supposed to catch it:
+/// CommonMark §2.1 also ends a line at a lone `'\r'`, comrak counts those, and
+/// every sourcepos past one then resolved one line early here. The slices this
+/// walk handed [`assert_code_survives_verbatim`] were not the node's bytes, so
+/// the strongest of the three I5 shapes was reporting on text it had never
+/// located — in either direction, since a table that runs short drops the node
+/// silently and a table that is merely wrong compares the wrong bytes.
+fn line_starts(src: &str) -> Vec<usize> {
+    let bytes = src.as_bytes();
+    once(0)
+        .chain(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(at, &byte)| match byte {
+                    b'\n' => Some(at + 1),
+                    // `"\r\n"` is one ending, and the `'\n'` arm already answered for it.
+                    b'\r' if bytes.get(at + 1) != Some(&b'\n') => Some(at + 1),
+                    _ => None,
+                }),
+        )
         .collect()
 }
 
@@ -165,13 +190,20 @@ fn canonicalising_notation() -> impl Strategy<Value = String> {
 
 /// Line structure, the half of a payload a character mask cannot reach: a
 /// decorative rule row (the canonicaliser isolates one with a blank line), a
-/// run of three or more newlines (it collapses one to two), and a CRLF break
-/// (it rewrites one to LF). Each was a `check_fence_fidelity` carve-out, and
-/// each is now planted in every payload so no draw can miss all three.
+/// run of three or more newlines (it collapses one to two), and a break in
+/// each of CommonMark's three line endings (it rewrites the two CR-bearing
+/// ones to LF outside a protected region). Each was a `check_fence_fidelity`
+/// carve-out, and each is now planted in every payload so no draw can miss
+/// them all.
+///
+/// The lone-CR break is DEV-233's: this pool was written to hold the line
+/// structure a fence must keep, and it held LF and CRLF only — so the one
+/// ending that broke the region arithmetic was the one no payload ever drew.
 fn line_structure() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("\n\n".to_owned()),
         Just("\r\n\r\n".to_owned()),
+        Just("\r\r".to_owned()),
         Just("------------\n".to_owned()),
         Just("============\n".to_owned()),
         Just("____________\n".to_owned()),
@@ -224,24 +256,61 @@ fn container() -> impl Strategy<Value = (&'static str, &'static str)> {
     ])
 }
 
+/// A container prefix on every line of `body`, counting a line the way the
+/// block parser does.
+///
+/// `split('\n')` — which this was — reads `a\rb` as one line, so the prefix
+/// landed on the first of the two lines comrak sees and the second fell out of
+/// the blockquote or the list item entirely: the fence would close early and
+/// the payload this generator promises to be a fence interior would not be
+/// one. Getting that wrong reads as a canonicaliser bug, which is the failure
+/// mode a generator must not have.
 fn prefix_lines(body: &str, first: &str, rest: &str) -> String {
-    body.split('\n')
-        .enumerate()
-        .map(|(idx, line)| format!("{}{line}", if idx == 0 { first } else { rest }))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::new();
+    let mut rest_of_body = body;
+    let mut idx = 0;
+    while !rest_of_body.is_empty() {
+        let end = match rest_of_body.find(['\n', '\r']) {
+            None => rest_of_body.len(),
+            Some(at) if rest_of_body[at..].starts_with("\r\n") => at + 2,
+            Some(at) => at + 1,
+        };
+        let (line, tail) = rest_of_body.split_at(end);
+        out.push_str(if idx == 0 { first } else { rest });
+        out.push_str(line);
+        rest_of_body = tail;
+        idx += 1;
+    }
+    out
 }
 
-/// A document with one fence, at a drawn container depth, whose interior the
-/// test knows exactly.
+/// The ending for the lines this file writes itself, as opposed to the ones
+/// it draws into a payload.
+///
+/// The fence markers were hard-coded LF, so however much CR the interior
+/// carried, no drawn document ever asked what a fence whose *own* lines end in
+/// a bare CR does — and that is the shape `check_fence_fidelity` could not
+/// even see, because its scan was woven per LF too (DEV-233). A generator that
+/// only ever writes one line ending pins the checker's blind spot in place.
+fn line_ending() -> impl Strategy<Value = &'static str> {
+    prop::sample::select(vec!["\n", "\r\n", "\r"])
+}
+
+/// A document with one fence, at a drawn container depth and in a drawn line
+/// ending, whose interior the test knows exactly.
 fn fenced_document() -> impl Strategy<Value = (String, String)> {
-    (prose(), multiline_payload(), prose(), container()).prop_map(
-        |(before, payload, after, (first, rest))| {
-            let block = prefix_lines(&format!("```\n{payload}\n```"), first, rest);
+    (
+        prose(),
+        multiline_payload(),
+        prose(),
+        container(),
+        line_ending(),
+    )
+        .prop_map(|(before, payload, after, (first, rest), eol)| {
+            let block = prefix_lines(&format!("```{eol}{payload}{eol}```"), first, rest);
             let doc = format!("{before}\n\n{block}\n\n{after}\n");
             (doc, prefix_lines(&payload, rest, rest))
-        },
-    )
+        })
 }
 
 /// The same, for an inline code span — which the mask never covered at all.
@@ -457,13 +526,66 @@ fn line_structure_inside_a_fence_survives() {
 }
 
 #[test]
-fn a_crlf_fence_interior_survives_though_the_document_is_normalised_to_lf() {
-    // The third carve-out. CRLF is normalised document-wide by the parser —
-    // the closing fence's own break arrives as LF — but the interior is the
+fn a_fence_interior_survives_in_each_line_ending_though_the_document_is_normalised_to_lf() {
+    // The third carve-out, and the hole in the net woven for it. A line ending
+    // is normalised document-wide by the parser — the closing fence's own
+    // break arrives as LF in every row below — but the interior is the
     // author's byte and comes back as written.
-    let src = "```\r\n｜青梅《おうめ》\r\n```\r\n";
-    assert_eq!(canonical(src), "```\r\n｜青梅《おうめ》\r\n```\n");
-    assert_canonical_invariants(src);
+    //
+    // This case was pinned for CRLF alone. CommonMark §2.1 has three line
+    // endings, comrak counts all three, and the lone CR was never once handed
+    // to `canonicalize` here — so the one ending the region arithmetic got
+    // wrong (DEV-233: the line table counted LF only, every sourcepos past a
+    // bare CR resolved one line early, and the protection landed on the wrong
+    // bytes or nowhere) was the one ending nothing asked about. Rows 1 and 2
+    // are the report's own reproductions; the rest are the reach it did not
+    // enumerate, each of which failed before the fix.
+    for (src, expected) in [
+        // The report, case 1: a CR *inside* a fence is content, not structure.
+        ("```\na\rb\n```\n", "```\na\rb\n```\n"),
+        // The report, case 2: one bare CR in the prose above carried the
+        // miscount into a fence further down, whose blank-line run was then
+        // squeezed. The `a\rb` itself still normalises to `a\nb` — that is the
+        // document-wide line-ending normalisation `canonicalize`'s own rustdoc
+        // names, applying outside a protected region exactly as CRLF does, and
+        // not a residual half of this defect.
+        (
+            "a\rb\n\n```\nc\n\n\nd\n```\n",
+            "a\nb\n\n```\nc\n\n\nd\n```\n",
+        ),
+        // The fence's *own* lines end in a bare CR, so the document is one
+        // line to anything counting LF. This is the shape that was invisible
+        // to `check_fence_fidelity` as well: it read no fence at all and
+        // returned `Ok` while the ruby's base marker was being dropped.
+        (
+            "```\r｜青梅《おうめ》\r```\r",
+            "```\r｜青梅《おうめ》\r```\n",
+        ),
+        // Endings mixed inside one fence, which is what a hand-edited 青空文庫
+        // file looks like after a tool has rewritten some of its lines.
+        (
+            "```\r\n｜青梅《おうめ》\r```\n",
+            "```\r\n｜青梅《おうめ》\r```\n",
+        ),
+        // Behind a container prefix, where the column-anchored scanner cannot
+        // look and only the library's own region arithmetic answers.
+        (
+            "> ```\r> ｜青梅《おうめ》\r> ```\r",
+            "> ```\r> ｜青梅《おうめ》\r> ```\n",
+        ),
+        // An indented code block, whose boundaries are lines and nothing else.
+        (
+            "text\r\r    ｜青梅《おうめ》\r    ［＃改ページ］\r",
+            "text\n\n    ｜青梅《おうめ》\r    ［＃改ページ］\n",
+        ),
+        // The two rewrites a character mask cannot reach, now spelled in CR:
+        // a blank-line run to collapse and a rule row to isolate.
+        ("```\ra\r\r\rb\r```\r", "```\ra\r\r\rb\r```\n"),
+        ("```\ra\r------------\r```\r", "```\ra\r------------\r```\n"),
+    ] {
+        assert_eq!(canonical(src), expected, "line ending mishandled: {src:?}");
+        assert_canonical_invariants(src);
+    }
 }
 
 #[test]
@@ -646,7 +768,16 @@ fn the_rustdoc_names_the_only_two_normalisations() {
     // form, applied document-wide, and CommonMark distinguishes neither — so
     // they are named in the doc instead of softening what it promises. Inside
     // code both are held byte for byte, which the fence cases above pin.
+    //
+    // The doc said "CRLF becomes LF" and this test asked about CRLF, so
+    // between them they described a normalisation narrower than the one the
+    // parser performs: a lone CR is a line ending too and becomes LF exactly
+    // the same way. The doc now says "any line ending", and the rows that hold
+    // it to that are here — a promise no test reaches is the same vacuum as a
+    // test no promise names.
     assert_eq!(canonical("a\r\nb\n"), "a\nb\n");
+    assert_eq!(canonical("a\rb\n"), "a\nb\n");
+    assert_eq!(canonical("a\rb\r\nc\rd\n"), "a\nb\nc\nd\n");
     assert_eq!(canonical("a\n\n\n\nb\n"), "a\n\nb\n");
 }
 
