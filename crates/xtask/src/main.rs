@@ -758,9 +758,14 @@ fn aozora_bump(new_version: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Refresh the workspace Cargo.lock. The cargo-fuzz crate's lock is
-    // git-ignored (regenerated on the next `cargo fuzz` build), so only the
-    // umbrella `aozora` in the workspace needs an explicit update here.
+    // Refresh the workspace Cargo.lock. The cargo-fuzz crate's lock is NOT
+    // refreshed here: it is a second workspace with a second committed
+    // lockfile (DEV-293 — the sentence this comment used to carry, that the
+    // file is git-ignored and regenerated on the next `cargo fuzz` build, has
+    // been false since it was committed). Re-resolving it needs a cargo run
+    // with a different `--manifest-path`, which is `just fuzz-lock`; until it
+    // is run the two lockfiles disagree about `aozora` and both
+    // `verify-version-pins` and `lock_binding.rs` say so.
     let status = ProcessCommand::new("cargo")
         .args(["update", "-p", "aozora"])
         .status()

@@ -670,6 +670,20 @@ fn a_js_install_must_be_frozen_and_a_script_run_is_not_an_install() {
 /// The lockfile the fuzz workspace resolves against.
 const FUZZ_LOCK: &str = "crates/aozora-flavored-markdown/fuzz/Cargo.lock";
 
+/// The recipe that re-resolves [`FUZZ_LOCK`] onto the graph the workspace
+/// ships — the one command that turns this drift green.
+///
+/// Named once and interpolated into the failure below, so the instruction a
+/// person is given and the name this file checks against the Justfile cannot
+/// become two different words.
+const FUZZ_LOCK_REPAIR: &str = "fuzz-lock";
+
+/// The one dependency the fuzz workspace has and this workspace does not.
+/// libFuzzer's bindings are nightly-only, which is the entire reason the fuzz
+/// crate declares a `[workspace]` of its own — so everything it drags in is
+/// legitimately absent from `Cargo.lock`, and nothing else is.
+const LIBFUZZER: &str = "libfuzzer-sys";
+
 /// The versions a lockfile resolves each package to. A name can appear more
 /// than once — cargo keeps two incompatible majors side by side — so the
 /// answer is a set, and a subset relation rather than equality is what
@@ -691,6 +705,102 @@ fn locked_versions(text: &str) -> BTreeMap<String, BTreeSet<String>> {
                     .or_default()
                     .insert(value.trim_matches('"').to_owned());
             }
+        }
+    }
+    out
+}
+
+/// What each package in a lockfile depends on, by name. cargo spells an entry
+/// as `"name"` or `"name version"`, and only the name is the link.
+fn locked_dependencies(text: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut name = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let body = line.trim();
+        if body == "[[package]]" {
+            name.clear();
+            inside = false;
+        } else if let Some(value) = body.strip_prefix("name = ") {
+            value.trim_matches('"').clone_into(&mut name);
+        } else if let Some(rest) = body.strip_prefix("dependencies = [") {
+            inside = !rest.trim_end().ends_with(']');
+        } else if inside {
+            if body == "]" {
+                inside = false;
+            } else if let Some(dep) = body
+                .trim_matches(|ch| ch == '"' || ch == ',')
+                .split_whitespace()
+                .next()
+            {
+                out.entry(name.clone()).or_default().insert(dep.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Everything reachable from `root` in a lockfile's graph, `root` included.
+fn reachable(graph: &BTreeMap<String, BTreeSet<String>>, root: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root.to_owned()];
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(deps) = graph.get(&name) {
+            stack.extend(deps.iter().cloned());
+        }
+    }
+    seen
+}
+
+/// The packages nothing in the lockfile depends on: the crate it was resolved
+/// for. Derived rather than named, so it stays right when the crate is
+/// renamed.
+fn lockfile_roots(
+    graph: &BTreeMap<String, BTreeSet<String>>,
+    packages: &BTreeSet<&str>,
+) -> Vec<String> {
+    let depended: BTreeSet<&str> = graph.values().flatten().map(String::as_str).collect();
+    packages
+        .iter()
+        .filter(|name| !depended.contains(*name))
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+/// Every way the fuzz lockfile can disagree with the workspace's about the
+/// graph the fuzz targets link.
+///
+/// Two shapes, and the second is the one a reader that compared only the names
+/// both files hold could not see. A package the workspace no longer resolves
+/// AT ALL — comrak dropping a dependency, a crate renamed upstream — leaves the
+/// stale fuzz lockfile as the only file in the repo still holding it, and a
+/// shared-names-only comparison drops it on the way in: the targets go on
+/// fuzzing code this repo does not ship, which is the sentence the assertion
+/// below has always failed with. The legitimate absentees are derivable rather
+/// than listable — everything under [`LIBFUZZER`], plus the fuzz crate itself.
+fn fuzz_lock_drift(fuzz_text: &str, workspace_text: &str) -> Vec<String> {
+    let fuzz = locked_versions(fuzz_text);
+    let workspace = locked_versions(workspace_text);
+    let graph = locked_dependencies(fuzz_text);
+    let names: BTreeSet<&str> = fuzz.keys().map(String::as_str).collect();
+    let tail = reachable(&graph, LIBFUZZER);
+    let roots = lockfile_roots(&graph, &names);
+
+    let mut out = Vec::new();
+    for (name, theirs) in &fuzz {
+        match workspace.get(name) {
+            Some(ours) if theirs.is_subset(ours) => {}
+            Some(ours) => out.push(format!(
+                "  {name}: fuzz {theirs:?} vs workspace {ours:?} — a pin left behind"
+            )),
+            None if tail.contains(name) || roots.contains(name) => {}
+            None => out.push(format!(
+                "  {name} {theirs:?}: in the fuzz graph, in no workspace one, and not part of \
+                 `{LIBFUZZER}`'s tail — the workspace stopped resolving it and this file did not"
+            )),
         }
     }
     out
@@ -729,35 +839,50 @@ fn the_lockfile_that_stands_in_for_the_fuzz_exemption_resolves_the_graph_the_wor
     let workspace = fs::read_to_string(root.join("Cargo.lock"))
         .unwrap_or_else(|e| panic!("reading Cargo.lock: {e}"));
 
-    let fuzz = locked_versions(&fuzz);
-    let workspace = locked_versions(&workspace);
-    let shared: Vec<&String> = fuzz
+    let versions = locked_versions(&fuzz);
+    let workspace_versions = locked_versions(&workspace);
+    let shared = versions
         .keys()
-        .filter(|name| workspace.contains_key(*name))
-        .collect();
+        .filter(|name| workspace_versions.contains_key(*name))
+        .count();
     assert!(
-        shared.len() >= 40 && workspace.len() >= 100,
-        "{} packages in the fuzz lockfile, {} in the workspace's, {} shared; the reader is not \
-         finding the `[[package]]` blocks",
-        fuzz.len(),
-        workspace.len(),
-        shared.len()
+        shared >= 40 && workspace_versions.len() >= 100,
+        "{} packages in the fuzz lockfile, {} in the workspace's, {shared} shared; the reader is \
+         not finding the `[[package]]` blocks",
+        versions.len(),
+        workspace_versions.len(),
     );
 
-    let mut drifted = Vec::new();
-    for name in shared {
-        let (theirs, ours) = (&fuzz[name], &workspace[name]);
-        if !theirs.is_subset(ours) {
-            drifted.push(format!("  {name}: fuzz {theirs:?} vs workspace {ours:?}"));
-        }
-    }
+    // The other half of the same reader, and the one the absentee rule rests
+    // on: a graph nobody can walk makes every fuzz-only package look like the
+    // libFuzzer tail, i.e. makes that rule pass on everything.
+    let graph = locked_dependencies(&fuzz);
+    let names: BTreeSet<&str> = versions.keys().map(String::as_str).collect();
+    let tail = reachable(&graph, LIBFUZZER);
+    let roots = lockfile_roots(&graph, &names);
+    assert!(
+        tail.len() >= 3 && tail.contains(LIBFUZZER),
+        "`{LIBFUZZER}` reaches {tail:?} in {FUZZ_LOCK}; the reader is not finding the \
+         `dependencies` lists, so \"absent from the workspace because libFuzzer brought it\" is \
+         no longer something this file can tell from \"absent because the workspace dropped it\""
+    );
+    assert_eq!(
+        roots.len(),
+        1,
+        "{FUZZ_LOCK} has {roots:?} that nothing depends on. Exactly one package is the crate the \
+         lockfile was resolved for; more than one means a package sits in this graph with no \
+         path to a fuzz target, and none means the reader is not reading."
+    );
+
+    let drifted = fuzz_lock_drift(&fuzz, &workspace);
     assert!(
         drifted.is_empty(),
-        "the fuzz targets and the library resolve different versions of the same crates:\n{}\n\
+        "the fuzz targets and the library do not resolve the same graph:\n{}\n\
          A subset is fine — the fuzz graph is the smaller one, and the workspace keeps two majors \
          of a few crates for dependencies the harnesses never reach. A version the workspace does \
-         not have is not: the targets are then fuzzing code this repo does not ship. Re-resolve \
-         the fuzz workspace and commit {FUZZ_LOCK}.",
+         not have is not, and neither is a package it no longer has at all: the targets are then \
+         fuzzing code this repo does not ship. Run `just {FUZZ_LOCK_REPAIR}` and commit \
+         {FUZZ_LOCK}.",
         drifted.join("\n")
     );
 
@@ -765,10 +890,368 @@ fn the_lockfile_that_stands_in_for_the_fuzz_exemption_resolves_the_graph_the_wor
     // narrower check is narrow rather than vacuous.
     for name in ["aozora", "comrak"] {
         assert!(
-            fuzz.contains_key(name) && workspace.contains_key(name),
+            versions.contains_key(name) && workspace_versions.contains_key(name),
             "`{name}` is not in both lockfiles, and `just verify-version-pins` compares exactly \
              it and one other by name — over a package one side does not have, that comparison \
              passes on two empty strings"
+        );
+    }
+}
+
+/// A fuzz lockfile of the shape this repo's has: the crate, libFuzzer's tail,
+/// and the library's own graph.
+const FUZZ_LOCK_SAMPLE: &str = concat!(
+    "version = 4\n\n",
+    "[[package]]\nname = \"aozora-md-fuzz\"\nversion = \"0.0.0\"\n",
+    "dependencies = [\n \"aozora-flavored-markdown\",\n \"libfuzzer-sys\",\n]\n\n",
+    "[[package]]\nname = \"libfuzzer-sys\"\nversion = \"0.4.13\"\n",
+    "dependencies = [\n \"arbitrary\",\n \"cc\",\n]\n\n",
+    "[[package]]\nname = \"arbitrary\"\nversion = \"1.4.2\"\n\n",
+    "[[package]]\nname = \"cc\"\nversion = \"1.4.0\"\ndependencies = [\n \"jobserver\",\n]\n\n",
+    "[[package]]\nname = \"jobserver\"\nversion = \"0.1.35\"\n\n",
+    "[[package]]\nname = \"aozora-flavored-markdown\"\nversion = \"0.5.0\"\n",
+    "dependencies = [\n \"comrak\",\n \"rustc-hash\",\n]\n\n",
+    "[[package]]\nname = \"comrak\"\nversion = \"0.52.0\"\ndependencies = [\n \"entities\",\n]\n\n",
+    "[[package]]\nname = \"entities\"\nversion = \"1.0.2\"\n\n",
+    "[[package]]\nname = \"rustc-hash\"\nversion = \"2.1.3\"\n",
+);
+
+/// The workspace lockfile it agrees with: the same library graph, none of
+/// libFuzzer's, and one crate resolved twice the way this workspace really
+/// resolves `rustc-hash` and `unicode-width`.
+const WORKSPACE_LOCK_SAMPLE: &str = concat!(
+    "version = 4\n\n",
+    "[[package]]\nname = \"aozora-flavored-markdown\"\nversion = \"0.5.0\"\n",
+    "dependencies = [\n \"comrak\",\n \"rustc-hash\",\n]\n\n",
+    "[[package]]\nname = \"comrak\"\nversion = \"0.52.0\"\ndependencies = [\n \"entities\",\n]\n\n",
+    "[[package]]\nname = \"entities\"\nversion = \"1.0.2\"\n\n",
+    "[[package]]\nname = \"cc\"\nversion = \"1.4.0\"\n\n",
+    "[[package]]\nname = \"rustc-hash\"\nversion = \"1.1.0\"\n\n",
+    "[[package]]\nname = \"rustc-hash\"\nversion = \"2.1.3\"\n",
+);
+
+#[test]
+fn the_drift_reader_reports_a_bump_left_behind_and_stays_silent_on_the_shape_the_two_graphs_have() {
+    // The assertion above says the two lockfiles agree today. What it cannot
+    // say is that it would notice if they did not — and "the gate fails when
+    // the thing it gates happens" is exactly the half that gets demonstrated
+    // by hand once, in the pull request that adds the gate, and never again.
+    // Both verdicts are pinned here instead.
+    let agreeing = fuzz_lock_drift(FUZZ_LOCK_SAMPLE, WORKSPACE_LOCK_SAMPLE);
+    assert!(
+        agreeing.is_empty(),
+        "the shape the two lockfiles legitimately have reads as drift: {agreeing:?}. The fuzz \
+         graph is the smaller one, libFuzzer's tail is absent from the workspace's on purpose, \
+         and the workspace holds two majors of a crate the harnesses reach once."
+    );
+
+    // Dependabot's #177 exactly: the workspace pin moved, the second lockfile
+    // did not.
+    let bumped = WORKSPACE_LOCK_SAMPLE.replace("0.52.0", "0.54.0");
+    let stale = fuzz_lock_drift(FUZZ_LOCK_SAMPLE, &bumped);
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    assert!(stale[0].contains("comrak"), "{stale:?}");
+
+    // And the shape a comparison over shared names only could not see: comrak
+    // drops a dependency, the workspace lockfile loses it, and the stale fuzz
+    // lockfile is left as the only file in the repo that still resolves it.
+    // The package is in neither `shared` nor libFuzzer's tail, so the reader
+    // that filtered on `workspace.contains_key` dropped it before comparing
+    // anything — and a fuzz target went on linking a crate this repo had
+    // stopped shipping.
+    let dropped = WORKSPACE_LOCK_SAMPLE
+        .replace("dependencies = [\n \"entities\",\n]\n", "")
+        .replace(
+            "[[package]]\nname = \"entities\"\nversion = \"1.0.2\"\n\n",
+            "",
+        );
+    assert!(
+        !locked_versions(&dropped).contains_key("entities"),
+        "the sample edit did not remove the package it is about"
+    );
+    let orphaned = fuzz_lock_drift(FUZZ_LOCK_SAMPLE, &dropped);
+    assert_eq!(orphaned.len(), 1, "{orphaned:?}");
+    assert!(orphaned[0].contains("entities"), "{orphaned:?}");
+
+    // The absentee rule stays a rule and not a blanket: nothing under
+    // libFuzzer is ever reported, however far down it sits. `jobserver` is
+    // three edges away, through a `cc` the workspace does hold — at the same
+    // version, with a shorter `dependencies` list, because only the fuzz graph
+    // turns on the feature that pulls the scheduler in. The silence in the
+    // agreeing case is the other half: the fuzz graph holds one `rustc-hash`
+    // where the workspace holds two, and a reader comparing for equality
+    // rather than for a subset would have called that drift on every run.
+    for tail in ["libfuzzer-sys", "arbitrary", "jobserver", "aozora-md-fuzz"] {
+        assert!(
+            !stale.iter().any(|line| line.contains(tail)),
+            "`{tail}` is libFuzzer's or the fuzz crate's own and was reported: {stale:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the repair that machinery leaves a person
+// ---------------------------------------------------------------------------
+
+/// One `just` recipe: the `[attribute]` lines directly above its header, and
+/// the indented lines under it.
+struct Recipe<'a> {
+    attributes: Vec<&'a str>,
+    body: Vec<&'a str>,
+}
+
+/// Whether `line` opens the recipe called `name`. A header sits at column 0
+/// and spells any parameters before its `:`; `_fuzz := …` is an assignment and
+/// not one.
+fn opens_recipe(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix(name) else {
+        return false;
+    };
+    match rest.chars().next() {
+        Some(':') => true,
+        Some(' ') => rest.contains(':') && !rest.trim_start().starts_with(":="),
+        _ => false,
+    }
+}
+
+fn recipe<'a>(justfile: &'a str, name: &str) -> Option<Recipe<'a>> {
+    let lines: Vec<&str> = justfile.lines().collect();
+    let at = lines.iter().position(|line| opens_recipe(line, name))?;
+    let mut first = at;
+    while first > 0 && lines[first - 1].starts_with('[') {
+        first -= 1;
+    }
+    let body = lines[at + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || line.starts_with([' ', '\t']))
+        .copied()
+        .collect();
+    Some(Recipe {
+        attributes: lines[first..at].to_vec(),
+        body,
+    })
+}
+
+/// Every `just <recipe>` a sentence names. Backquoted only: "just" is an
+/// English adverb, and a recipe calling another one writes no quotes.
+fn recipes_named_in(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = text;
+    while let Some((_, after)) = rest.split_once("`just ") {
+        rest = after;
+        let name: String = after
+            .chars()
+            .take_while(|&ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            .collect();
+        if !name.is_empty() {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// The cargo sub-commands a script spells, toolchain prefixes skipped.
+fn cargo_subcommands(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in commands(text, Syntax::Lines) {
+        for (at, token) in command.tokens.iter().enumerate() {
+            if token != "cargo" {
+                continue;
+            }
+            let mut next = at + 1;
+            while command
+                .tokens
+                .get(next)
+                .is_some_and(|token| token.starts_with('+'))
+            {
+                next += 1;
+            }
+            if let Some(sub) = command
+                .tokens
+                .get(next)
+                .filter(|token| is_subcommand_word(token))
+            {
+                out.push(sub.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The entry on [`CARGO_SELF_LOCKING`] whose reason is a promise rather than a
+/// description.
+const MACHINERY_EXEMPTION: &str = "fuzz";
+
+/// The gate that stands in for the flag cargo-fuzz does not have: it compiles
+/// the targets and then asks whether doing so rewrote the lockfile.
+const REWRITE_GATE: &str = "fuzz-build";
+
+/// The gates that fail on this drift, each with what it compares. Their
+/// failure output is where a person meets the second lockfile — usually for
+/// the first time — so it is where the repair has to be spelled.
+const GATES_THAT_REPORT_THIS_DRIFT: &[(&str, &str)] = &[
+    (
+        "verify-version-pins",
+        "compares what the two lockfiles resolve `aozora` and `comrak` to",
+    ),
+    (REWRITE_GATE, "fails when the build it just ran rewrote it"),
+];
+
+#[test]
+fn the_gate_standing_in_for_the_flag_asks_whether_the_build_rewrote_the_file() {
+    // `cargo fuzz` is exempt from `--locked` because this recipe catches the
+    // re-resolution a moment after the fact instead of refusing it a moment
+    // before. What it caught was `git diff --quiet -- $lock`, and that is a
+    // different question: "does this file differ from the last commit". The
+    // two answers coincide on a clean CI checkout and nowhere else.
+    //
+    // Where they part is the workflow this PR institutes. `just fuzz-lock`
+    // re-resolves the file and prints the diff to review; the lockfile is then
+    // correct, uncommitted, and every `just ci` until the commit fails here —
+    // with the file's checksum unchanged across the build, under a message
+    // saying the build rewrote it. Measured on the bump this test arrived
+    // with: sha256 identical before and after, gate red. A gate that is red on
+    // the correct state is one people learn to scroll past, and this one is
+    // the only thing standing where a flag would be.
+    let justfile = fs::read_to_string(repo_root().join("Justfile"))
+        .unwrap_or_else(|e| panic!("reading Justfile: {e}"));
+    let gate = recipe(&justfile, REWRITE_GATE)
+        .unwrap_or_else(|| panic!("`just {REWRITE_GATE}` is not a recipe"));
+    let body = gate.body.join("\n");
+
+    assert!(
+        !body.contains("git diff --quiet"),
+        "`just {REWRITE_GATE}` decides on `git diff --quiet`, i.e. on whether {FUZZ_LOCK} matches \
+         HEAD. A build that rewrote nothing fails that on any branch carrying a re-resolution it \
+         has not committed yet — and whether the file is committed is somebody else's question: \
+         a clone getting it is `gate_wiring.rs`'s, the two lockfiles agreeing is \
+         `verify-version-pins`'s."
+    );
+
+    let snapshot = gate
+        .body
+        .iter()
+        .position(|line| line.contains("cp \"$lock\""));
+    let compiles = gate
+        .body
+        .iter()
+        .position(|line| line.contains("fuzz build"));
+    let (snapshot, compiles) = (
+        snapshot.unwrap_or_else(|| {
+            panic!(
+                "`just {REWRITE_GATE}` takes no copy of {FUZZ_LOCK}. \"Did this build rewrite the \
+                 file\" is answerable only against what the file held before it ran."
+            )
+        }),
+        compiles.unwrap_or_else(|| panic!("`just {REWRITE_GATE}` no longer builds the targets")),
+    );
+    assert!(
+        snapshot < compiles,
+        "`just {REWRITE_GATE}` copies {FUZZ_LOCK} at line {snapshot} of its body and builds at \
+         line {compiles}. A copy taken after the build is a copy of the rewrite."
+    );
+    assert!(
+        body.contains("cmp -s \"$before\" \"$lock\""),
+        "`just {REWRITE_GATE}` never compares {FUZZ_LOCK} against the copy it took, so the copy \
+         decides nothing"
+    );
+}
+
+#[test]
+fn the_machinery_this_exemption_promises_is_machinery_a_person_can_run() {
+    // The test above asks whether the two lockfiles agree. This one asks what
+    // a person does when they do not, and until this PR the honest answer was
+    // "work it out": the exemption named two gates and neither of them, nor
+    // the assertion above, named a command. The only thing in the repo that
+    // re-resolved that file was `just fuzz-build` — nightly, four libFuzzer
+    // targets, and an exit 1 by construction once it had done it. A repair
+    // reachable only through a gate that fails on success is how a drifting
+    // lockfile gets committed drifted.
+    //
+    // So the promise is checked as a promise: every recipe the exemption names
+    // exists, and the repair the failures name exists, re-resolves the right
+    // lockfile, and is spelled in every message that reports the drift.
+    let justfile = fs::read_to_string(repo_root().join("Justfile"))
+        .unwrap_or_else(|e| panic!("reading Justfile: {e}"));
+
+    let (_, reason) = CARGO_SELF_LOCKING
+        .iter()
+        .find(|(sub, _)| *sub == MACHINERY_EXEMPTION)
+        .unwrap_or_else(|| {
+            panic!("`{MACHINERY_EXEMPTION}` is no longer an exemption; this reader is stale")
+        });
+    let promised = recipes_named_in(reason);
+    assert!(
+        promised.len() >= 2,
+        "the `{MACHINERY_EXEMPTION}` exemption came out naming {promised:?}. Its reason is the \
+         one on this list that promises machinery instead of describing a CLI, and a reader that \
+         finds no machinery in it blesses whatever the sentence says next."
+    );
+    for name in &promised {
+        assert!(
+            recipe(&justfile, name).is_some(),
+            "the `{MACHINERY_EXEMPTION}` exemption rests on `just {name}`, which this Justfile \
+             does not define. The exemption is then a sentence about a command nobody can run, \
+             and `cargo fuzz` is unbound with nothing standing in for the flag."
+        );
+    }
+
+    let repair = recipe(&justfile, FUZZ_LOCK_REPAIR).unwrap_or_else(|| {
+        panic!(
+            "`just {FUZZ_LOCK_REPAIR}` is not a recipe. Two gate failures and the assertion above \
+             tell a person to run it, so a rename here costs three messages at once — each of \
+             them still perfectly clear, and none of them true."
+        )
+    });
+    let body = repair.body.join("\n");
+
+    let manifest = FUZZ_LOCK.replace("Cargo.lock", "Cargo.toml");
+    assert!(
+        body.contains(&manifest),
+        "`just {FUZZ_LOCK_REPAIR}` never names {manifest}. Re-resolving the OTHER workspace is \
+         what it is for; a cargo run that does not name that manifest rewrites this workspace's \
+         lockfile instead, which is the file that was already right."
+    );
+
+    let subcommands = cargo_subcommands(&body);
+    assert!(
+        !subcommands.is_empty(),
+        "`just {FUZZ_LOCK_REPAIR}` spells no cargo call: {body}"
+    );
+    for sub in &subcommands {
+        assert!(
+            CARGO_SELF_LOCKING.iter().any(|&(name, _)| name == *sub),
+            "`just {FUZZ_LOCK_REPAIR}` re-resolves with `cargo {sub}`, which this file's own \
+             policy binds to a lockfile with `--locked`. A repair that may not rewrite the file \
+             repairs nothing — the sub-command has to be one whose job IS the rewrite."
+        );
+    }
+
+    assert!(
+        !repair.attributes.iter().any(|line| line.contains("'gate'")),
+        "`just {FUZZ_LOCK_REPAIR}` is tagged a gate, so `just ci` runs it. It rewrites the very \
+         file the two gates below compare, and it runs before them: the drift would be repaired \
+         in the working tree and reported by nobody, leaving two green gates over an uncommitted \
+         diff. The repair is a thing a person runs."
+    );
+
+    for &(gate, compares) in GATES_THAT_REPORT_THIS_DRIFT {
+        let reporter = recipe(&justfile, gate)
+            .unwrap_or_else(|| panic!("`just {gate}` ({compares}) is not a recipe any more"));
+        assert!(
+            reporter
+                .attributes
+                .iter()
+                .any(|line| line.contains("'gate'")),
+            "`just {gate}` is no longer a gate, so nothing runs it and the drift it {compares} \
+             is reported on no pull request"
+        );
+        assert!(
+            recipes_named_in(&reporter.body.join("\n")).contains(FUZZ_LOCK_REPAIR),
+            "`just {gate}` {compares} and its failure never says `just {FUZZ_LOCK_REPAIR}`. \
+             This drift arrives on every cargo bump that moves a version the fuzz graph reaches, \
+             and the person reading the failure is usually meeting the second lockfile for the \
+             first time."
         );
     }
 }
