@@ -389,9 +389,9 @@ fuzz-build:
 # range. `libfuzzer-sys`, `arbitrary` and `jobserver`, the packages only this
 # graph has, keep the versions they had.
 #
-# `just fuzz-build` also rewrites the file, as a side effect of compiling four
-# targets against libFuzzer under nightly, and then fails because it did. That
-# is the gate; this is the fix.
+# `just fuzz-build` also rewrites the file, as a side effect of compiling every
+# registered target against libFuzzer under nightly, and then fails because it
+# did. That is the gate; this is the fix.
 #
 # Re-resolve the fuzz workspace's lockfile onto the graph the workspace ships.
 [group('fuzz')]
@@ -654,15 +654,35 @@ fuzz-seed:
         mkdir -p "$dir"
         rm -f "$dir"/seed-*
         for seed in "$work"/seeds/*; do
-            # `sjis_decode` is the one target whose input is bytes rather than
-            # text: it hands them to `decode_sjis`, which rejects a UTF-8 seed
-            # at its first multi-byte character — so an unencoded seed would
-            # teach it nothing. What CP932 cannot represent (an em dash, say)
-            # is dropped rather than transliterated: a seed is worth having
-            # only if it is what the decoder would really be handed.
+            # Two targets read something other than "the whole input is UTF-8
+            # source", and each needs its seeds in the shape it reads. The
+            # comment in `crates/xtask/tests/gate_wiring.rs` that excuses this
+            # recipe for naming a target called the second one before it
+            # existed: a `[[bin]]` with its own input format, seeded with
+            # documents it cannot parse, reported by the count below as
+            # cheerfully as the rest.
+            #
+            # `sjis_decode` hands its bytes to `decode_sjis`, which rejects a
+            # UTF-8 seed at its first multi-byte character — so an unencoded
+            # seed would teach it nothing. What CP932 cannot represent (an em
+            # dash, say) is dropped rather than transliterated: a seed is
+            # worth having only if it is what the decoder would really be
+            # handed.
+            #
+            # `options_space` reads a two-byte option mask before its source,
+            # so a seed handed over unprefixed loses its first two bytes to
+            # the mask and is decoded from the third — which for a document
+            # opening on a multi-byte character is not UTF-8 at all, and the
+            # target rejects it. Zeroes rather than a chosen configuration:
+            # the mask is the two bytes the fuzzer will mutate first, so what
+            # a seed owes is the right SHAPE, and picking a value here would
+            # be picking which corner of the space every seed starts from.
             if [[ "$target" == sjis_decode ]]; then
                 iconv -f UTF-8 -t CP932 <"$seed" >"$work/encoded" 2>/dev/null || continue
                 seed="$work/encoded"
+            elif [[ "$target" == options_space ]]; then
+                cat <(head -c 2 /dev/zero) "$seed" >"$work/masked"
+                seed="$work/masked"
             fi
             cp "$seed" "$dir/seed-$(sha1sum <"$seed" | cut -c1-16)"
         done
