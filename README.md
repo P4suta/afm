@@ -23,9 +23,16 @@ decomposition — on top of CommonMark + GFM.
 
 It is a **superset** of CommonMark + GFM, and which superset is a
 constructor: `Options::commonmark()` renders all 652 CommonMark 0.31.2 spec
-examples verbatim, `Options::gfm()` renders the GFM 0.29 extension cases
-verbatim with all four extensions on at once, and `Options::default()` is
-the Aozora dialect — GFM + 青空文庫記法 + hardbreaks.
+examples verbatim, `Options::gfm()` renders all 672 GFM 0.29 spec examples
+with all four extensions on at once, and `Options::default()` is the Aozora
+dialect — GFM + 青空文庫記法 + hardbreaks.
+
+The GFM figure is the whole suite rather than a corner of it. 657 of the
+672 come out verbatim; two more do once `<input type="checkbox">`'s
+attribute order is normalised; the last 13 are pinned to the version that
+supersedes the 0.29 fixture — nine emphasis cases CommonMark 0.30
+re-specified, four bare URLs that GFM's own autolink extension links.
+Nothing is skipped.
 
 `default()` is the one that is not a *strict* superset, and deliberately
 so: hardbreaks turns every source newline into a `<br>`, because verse and
@@ -40,7 +47,9 @@ extension stays `.md`.
 
 None of these claims is a promise. The conformance runners in
 [`crates/aozora-flavored-markdown/src/conformance.rs`](./crates/aozora-flavored-markdown/src/conformance.rs)
-render both spec corpora through those exact constructors, and
+render both spec corpora through those exact constructors — its `expected`
+is the list of 13, each entry naming the authority that supersedes the
+fixture and pinning what this crate renders instead — and
 [`tests/render_commonmark_superset.rs`](./crates/aozora-flavored-markdown/tests/render_commonmark_superset.rs)
 sweeps the same corpora through the dialect and pins the exception above.
 `just spec` and `just test` (`cargo test -p aozora-flavored-markdown`) are
@@ -105,9 +114,11 @@ Full API docs are on
 
 ## Guarantees
 
-- **100% CommonMark / GFM compatibility** — both spec suites pass
-  verbatim under `Options::commonmark()` / `Options::gfm()` (652
-  CommonMark 0.31.2 cases + GFM 0.29), gated by `just spec`.
+- **CommonMark / GFM compatibility, measured** — all 652 CommonMark
+  0.31.2 examples pass verbatim under `Options::commonmark()`, and all
+  672 GFM 0.29 examples run under `Options::gfm()`: 657 verbatim, two
+  normalised as XML, 13 pinned to what supersedes the 0.29 fixture.
+  Nothing is skipped; gated by `just spec`.
 - **Aozora Bunko compatibility target** — every notation listed at
   <https://www.aozora.gr.jp/annotation/> parses, and no unconsumed
   `［＃` marker reaches the rendered HTML.

@@ -139,6 +139,7 @@ dependencies = [
  "miette",
  "pretty_assertions",
  "proptest",
+ "quick-xml",
  "serde",
  "serde_json",
  "thiserror",

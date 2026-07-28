@@ -139,6 +139,13 @@ dhat              = { workspace = true }
 # Snapshot assertions for the post-splice HTML golden tests
 # (`tests/snapshot_splice.rs`).
 insta             = { workspace = true }
+# `conformance::canonical_xml`, which is how the two GFM task-list examples
+# are compared: their expected output differs from comrak's in attribute
+# order and self-closing style and in nothing else, so the runner compares
+# the two as XML rather than skipping them. A hand-rolled tag scanner is the
+# almost-right parser this workspace already keeps out of its source, and the
+# EPUB crate reads and writes its XML through this same crate.
+quick-xml         = { workspace = true }
 
 [features]
 # No `default`: the former `html` feature gated nothing (zero
