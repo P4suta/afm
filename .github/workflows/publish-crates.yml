@@ -81,12 +81,13 @@ concurrency:
 
 jobs:
   # Preflight — runs ungated on every dispatch (no credentials, so no
-  # environment approval needed). Two questions, both answerable before an
-  # upload: do the packages still build from their own metadata (all of them,
-  # in the order they would go up), and does the version about to go out
-  # cover the API changes in it. A live publish `needs:` this job, so either
-  # regression surfaces before anything is uploaded — and an upload is the one
-  # operation crates.io will not let anybody take back.
+  # environment approval needed). Three questions, all answerable before an
+  # upload: is the version about to go out one the CHANGELOG describes, do the
+  # packages still build from their own metadata (all of them, in the order
+  # they would go up), and does that version cover the API changes in it. A
+  # live publish `needs:` this job, so any of the three surfaces before
+  # anything is uploaded — and an upload is the one operation crates.io will
+  # not let anybody take back.
   #
   # Both steps are the SAME recipes the PR gates run, not a second spelling of
   # them: `AOZORA_MD_IN_CONTAINER` tells the Justfile's `_in` switch this job
@@ -120,6 +121,19 @@ jobs:
       - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
         with:
           tool: cargo-semver-checks,just
+
+      # The cheapest of the three, so it runs before either build. `just
+      # release` writes the section it looks for (`release.toml`'s
+      # pre-release-replacements cut `## [Unreleased]` into a dated heading);
+      # a tag cut by hand does not, and a tag is not required to be a commit
+      # any pull request ever ran. What gets published is whatever the
+      # dispatched ref holds, so this is the one moment the two can be
+      # compared — and the one gate list this step cannot join, because on a
+      # branch the section is still called `[Unreleased]` and always will be.
+      # The recipe is where the command lives all the same, so it can be run
+      # on a release ref by hand and read like every other check here.
+      - name: The version going out is one the CHANGELOG describes
+        run: just changelog-check
 
       - name: Dry-run the ladder (packages and verifies every publishable crate)
         run: just package

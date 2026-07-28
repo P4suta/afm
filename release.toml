@@ -1,0 +1,85 @@
+# cargo-release configuration — what `just release <level>` reads.
+#
+# The tool has been in the dev image since the Dockerfile grew its tier-D
+# layer and nothing has ever invoked it. Releasing was three steps in
+# CONTRIBUTING.md, performed by hand, and two of them were things a person has
+# to remember rather than things a tool does: cut `## [Unreleased]` into a
+# dated section, and re-run `just dist-assets` because the man page embeds the
+# version. Both are declarations here now.
+#
+# Per-package configuration is in `[package.metadata.release]` in the three
+# manifests it concerns, so each rule sits next to the thing it is a fact
+# about: the CHANGELOG replacements in the library's, the man-page hook in the
+# CLI's, and the second version line in the two EPUB manifests.
+#
+# NOT EXERCISED END TO END. No release is cut this cycle, so nothing below has
+# written a file. What the dry run does show — `just release minor`, which
+# passes no `--execute` — is more than a plan: the version step names every
+# member and the number each would take, the replace step prints the CHANGELOG
+# diff it would apply, and the hook actually runs. What is untested is the one
+# step that writes.
+
+# The default version line: the 0.5.x one the workspace manifest carries.
+#
+# `shared-version` as a GROUP NAME rather than `true` is the feature this
+# workspace needs. `true` means "one version across the workspace", and this
+# workspace has two: the library, its CLI, the wasm bridge and the two
+# dev-only crates all inherit `[workspace.package] version` (0.5.0), while the
+# two EPUB crates carry a 0.1.x line of their own (ADR-0018). A group is
+# bumped as a unit, so `just release minor` moves 0.5.0 to 0.6.0 and 0.1.0 to
+# 0.2.0 with neither line ever being told what the other is. The `epub` group
+# is declared in the two manifests that hold it.
+#
+# The name is `workspace`, not the `core` this was specified as, because
+# `workspace` is what cargo-release calls this group: a member with
+# `version.workspace = true` lands in a group of that name whatever this file
+# says, so `core` would have been a name nothing ever resolved to. Read it back
+# with `cargo release config --manifest-path crates/<crate>/Cargo.toml`. Saying
+# the same name the tool says leaves one definition instead of two; what the
+# key still decides is the DEFAULT for a member that names its own version.
+#
+# What a group is worth, measured rather than assumed: put the EPUB library in
+# this one and `cargo release version minor --workspace` takes it from 0.1.0 to
+# 0.6.0 while its CLI, left in `epub`, goes to 0.2.0. No error and no warning —
+# the two halves of one crate pair simply stop agreeing. That is what the
+# declaration in those two manifests buys.
+shared-version = "workspace"
+
+# The upload is `publish-crates.yml`'s (ADR-0015): `cargo publish --workspace
+# --locked` behind the `release` GitHub Environment, with a short-lived OIDC
+# token that only exists after a required-reviewer approval. This is not a
+# preference between two ways of doing it — a second uploader would be a
+# second set of credentials, and the one that runs from a laptop is the one
+# with no approval in front of it.
+publish = false
+
+# The commit and the tag are the developer's, made on the host.
+#
+# Both are SSH-signed and signing is mandatory here, and the signing key is
+# deliberately not in the dev image: docker-compose mounts the work tree and
+# the cargo caches, and nothing else (ADR-0002). A `git commit` run inside the
+# container would therefore not fail — it would SUCCEED, unsigned, which is
+# the failure mode worth arranging against. So `just release` runs
+# cargo-release's file-rewriting STEPS only (`version`, `replace`, `hook`) and
+# stops before `commit`; the release commit and the annotated `v<version>` tag
+# are made afterwards, by hand, where the key is.
+#
+# `tag = false` also keeps the tag NAME a decision this file does not get to
+# make silently: cargo-release would spell it `aozora-flavored-markdown-v0.6.0`
+# for a package in a subdirectory, and `v0.6.0` is what `cliff.toml`'s
+# `tag_pattern`, the `semver` gate's `--baseline-rev` and cargo-dist's
+# `release.yml` trigger all expect.
+tag  = false
+push = false
+
+# Not run by `just release` (see above), but a developer can reach the step
+# from `just shell`, and two files already depend on what it writes:
+# `committed.toml` rejects a capitalised subject, which cargo-release's default
+# (`chore: Release {{crate_name}} version {{version}}`) is; and `cliff.toml`
+# skips `^chore\(release\)` so the release commit stays out of the next draft,
+# which only holds if the commit really is spelled that way.
+pre-release-commit-message = "chore(release): v{{version}}"
+
+# A release is cut from `main`. cargo-release's default is every branch but a
+# detached HEAD.
+allow-branch = ["main"]

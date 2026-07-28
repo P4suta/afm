@@ -53,6 +53,46 @@ exclude = ["tests/", "benches/", "fuzz/"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+# Cutting `## [Unreleased]` into a dated section, which was step 1 of the
+# manual release and the step most likely to be skipped.
+#
+# It is declared HERE, on one package, rather than in `release.toml` where the
+# rest of the policy is, and that placement is load-bearing: cargo-release runs
+# `pre-release-replacements` once per selected package, and this workspace has
+# one CHANGELOG for all seven of them. Declared workspace-wide, the first pass
+# would cut the section and the second would cut the freshly emptied
+# `## [Unreleased]` the first pass had just written — `exactly = 1` matches
+# either way, because a fresh one is there to match. This is the package the
+# file is about: the library the workspace is named after, whose version is the
+# one the heading and the `v<version>` tag carry.
+#
+# `file` resolves against this directory, hence `../..`. The searches are
+# regular expressions in multi-line mode, and they run in the order written:
+# the two that consume `[Unreleased]` come before the two markers that write a
+# new one, or the new one would be consumed as well.
+#
+# Anchored, rather than cargo-release's own documented `search = "Unreleased"`
+# over the whole file. A third `[Unreleased]` lives in this CHANGELOG's history
+# — the 0.4.0 section says "see [Unreleased]" about a splicer that shipped —
+# and the unanchored form would rewrite that sentence into a cross-reference to
+# a release it predates.
+[package.metadata.release]
+pre-release-replacements = [
+    # The section heading becomes this version's, dated.
+    { file = "../../CHANGELOG.md", search = "(?m)^## \\[Unreleased\\]$", replace = "## [{{version}}] - {{date}}", exactly = 1 },
+    # Its link definition, and the compare range that definition points at:
+    # `compare/v0.5.0...HEAD` is what "unreleased" means as a URL, and the
+    # released form ends at the tag instead.
+    { file = "../../CHANGELOG.md", search = "(?m)^\\[Unreleased\\]: ", replace = "[{{version}}]: ", exactly = 1 },
+    { file = "../../CHANGELOG.md", search = "(?m)\\.\\.\\.HEAD$", replace = "...v{{version}}", exactly = 1 },
+    # A fresh, empty `## [Unreleased]` and its link definition, so the next
+    # cycle has somewhere to write and the one after it has this same shape to
+    # find. The markers are HTML comments: invisible in the rendered file, and
+    # the only thing in it that this configuration needs to be true.
+    { file = "../../CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n\n## [Unreleased]", exactly = 1 },
+    { file = "../../CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: https://github.com/P4suta/aozora-flavored-markdown/compare/v{{version}}...HEAD", exactly = 1 },
+]
+
 [lints]
 workspace = true
 

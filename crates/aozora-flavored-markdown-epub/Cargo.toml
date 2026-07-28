@@ -1,6 +1,6 @@
 [package]
 name          = "aozora-flavored-markdown-epub"
-version       = "0.1.0"            # independent of the workspace 0.4.x line (ADR-0018)
+version       = "0.1.0"            # independent of the workspace 0.5.x line (ADR-0018)
 edition       = { workspace = true }
 rust-version  = { workspace = true }
 license       = { workspace = true }
@@ -27,6 +27,16 @@ exclude = ["tests/"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+# The second of the workspace's two version lines. `release.toml` names the
+# other one (`workspace`) as its default, so this pair has to say which group
+# it is in: without this line a `minor` bump takes the crate from 0.1.0 to the
+# parser's next number — measured, and neither an error nor a warning — which
+# is the collapse ADR-0018 declined when the generator was absorbed. Naming the
+# group on both halves is what keeps this crate and its CLI on one number
+# without either manifest naming the other's.
+[package.metadata.release]
+shared-version = "epub"
 
 [lints]
 workspace = true

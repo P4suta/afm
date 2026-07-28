@@ -33,6 +33,27 @@ exclude = ["tests/"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+# Step 2 of the manual release, made a consequence of the bump instead of
+# something to remember after it. `dist/assets/man/aozora-flavored-markdown.1`
+# is generated from this binary's clap definition and embeds the version in two
+# places, so every bump invalidates it and `just dist-assets-check` — a gate —
+# goes red on the release commit itself.
+#
+# Declared on THIS package because it is this package's man page: cargo-release
+# runs the hook once per selected package, and a hook that regenerates a CLI's
+# assets has no business firing for the wasm bridge or for xtask. The recipe is
+# reached through `just`, which walks up to the workspace Justfile and runs
+# from there, so the hook's working directory (this crate) does not matter.
+#
+# `bun install` is deliberately NOT here. `playground/bun.lock` was expected to
+# drift on a version bump — the wasm `pkg/package.json` it links to by `file:`
+# carries the workspace version — but measured at the pinned bun (1.3.14,
+# lockfile v1) it does not: the lockfile records that dependency as a path with
+# no version, and `bun install --frozen-lockfile` passes with the two out of
+# step. See `just playground-install`.
+[package.metadata.release]
+pre-release-hook = ["just", "dist-assets"]
+
 [lints]
 workspace = true
 

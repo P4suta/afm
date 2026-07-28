@@ -68,6 +68,13 @@ jobs:
               - '.github/**'
               # The workflow linters' own policy: editing it has to run them.
               - 'zizmor.yml'
+              # The release policy, for the same reason. `gate_wiring` reads
+              # this file to decide that no release this repo can run uploads
+              # to crates.io by itself, and that `just release` is held to the
+              # steps that only write files. Both are answers about a file
+              # whose whole purpose is to be read by a tool, so a diff that
+              # edits it alone is exactly the diff those rules exist for.
+              - 'release.toml'
               # Same rule for the prose linter's policy — and, unlike every
               # other entry here, for the documents it reads. A Markdown file
               # used to be outside every gate this repo has, which is why this

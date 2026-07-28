@@ -145,14 +145,41 @@ issues go through `SECURITY.md`, never a public issue.
 ## Releasing
 
 Releases are automated by [cargo-dist](https://opensource.axo.dev/cargo-dist/)
-and triggered by a `v<semver>` tag:
+and triggered by a `v<semver>` tag.
 
-1. Update `CHANGELOG.md` by hand — an entry has to say what broke and what
-   to do about it, which a commit subject does not. `just changelog` prints
-   a draft to stdout to check against; nothing writes the file for you.
-2. `just dist-assets` — the man page embeds the version, and `just ci`'s
-   `dist-assets-check` gate fails otherwise.
-3. Commit, tag annotated, push both.
+```sh
+just release minor             # dry run: prints every file it would rewrite
+just release minor --execute   # rewrites them
+git commit -am 'chore(release): v0.6.0'
+git tag -a v0.6.0 -m 'v0.6.0' && git push --follow-tags
+```
+
+[cargo-release](https://github.com/crate-ci/cargo-release) writes every
+manifest and `Cargo.lock`, cuts the `## [Unreleased]` section of
+`CHANGELOG.md` into a dated one, and regenerates the man page that embeds the
+version. `release.toml` is the configuration — plus a
+`[package.metadata.release]` table in three manifests, each next to the thing
+it is a fact about. Writing the CHANGELOG *entries* is still yours: an entry
+has to say what broke and what to do about it, which a commit subject does
+not. `just changelog` prints a git-cliff draft to check the section against
+before you cut it.
+
+The two version lines move independently and neither is told what the other
+is: `shared-version` groups the crates that inherit `[workspace.package]
+version` as `workspace` and the two 0.1.x EPUB crates as `epub`, and a bump
+applies the level within each group. A new crate that carries its own version
+has to name its group, or it is bumped onto the workspace's number without a
+warning.
+
+The commit and the tag are yours by design. Both are SSH-signed and the key
+is not in the dev image — a `git commit` run inside the container would not
+fail, it would succeed unsigned — so `just release` stops when the files are
+written. `release.toml` says the same in the form cargo-release reads
+(`publish = false`, `tag = false`, `push = false`), so reaching for the tool
+by hand from `just shell` lands in the same place. Publishing is
+`publish-crates.yml`'s, behind a required-reviewer approval and a short-lived
+OIDC token; its preflight refuses a version `CHANGELOG.md` has no section
+for.
 
 `release.yml` is **generated, never hand-edited**: `dist plan` diffs it
 against the generator and fails on any drift, including the `actions/*`

@@ -5,6 +5,8 @@ this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- next-header -->
+
 ## [Unreleased]
 
 This cycle follows the sibling parser to **aozora 0.5.0**, which curated
@@ -62,6 +64,18 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
   CommonMark pool now carries shapes a parser-side generator has no
   Markdown to express: Aozora notation inside a table cell, a list item,
   a link label, a code span and a fenced block. (#155)
+- **`diagnose(&str, &Options) -> Vec<Diagnostic>`** — what a render would
+  report, without the render. Exactly `render`'s diagnostics, reached without
+  the comrak parse, the splice or the HTML formatting, so a `check` command
+  and the render it precedes cannot disagree about a source. The CLI's
+  `check` sub-command is what needed it: it documented "without rendering"
+  and rendered unconditionally. (#190)
+- **`escape_html(&str) -> String`** — the workspace's one HTML escaper, over
+  `&`, `<`, `>`, `"` and `'` (numeric `&#39;`, HTML 4 having no `&apos;`), so
+  one call is right in text and in a quoted attribute alike. The EPUB
+  envelope's private copy is gone; the two agreed character for character and
+  nothing could have noticed if a fix had landed on one side only. A second
+  escape table now fails `just strict-code`. (#182)
 - **Three ADRs** — [ADR-0021](docs/adr/0021-aozora-boundary-is-the-public-surface.md)
   (the boundary is the parser's public surface only, and an upstream API
   request must be justified from upstream's side alone),
@@ -973,6 +987,7 @@ Initial public preview release of Aozora Flavored Markdown.
   strict-code grep gate that rejects `#[allow(...)]`, nightly feature
   gates, and raw `println!` in library crates.
 
+<!-- next-url -->
 [Unreleased]: https://github.com/P4suta/aozora-flavored-markdown/compare/v0.4.1...HEAD
 [0.4.1]: https://github.com/P4suta/aozora-flavored-markdown/compare/v0.4.0...v0.4.1
 [0.1.0]: https://github.com/P4suta/aozora-flavored-markdown/releases/tag/v0.1.0

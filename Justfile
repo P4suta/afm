@@ -1283,7 +1283,46 @@ adr TITLE:
 changelog:
     {{_dev}} git-cliff --unreleased
 
-# --- release assets ----------------------------------------------------------
+# --- release -----------------------------------------------------------------
+
+# Cut a version bump: every manifest, `Cargo.lock`, the `## [Unreleased]`
+# section of `CHANGELOG.md` and the man page that embeds the version, in one
+# command. LEVEL is `patch` / `minor` / `major`, or an explicit version.
+#
+# DRY RUN BY DEFAULT, and that is the confirmation step: cargo-release writes
+# nothing without `--execute`, so `just release minor` prints exactly what it
+# would do to which files and `just release minor --execute` does it. The
+# interactive prompt is off (`--no-confirm`) rather than being a second answer
+# to the same question — a prompt is also the one part of this that cannot be
+# read in a review or replayed in a terminal without a TTY.
+#
+# THREE STEPS RATHER THAN THE WHOLE OF `cargo release`, and the split is the
+# point. The steps after these are `commit`, `publish`, `tag` and `push`, and
+# each of them belongs to something else: the upload is
+# `publish-crates.yml`'s, behind an approval gate and an OIDC token, and the
+# commit and the tag are SSH-signed with a key that is deliberately not in the
+# dev image. A `git commit` from inside the container would not fail — it
+# would succeed, unsigned. So this recipe stops when the files are written; the
+# release commit and the annotated `v<version>` tag are made on the host
+# afterwards, where the key is. `release.toml` says the same thing in the form
+# cargo-release reads (`tag = false`, `push = false`, `publish = false`), so
+# running the tool by hand from `just shell` lands in the same place.
+#
+# `--workspace` because the workspace has two version lines and both move:
+# `shared-version` groups them (`workspace` for the crates that inherit
+# `[workspace.package] version`, `epub` for the two 0.1.x generator crates),
+# and a bump applies the level within each group. Leaving the flag off selects
+# the default members, which is a subset — and a version line half-bumped is
+# the failure a shared version exists to prevent.
+#
+# Not a gate, and there is nothing here for one to check: this is the only
+# recipe in the file that writes to the tree on purpose.
+[group('release')]
+release LEVEL *ARGS:
+    {{_dev}} bash -c 'set -euo pipefail; \
+        cargo release version {{LEVEL}} --workspace --no-confirm {{ARGS}}; \
+        cargo release replace --workspace --no-confirm {{ARGS}}; \
+        cargo release hook --workspace --no-confirm {{ARGS}}'
 
 # Regenerate the shell completions + man page bundled into the release
 # archives (under dist/assets/, shipped via dist-workspace.toml `include`).
@@ -1301,6 +1340,40 @@ dist-assets:
 dist-assets-check:
     {{_dev}} cargo build --locked --package aozora-flavored-markdown-cli --quiet
     {{_dev}} cargo run --locked --package xtask --quiet -- gen-dist-assets --check
+
+# The version this workspace declares is one CHANGELOG.md has a section for.
+#
+# The other half of `just release`: the recipe above cuts the section, and this
+# is what notices when a release was cut without it — a tag is not required to
+# be a commit any pull request ever ran, and the tag is what gets published.
+#
+# NOT a gate, and it cannot be one: on a branch the section is called
+# `## [Unreleased]` and always will be, so a pull request would fail this every
+# time. It is answerable exactly once, of a release ref, which is why
+# `publish-crates.yml`'s preflight is its only caller — and why the command
+# lives here rather than in that file, where nothing but a dispatch would ever
+# read it. Run it on a release ref and it answers; run it on `main` today and
+# it says 0.5.0 has no section, which is true.
+#
+# `cargo pkgid` rather than a grep over `Cargo.toml`: this workspace publishes
+# on two version lines, so the root manifest's version is the wrong answer for
+# the EPUB pair, and reading it as text is what
+# `no_workflow_reads_a_crate_version_out_of_a_manifest_by_hand` refuses. The
+# package is named because the heading and the `v<version>` tag both carry the
+# `workspace` line. The suffix is `#<version>`, or `#<name>@<version>` when the
+# directory and the crate disagree; the substitution takes either.
+[group('release')]
+changelog-check:
+    {{_dev}} bash -c 'set -euo pipefail; \
+        id=$(cargo pkgid --locked --package aozora-flavored-markdown); \
+        version=${id##*[#@]}; \
+        if ! grep -qF "## [${version}]" CHANGELOG.md; then \
+            printf "changelog-check: CHANGELOG.md has no \"## [%s]\" section.\n" "${version}" >&2; \
+            printf "  That heading is written by the release bump, not by hand: run\n" >&2; \
+            printf "  just release <level> --execute rather than tagging.\n" >&2; \
+            exit 1; \
+        fi; \
+        printf "changelog-check: CHANGELOG.md describes %s\n" "${version}"'
 
 # The four published crates, built the way a consumer receives them.
 #
@@ -1403,13 +1476,19 @@ wasm-build-dev:
 # where cross-fs writes are slow.
 #
 # `--frozen-lockfile` is the JS half of the `--locked` policy above: bun.lock
-# is the resolution of record and no recipe may rewrite it. KNOWN DRIFT
-# SOURCE: the `aozora-flavored-markdown-wasm` entry is a `file:` link into
-# `crates/aozora-flavored-markdown-wasm/pkg`, whose package.json carries the
-# workspace version — so a version bump invalidates bun.lock and this recipe
-# fails until it is regenerated. That regeneration belongs to the release
-# bump, not here; until the cargo-release hook lands, run a bare
-# `bun install` once by hand and commit the lockfile with the bump.
+# is the resolution of record and no recipe may rewrite it.
+#
+# A version bump was expected to break that — the `aozora-flavored-markdown-wasm`
+# entry is a `file:` link into `crates/aozora-flavored-markdown-wasm/pkg`, whose
+# package.json carries the workspace version — and the release bump was going
+# to carry a `bun install` to repair it (DEV-295). Measured at the pinned bun
+# (1.3.14, lockfile v1) it does not break: the lockfile records that dependency
+# as `aozora-flavored-markdown-wasm@file:…/pkg` with no version at all, so this
+# recipe passes with the two out of step. Reproduce by editing the `version`
+# in `pkg/package.json` and running it. So there is no hook for this, and the
+# reason it is written down is that the absence of one is now a measurement
+# rather than an omission — bun recording a version here would put the drift
+# back, and this comment is where the next reader looks.
 [group('playground')]
 playground-install: wasm-build
     {{_pg_install}} bash -c 'cd playground && bun install --frozen-lockfile'
