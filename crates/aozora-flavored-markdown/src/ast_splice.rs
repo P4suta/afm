@@ -302,14 +302,16 @@ impl<'a> AstSplicer<'a, '_> {
             }
         }
         self.flush_text(&mut current, &mut segments);
-        if segments.is_empty() {
-            // No splits happened (e.g. orphan-bracket prefix matched
-            // by classify but the run actually consisted only of "［"
-            // followed by non-`＃`). Leave the original node alone.
-            return;
-        }
-        // Insert all segments after the original Text node, then
-        // detach the original.
+        // Insert all segments after the original Text node, then detach the
+        // original — including when there are none, which means every
+        // character was consumed. A heading body that is nothing but an
+        // orphan `［＃` run is that case: the branch above swallows the run
+        // rather than break Tier A or Tier C, and an early return here left
+        // the original node in place with its sentinels still in it (Tier B).
+        // Reachable on `main` today through any ATX heading whose body is one
+        // such run, so this is a pre-existing leak rather than one the rule
+        // row uncovered; what the rule row added is the setext spellings of
+        // the same shape, which is how the property suite found it.
         let mut anchor: &'a AstNode<'a> = node;
         for seg in segments {
             anchor.insert_after(seg);

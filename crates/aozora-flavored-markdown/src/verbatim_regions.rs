@@ -1,18 +1,84 @@
-//! Lifts the regions the canonicaliser must not read out of its reach, for
-//! `crate::canonicalize` — the stronger half of the split
-//! `crate::code_block_mask` documents. A whole region leaves as one
-//! placeholder, so the line structure inside it (a blank-line run, a rule row,
-//! the `> ` a container puts in front of every line) never reaches the
-//! canonicaliser at all. comrak locating most of them is what keeps this a
-//! splice rather than the block parser a fence scanner would have to become.
+//! Holds out of the sibling parser's reach what CommonMark owns. One rule
+//! about a rule row, two mechanisms, because the crate's two halves owe their
+//! callers different things. [`protect`] lifts a whole region out for
+//! `crate::canonicalize`, which owes no offset, so the line structure inside
+//! it (a blank-line run, a rule row, the `> ` a container puts in front of
+//! every line) never reaches the canonicaliser; [`hide_rule_rows`] substitutes
+//! one byte for one for `crate::render`, which keeps a construct's byte span
+//! slicing the caller's text. comrak locating most of the first family keeps
+//! it a splice rather than the block parser a fence scanner would become.
 
-use core::iter::once;
+use core::iter::{once, repeat_n};
 use core::ops::Range;
 
 use comrak::nodes::{NodeHeading, NodeValue, Sourcepos};
 
 use crate::code_block_mask::MASK_CHAR;
 use crate::{Options, sentinels};
+
+// The three characters a rule row can be made of, and what each becomes for
+// the sibling parser's read — index for index.
+//
+// C0 controls, one byte each: the substitution is byte-for-byte, so every
+// range the parser reports still addresses the caller's own text, which is
+// the whole reason `render` cannot lift a region out the way `protect` does.
+// None of them is whitespace, so a hidden row is still the non-blank line the
+// block structure around it was read against, and none of them appears in
+// prose — a source that carries one is left unhidden rather than guessed at.
+const RULE_CHARS: [u8; 3] = [b'-', b'=', b'_'];
+const HIDDEN_RULE_CHARS: [u8; 3] = [0x01, 0x02, 0x03];
+
+// Hides every rule row from the sibling parser, which would otherwise push
+// one onto a stanza of its own and split whichever block CommonMark had given
+// the bytes to. `reveal_rule_rows` puts the row back before comrak parses, so
+// the split never happens and comrak still reads the caller's own row.
+//
+// `None` where nothing was hidden — the source has no rule row, or it already
+// carries a character the reveal would claim. A caller that gets `None` reads
+// its own text and must not reveal.
+pub(crate) fn hide_rule_rows(source: &str) -> Option<String> {
+    if source.bytes().any(|byte| HIDDEN_RULE_CHARS.contains(&byte)) {
+        return None;
+    }
+    let rows = rule_rows(source);
+    if rows.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for row in rows {
+        out.push_str(&source[cursor..row.start]);
+        cursor = row.end;
+        let text = &source[row];
+        match hidden_form(text) {
+            Some(hidden) => out.extend(repeat_n(hidden, text.len())),
+            None => out.push_str(text),
+        }
+    }
+    out.push_str(&source[cursor..]);
+    Some(out)
+}
+
+// Character for character, so it holds wherever the parser left the row —
+// the text it canonicalised for its own read included, which no offset
+// recorded against the source would still address.
+pub(crate) fn reveal_rule_rows(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            u8::try_from(ch)
+                .ok()
+                .and_then(|byte| HIDDEN_RULE_CHARS.iter().position(|&h| h == byte))
+                .map_or(ch, |idx| char::from(RULE_CHARS[idx]))
+        })
+        .collect()
+}
+
+// A row is a run of one character, so its first byte names the whole of it.
+fn hidden_form(row: &str) -> Option<char> {
+    let first = row.as_bytes().first()?;
+    let idx = RULE_CHARS.iter().position(|rule| rule == first)?;
+    Some(char::from(HIDDEN_RULE_CHARS[idx]))
+}
 
 /// Returns the lifted regions in source order, for [`restore`].
 #[must_use]
@@ -58,7 +124,11 @@ pub(crate) fn restore(canonical: &str, originals: &[&str]) -> String {
 // is still one the canonicaliser pushes onto a stanza of its own.
 fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
     let arena = comrak::Arena::new();
-    // The dialect `render` parses, so what one holds verbatim the other does.
+    // The dialect `render` parses, so the block structure read here is the one
+    // the other half reads. What each then holds verbatim differs by exactly
+    // one family: a codepoint this crate reserves comes back from here and is
+    // neutralised on the render path, which `sentinels` states as the contract
+    // it is.
     let options = Options::default().comrak();
     let root = comrak::parse_document(&arena, source, &options);
     let line_starts = line_starts(source);
@@ -124,7 +194,7 @@ fn is_rule_row(row: &str) -> bool {
     let Some(first) = bytes.next() else {
         return false;
     };
-    matches!(first, b'-' | b'=' | b'_') && bytes.all(|byte| byte == first)
+    RULE_CHARS.contains(&first) && bytes.all(|byte| byte == first)
 }
 
 // Every codepoint this crate reserves, wherever the source already carried

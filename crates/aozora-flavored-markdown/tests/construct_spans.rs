@@ -259,9 +259,16 @@ fn sweep(documents: &[String]) -> Swept {
 /// Corpus sweep. The documents this file writes are ordinary text, so every
 /// construct in them must carry a range — that is the premise, and it is
 /// asserted. The fuzz-regression artifacts are adversarial inputs nobody
-/// wrote by hand: a CRLF, a BOM or a `----------` rule sends one down the
-/// documented fallback where no range is published, so their ranges are
-/// checked one by one but their *count* is reported rather than pinned.
+/// wrote by hand: a CRLF or a BOM sends one down the documented fallback
+/// where no range is published, so their ranges are checked one by one but
+/// their *count* is reported rather than pinned.
+///
+/// A `----------` rule used to be on that list and no longer is: the row is
+/// substituted one byte for one before the parser reads it (DEV-234), which
+/// moves nothing, so a document carrying one publishes ranges like any other.
+/// The two `DOCUMENTS` entries with a rule row in them are what holds that —
+/// the acceptance criterion the substitution exists for, and the only reason
+/// it is a substitution rather than the region lift `canonicalize` uses.
 #[test]
 fn corpus_ranges_slice_the_source_and_resolve_the_same_way() {
     let authored = sweep(&authored_documents());
@@ -300,6 +307,16 @@ const DOCUMENTS: &[&str] = &[
     "｜A《a》｜B《b》｜C《c》［＃「D」に傍点］｜E《e》｜F《f》｜G《g》",
     "```\n｜コードブロック《ぶろっく》は素通し\n```\n\n外の｜ルビ《るび》は生きる。",
     "前［＃ほげふが］後、それに［＃割り注］上｜下［＃割り注終わり］。",
+    // A rule row on both sides of the width the sibling parser used to read
+    // as decoration, with notation before and after it on the same document.
+    // The row is hidden from that parser and revealed for the tiling, and the
+    // substitution is one byte for one *so that these ranges keep addressing
+    // the caller's own text* — the claim has to be made against a document
+    // that has a row in it, and until DEV-234 none did.
+    "凡例［＃「凡例」に傍点］です。\n----------------------------------\n\
+     ｜山椒《さんしょう》は小粒でも。\n\n［＃改ページ］\n\n終わり。",
+    "見出し\n===\n｜漢字《かんじ》と［＃「傍点」に傍点］、それに\n\
+     ［＃ここから２字下げ］\n｜引用《いんよう》\n［＃ここで字下げ終わり］",
 ];
 
 /// The documents this file writes: the notation zoo and the realistic

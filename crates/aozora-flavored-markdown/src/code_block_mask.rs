@@ -6,10 +6,8 @@
 //! CommonMark-blind by design (ADR-0010), so teaching it about code-block
 //! context lives here: mask each trigger inside a fence with [`MASK_CHAR`],
 //! record the original in source order, restore once the mask is back out —
-//! `comrak::format_html` never disturbs it. One character for one, because
-//! `render` keeps a construct's byte span slicing the caller's text;
-//! `crate::canonicalize` owes no caller an offset and lifts whole regions out
-//! instead (`crate::verbatim_regions`), reaching what this cannot.
+//! `comrak::format_html` never disturbs it. One character for one, for the
+//! reason `crate::verbatim_regions` states about the other half.
 //!
 //! **Indented code blocks (CommonMark §4.4) are deliberately not masked**:
 //! their boundaries depend on paragraph context. A notation inside one
@@ -17,9 +15,8 @@
 //! inline code span, so both spellings read the same.
 //!
 //! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
-//! returning a borrowed `Cow` and no originals. The sibling parser
-//! neutralizes U+E001..U+E004 only, so such a codepoint reaches the output
-//! as the author's own byte, with no ambiguity of origin to resolve.
+//! returning a borrowed `Cow` and no originals: `crate::sentinels` says why
+//! that one of the five reaches the output as the author's own byte.
 
 use core::cmp::min;
 use std::borrow::Cow;

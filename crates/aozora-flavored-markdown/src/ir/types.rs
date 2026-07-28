@@ -341,9 +341,9 @@ pub enum Inline {
         ///
         /// `None` when that promise cannot be kept. The parser measures
         /// spans against its *normalised* text, and normalisation moves
-        /// bytes (BOM stripped, `\r\n` folded, accent digraphs combined,
-        /// decorative rules given a blank line), so the offsets would
-        /// address a different — possibly mid-codepoint — position.
+        /// bytes (BOM stripped, `\r\n` folded, accent digraphs combined),
+        /// so the offsets would address a different — possibly
+        /// mid-codepoint — position.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
         span: Option<Span>,

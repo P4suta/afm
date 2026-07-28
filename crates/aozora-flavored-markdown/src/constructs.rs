@@ -8,14 +8,14 @@
 //! Both walkers consume the table in document order and never look a
 //! construct up by position, so it is `O(n)` to build and `O(1)` per step.
 //!
-//! **Which text is tiled.** The parser canonicalises before reading (drops a
-//! BOM, folds `\r`, combines accent digraphs, isolates a decorative rule).
-//! comrak must see that canonical text, since it is what the notation was
-//! read from, so where it differs from the caller's the canonical text gets
-//! a second read of its own and *that* is what is tiled. The published
-//! ranges stay with the first read, against the text the caller holds,
-//! paired construct for construct and withheld where the two disagree. A
-//! range into a text no consumer holds is a range no consumer can use.
+//! **Which text is tiled.** The parser canonicalises before reading (a BOM,
+//! `\r`, accent digraphs — never a rule row, which is hidden from its read
+//! and revealed for the tiling). comrak must see that canonical text, since
+//! it is what the notation was read from, so where it differs from the
+//! caller's the canonical text gets a second read of its own and *that* is
+//! what is tiled. The published ranges stay with the first read, against the
+//! caller's own text, paired construct for construct and withheld where the
+//! two disagree — a range into a text no consumer holds is unusable.
 //!
 //! **What a construct renders to.** One source run answers both questions:
 //! read verbatim it is the literal a code span or link destination needs;
@@ -24,6 +24,7 @@
 
 use core::fmt;
 use core::ops::ControlFlow;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -31,15 +32,14 @@ use aozora::{ContainerKind, NodeKind, Snapshot};
 use comrak::nodes::{AstNode, NodeValue};
 
 use crate::diagnostics::{Diagnostic, Span};
-use crate::fragment;
+use crate::{fragment, verbatim_regions};
 
-/// Inline construct (ruby / bouten / directive / gaiji / TCY / kaeriten).
+// What each one stands for is `crate::sentinels`' to say: that is the copy a
+// reader outside this module reaches, and one statement cannot drift from
+// itself.
 pub(crate) const INLINE_SENTINEL: char = '\u{E001}';
-/// Block-leaf construct (page break, section break, aozora heading, sashie).
 pub(crate) const BLOCK_LEAF_SENTINEL: char = '\u{E002}';
-/// Paired-container open marker (e.g. `［＃ここから字下げ］`).
 pub(crate) const BLOCK_OPEN_SENTINEL: char = '\u{E003}';
-/// Paired-container close marker (e.g. `［＃ここで字下げ終わり］`).
 pub(crate) const BLOCK_CLOSE_SENTINEL: char = '\u{E004}';
 
 /// A blank line. This crate wraps one around a block sentinel so comrak
@@ -114,15 +114,21 @@ pub(crate) const fn block_sentinel_of(kind: NodeKind) -> Option<BlockSentinelKin
 /// Whether an inline construct is consumed and dropped rather than
 /// rendered. Both walkers ask here, so neither can decide it differently.
 ///
-/// * a directive inside a heading renders to an `aozora-md-directive`
-///   wrapper, which Tier C bars from a heading body.
+/// * a directive or an indent marker inside a heading renders to a wrapper
+///   Tier C bars from a heading body.
 /// * a heading hint reached *inline* has nothing to promote (the paragraph
 ///   case handles promotion), and rendering it would put a marker into the
 ///   very heading it was written to name.
 pub(crate) const fn inline_is_dropped(kind: NodeKind, in_heading: bool) -> bool {
     match kind {
         NodeKind::HeadingHint => true,
-        NodeKind::Directive => in_heading,
+        // `Indent` joins `Directive` here because `aozora-md-indent` is on
+        // Tier C's forbidden list for the same reason the directive wrapper
+        // is — and a heading is one line, so a marker that indents the line
+        // it sits on has nothing there to move. Reachable on `main` today
+        // through any ATX heading, no rule row involved; the row only added
+        // the setext spellings, which is what put it in front of a test.
+        NodeKind::Directive | NodeKind::Indent => in_heading,
         _ => false,
     }
 }
@@ -205,12 +211,11 @@ struct Node {
 }
 
 /// One tiled construct.
+// `span` and `run` are `Node`'s, carried through the tiling unchanged.
 #[derive(Debug)]
 struct Construct {
     kind: NodeKind,
-    /// Range in the caller's own text; see [`Node::span`].
     span: Option<Span>,
-    /// Range in the tiled text; see [`Node::run`].
     run: Span,
     /// The source run the sentinel stands for.
     literal: String,
@@ -240,7 +245,18 @@ impl Constructs {
     /// Parse `source`, then tile it into sentinel-bearing text plus the
     /// construct table.
     pub(crate) fn build(source: &str) -> Self {
-        let Ok(document) = aozora::parse(source.to_owned()) else {
+        // A rule row is hidden for the parser's read and revealed for the
+        // tiling. The parser is CommonMark-blind (ADR-0010) and pushes such a
+        // row onto a stanza of its own, which splits whichever block
+        // CommonMark had given the bytes to — a setext heading above all — and
+        // that split reaches comrak, since comrak parses what came back from
+        // the read. The substitution is one byte for one, so every range the
+        // parser reports still addresses the caller's own text
+        // (`crate::verbatim_regions`).
+        let hidden = verbatim_regions::hide_rule_rows(source);
+        let hiding = hidden.is_some();
+        let read = hidden.as_deref().unwrap_or(source);
+        let Ok(document) = aozora::parse(read.to_owned()) else {
             // Beyond the parser's span budget. The entry points guard on
             // that first, so this is unreachable in practice and degrades
             // to "no notation" rather than to a panic.
@@ -256,8 +272,8 @@ impl Constructs {
         // The common case: the caller already wrote the canonical text, so
         // the ranges the parser reported address it and there is one
         // coordinate space for the whole render.
-        if snapshot.normalized_source() == source {
-            return Self::from_read(source, &snapshot, None, diagnostics);
+        if snapshot.normalized_source() == read {
+            return Self::from_read(&Reads::of(read, hiding), &snapshot, None, diagnostics);
         }
 
         // Otherwise comrak has to see the canonical text — that is what the
@@ -270,7 +286,7 @@ impl Constructs {
         let canonical = canonical.snapshot();
         let published = nodes_of(&snapshot);
         Self::from_read(
-            canonical.source(),
+            &Reads::of(canonical.source(), hiding),
             &canonical,
             Some(&published),
             diagnostics,
@@ -288,17 +304,17 @@ impl Constructs {
     }
 
     /// `published` is the node table of a separate read against the caller's
-    /// own text, when that text differed from `text`.
+    /// own text, when that text differed from the one `snapshot` describes.
     fn from_read(
-        text: &str,
+        texts: &Reads<'_>,
         snapshot: &Snapshot,
         published: Option<&[(NodeKind, Span)]>,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         let runs = Runs::default();
         let nodes = pair_reads(&nodes_of(snapshot), published);
-        let nodes = coalesce(text, &nodes, snapshot, &runs);
-        Self::tile(text, &nodes, diagnostics, runs)
+        let nodes = coalesce(texts.read, &nodes, snapshot, &runs);
+        Self::tile(&texts.emit, &nodes, diagnostics, runs)
     }
 
     /// A range that does not address `text` — out of bounds, out of order,
@@ -382,6 +398,29 @@ impl Constructs {
             table: self,
             idx: idx.min(self.entries.len()),
         }
+    }
+}
+
+// One text in two readings: `read` is what the parser was handed and what a
+// node's range addresses, `emit` is what comrak parses — the same bytes with
+// every hidden rule row revealed. So the folding pass asks the parser about
+// the text the parser itself read, while the tiling hands comrak the caller's
+// own row.
+struct Reads<'a> {
+    read: &'a str,
+    emit: Cow<'a, str>,
+}
+
+impl<'a> Reads<'a> {
+    // Borrowed where the read hid nothing, so a document without a rule row
+    // pays nothing for the protection.
+    fn of(read: &'a str, hiding: bool) -> Self {
+        let emit = if hiding {
+            Cow::Owned(verbatim_regions::reveal_rule_rows(read))
+        } else {
+            Cow::Borrowed(read)
+        };
+        Self { read, emit }
     }
 }
 
@@ -1176,11 +1215,11 @@ mod tests {
         }
     }
 
-    /// A decorative rule is isolated by the parser, so comrak reads it as a
-    /// rule rather than as the underline of a setext heading — and the
-    /// notation after it is still tracked.
+    /// A rule row is hidden from the parser and revealed for the tiling, so
+    /// comrak reads the caller's own line — and the notation after it is
+    /// still tracked across the substitution.
     #[test]
-    fn a_decorative_rule_keeps_its_own_line() {
+    fn a_rule_row_reaches_comrak_as_the_caller_wrote_it() {
         const RAW: &str = "本文\n----------\n彼は`｜青梅《おうめ》`へ";
         with_constructs(RAW, |constructs| {
             assert_eq!(
@@ -1190,7 +1229,12 @@ mod tests {
             );
             assert!(
                 constructs.text().contains(INLINE_SENTINEL),
-                "the canonical text drives comrak: {:?}",
+                "the tiled text drives comrak: {:?}",
+                constructs.text()
+            );
+            assert!(
+                constructs.text().contains("\n----------\n"),
+                "the row comrak reads is the caller's own: {:?}",
                 constructs.text()
             );
             let mut cursor = constructs.cursor();
