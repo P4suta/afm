@@ -5,8 +5,18 @@
 // so 652/652 is the expectation. A drop means the wrapper — lexer pre-pass,
 // option defaults, the HTML splice — perturbed upstream behaviour.
 //
-// Both suites need raw-HTML passthrough, because the spec's expected output
-// contains raw HTML. `Options::spec_commonmark` is the only constructor that
+// These runners are the executable half of the README's compatibility claim,
+// so what they render with is what that claim names and nothing adjacent:
+// `Options::commonmark()` for the CommonMark suite, `Options::gfm()` for the
+// GFM one. Both are public, so a reader can reach for the same constructor
+// the README points at and get the behaviour measured here. `Options::new()`
+// — the Aozora dialect — is deliberately NOT under test: it sets
+// `hardbreaks`, which turns a soft break into a `<br>` and so cannot render
+// the spec verbatim. That is a dialect decision, not a conformance gap, and
+// the README now says which preset carries which promise.
+//
+// The one delta both runners add is raw-HTML passthrough, because the
+// expected output in both fixtures contains raw HTML. `Options::with_raw_html`
 // turns it on and it is `#[cfg(test)]`, which is why these runners live in
 // `src/` instead of `tests/`: an integration test is a separate crate and
 // could only reach that switch if it were public.
@@ -62,16 +72,23 @@ fn load(fixture: &str) -> Vec<SpecExample> {
     serde_json::from_str(fixture).expect("spec fixture parses as JSON")
 }
 
+// A named function rather than a `let` inside the runner, so the pin at the
+// bottom of this file can read the same configuration the suite runs with
+// instead of a copy of it.
+fn commonmark_options() -> Options {
+    Options::commonmark().with_raw_html(true)
+}
+
 #[test]
 fn commonmark_0_31_2_full_pass() {
     let examples = load(COMMONMARK_FIXTURE);
+    let opts = commonmark_options();
     assert_eq!(
         examples.len(),
         652,
         "fixture example count must match the spec (re-run `just spec-refresh` if this drifts)"
     );
 
-    let opts = Options::spec_commonmark();
     for ex in &examples {
         assert_eq!(
             render(&ex.markdown, &opts).html,
@@ -84,17 +101,23 @@ fn commonmark_0_31_2_full_pass() {
     }
 }
 
-// cmark-gfm's own runner enables only the extension the example declares, and
-// this mirrors that. `disabled` labels the task-list-items output (the
-// `disabled` attribute on `<input type="checkbox">`), not a disabled example.
+// cmark-gfm's own runner enables only the extension the example declares.
+// This does not mirror that: `Options::gfm()` carries all four at once, and a
+// caller who reaches for it gets all four at once, so measuring one at a time
+// would leave the interaction between them — the configuration the README
+// actually names — untested. Every extension-tagged example therefore renders
+// under the whole preset, which is the stronger claim of the two.
+//
+// `disabled` labels the task-list-items output (the `disabled` attribute on
+// `<input type="checkbox">`), not a disabled example. `tagfilter` is the one
+// tag `gfm()` does not cover: the filter only bites while raw HTML is passing
+// through, which no public constructor can arrange, so it stays a switch the
+// runner adds rather than surface a caller can ask for.
 fn options_for(extension: &str) -> Options {
-    let opts = Options::spec_commonmark();
+    let opts = Options::gfm().with_raw_html(true);
     match extension {
-        "autolink" => opts.with_autolinks(true),
-        "strikethrough" => opts.with_strikethrough(true),
-        "table" => opts.with_tables(true),
+        "autolink" | "strikethrough" | "table" | "disabled" => opts,
         "tagfilter" => opts.with_tagfilter(true),
-        "disabled" => opts.with_task_lists(true),
         other => panic!("unknown GFM extension tag in fixture: {other}"),
     }
 }
@@ -142,4 +165,44 @@ fn gfm_extension_tags_are_exhaustive() {
         tags, known,
         "GFM fixture contains a tag this runner does not handle; update `options_for`"
     );
+}
+
+#[test]
+fn each_runner_measures_the_public_preset_the_readme_names() {
+    // A green suite says the examples passed. It does not say WHICH
+    // configuration passed them, and that is the whole of what the README
+    // sends a reader here to check. Until this test the GFM runner built on
+    // `Options::commonmark()` and switched on the single extension each
+    // example declared: green, and proof of a preset no caller can name —
+    // the README's sentence about `Options::gfm()` would have been untrue
+    // with every gate in the repository still passing. Narrowing it back
+    // that way now fails here.
+    assert_eq!(
+        commonmark_options().with_raw_html(false),
+        Options::commonmark(),
+        "the CommonMark runner must measure `Options::commonmark()` itself"
+    );
+    for tag in GFM_EXTENSION_TAGS {
+        let opts = options_for(tag);
+        assert_eq!(
+            opts.clone().with_raw_html(false).with_tagfilter(false),
+            Options::gfm(),
+            "the GFM runner must measure `Options::gfm()` itself, and it does not for {tag:?}"
+        );
+        // Both deltas are documented above `options_for`, and only one of
+        // them is per-example. A tag that stopped passing raw HTML through
+        // would silently stop rendering what the fixture expects; a tag that
+        // started switching the filter on would be measuring cmark-gfm's
+        // tagfilter configuration under the name of the whole preset.
+        assert_ne!(
+            opts.clone().with_raw_html(false),
+            opts,
+            "the fixture's expected output contains raw HTML, so {tag:?} must pass it through"
+        );
+        assert_eq!(
+            opts.clone().with_tagfilter(false) != opts,
+            tag == "tagfilter",
+            "only the tagfilter examples may switch the GFM tag filter on, not {tag:?}"
+        );
+    }
 }

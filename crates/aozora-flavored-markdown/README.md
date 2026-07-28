@@ -10,12 +10,33 @@ dialect, modelled after [GFM](https://github.github.com/gfm/), that layers
 Aozora Bunko (青空文庫) typography — ruby, bouten, 縦中横, `［＃…］`
 annotations, gaiji, accent decomposition — on top of CommonMark + GFM.
 
-It is a **strict superset** of CommonMark + GFM: pure CommonMark / GFM input
-renders identically, and the Aozora extensions apply only where the input uses
-them. The file extension stays `.md`.
+It is a **superset** of CommonMark + GFM, and which superset is a constructor:
+`Options::commonmark()` renders all 652 CommonMark 0.31.2 spec examples
+verbatim, `Options::gfm()` renders the GFM 0.29 extension cases verbatim with
+all four extensions on at once, and `Options::default()` is the Aozora dialect
+— GFM + 青空文庫記法 + hardbreaks.
+
+`default()` is the one that is not a *strict* superset, and deliberately so:
+hardbreaks turns every source newline into a `<br>`, because verse and
+dialogue boundaries are load-bearing in 青空文庫 source. Take it off with
+`Options::default().with_hardbreaks(false)` and the Aozora extensions apply
+only where the input uses them, on 3 968 of the 3 972 spec documents swept.
+The four that remain are one known defect, not a reservation: a setext
+underline of ten characters or more (`Foo` over `----------`) is long enough
+for the 青空文庫 pre-pass to read as a decorative rule, so the heading it
+underlines splits into a paragraph and a `<hr>`. The file extension stays
+`.md`.
+
+None of these claims is a promise. The conformance runners in
+[`src/conformance.rs`](https://github.com/P4suta/aozora-flavored-markdown/blob/main/crates/aozora-flavored-markdown/src/conformance.rs)
+render both spec corpora through those exact constructors, and
+[`tests/render_commonmark_superset.rs`](https://github.com/P4suta/aozora-flavored-markdown/blob/main/crates/aozora-flavored-markdown/tests/render_commonmark_superset.rs)
+sweeps the same corpora through the dialect and pins the exception above.
+`cargo test -p aozora-flavored-markdown` is the proof.
 
 ```text
 CommonMark  ──▶  GFM  ──▶  Aozora Flavored Markdown
+commonmark()     gfm()     default()
 ```
 
 ## Install
@@ -93,7 +114,8 @@ and specified by
 ## Guarantees
 
 - **100% CommonMark / GFM compatibility** — both spec suites pass verbatim
-  (652 CommonMark 0.31.2 cases + GFM 0.29).
+  under `Options::commonmark()` / `Options::gfm()` (652 CommonMark 0.31.2
+  cases + GFM 0.29).
 - **Aozora Bunko compatibility target** — every notation listed at
   <https://www.aozora.gr.jp/annotation/> parses, and no unconsumed `［＃`
   marker reaches the rendered HTML.
