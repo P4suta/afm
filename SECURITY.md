@@ -52,6 +52,13 @@ red where nobody is looking. Dependabot alerts and Dependabot security
 updates are both enabled, so GitHub raises the same finding independently
 and opens the version-bump pull request for it.
 
+That reporter answers for RustSec advisories and stops there, so the other
+two jobs of that workflow — the cargo-deny leg, and the watch over
+`dependency-review.yml`'s per-package licence exemptions — each file a
+rolling issue of their own on a failed scheduled run. Every leg of the
+nightly has somewhere to report, and a repeat failure updates nothing
+while the first issue is still open.
+
 `just audit` runs with `--deny warnings`, so an `unmaintained`, `unsound`
 or `yanked` crate fails it too and not just a live vulnerability —
 matching `yanked = "deny"` on the cargo-deny side.

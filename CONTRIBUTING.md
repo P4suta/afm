@@ -189,7 +189,9 @@ move one forward by resolving the tag, updating the entry and its comment,
 running `dist generate`, and committing both files. `.github/dependabot.yml`
 excludes the generated file from version updates — a *security* PR can still
 rewrite it, in which case close the PR and bump the pin instead. The weekly
-`release-pins` workflow fails when a pin freezes behind its upstream.
+`release-pins` workflow fails when a pin freezes behind its upstream, and
+files a rolling issue naming what froze, so the finding reaches somebody
+rather than sitting in the Actions tab.
 
 **ADR-0002 scope exception**: release builds run on native runners so each
 binary target matches its runner OS. Docker-only applies to development and

@@ -61,6 +61,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      issues: write   # the rolling issue at the end of this job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -78,6 +79,29 @@ jobs:
       - name: RustSec advisories (cargo-audit)
         if: ${{ !cancelled() }}
         run: just audit
+
+      # `report` below is not this job's channel. It files what
+      # `rustsec/audit-check` finds — RustSec advisories — and cargo-deny
+      # answers for four more things: a ban, an unvetted source, a yanked
+      # crate, a licence it refuses. A nightly that went red on any of those
+      # would otherwise be a red square and nothing else.
+      - name: Say where a nightly failure went
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: the nightly dependency scan is failing"
+          body: |
+            `just deny` or `just audit` failed on a scheduled run of
+            `.github/workflows/audit.yml`, against a `Cargo.lock` nobody here
+            need have touched.
+
+            A newly disclosed RustSec advisory arrives separately, as its own
+            issue from `rustsec/audit-check`. This one also covers the half
+            that reporter never sees: a ban, an unvetted source, a yanked
+            crate, or a licence `deny.toml` refuses.
+
+            Fix the finding or record the exception in `deny.toml`, then close
+            this issue — the next failing run files it again.
 
   # Turn a finding into something with an assignee. On a `schedule` event
   # rustsec/audit-check opens one issue per advisory, skipping any whose
@@ -131,6 +155,9 @@ jobs:
     name: licence exemptions still hold
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write   # the rolling issue at the end of this job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -200,3 +227,27 @@ jobs:
             exit 1
           fi
           echo "licence exemptions: every one still rests on what it was written for"
+
+      # The day this fires is the day it was written for, so it needs somewhere
+      # to fire TO. `report` above answers for advisories and files nothing on
+      # a licence, and this job blocks no merge, so without the step below the
+      # relicensing it exists to catch would land as a red square on a nightly
+      # nobody is required to read.
+      - name: Say where a nightly failure went
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: a licence exemption no longer holds"
+          body: |
+            The `licences` job of `.github/workflows/audit.yml` found an
+            `allow-dependencies-licenses` entry in
+            `.github/workflows/dependency-review.yml` that no longer rests on
+            what it was written for — either a package now declaring a
+            different licence, or an entry on one side with no counterpart on
+            the other. The run below names it.
+
+            That waiver is per package rather than per licence, so until
+            somebody re-reads it the dependency-review gate waves through
+            whatever the package declares today. Drop the entry, or rewrite the
+            licence it rests on in both files, then close this issue — the next
+            failing run files it again.

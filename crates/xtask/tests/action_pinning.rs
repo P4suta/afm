@@ -55,7 +55,10 @@ const VERSION_COMMENT_EXEMPT: &[(&str, &str)] = &[(
 /// exactly that state — pinned by the scan today, and free to stop being read
 /// tomorrow with every test still green.
 const USES_FLOOR: &[(&str, usize)] = &[
-    (".github/workflows/audit.yml", 5),
+    // Five to seven, and one to two on release-pins.yml below: the three
+    // scheduled jobs that reported nowhere each call the local
+    // `report-failure` action now. A floor tracks the file as it is.
+    (".github/workflows/audit.yml", 7),
     // ci.yml fell from 20 to 14 when eleven hand-written jobs collapsed into
     // one matrix generated from the Justfile's `[group('gate')]`. Fewer jobs,
     // not less reading: a floor tracks the file as it is.
@@ -67,7 +70,7 @@ const USES_FLOOR: &[(&str, usize)] = &[
     (".github/workflows/fuzz.yml", 3),
     (".github/workflows/labeler.yml", 1),
     (".github/workflows/publish-crates.yml", 5),
-    (".github/workflows/release-pins.yml", 1),
+    (".github/workflows/release-pins.yml", 2),
     (".github/workflows/release.yml", 12),
     (".github/actions/setup-dev-image/action.yml", 3),
 ];
