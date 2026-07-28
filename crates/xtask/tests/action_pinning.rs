@@ -86,7 +86,7 @@ const CHECKOUT_FLOOR: usize = 21;
 const PIN_DRIFT: &[(&str, &str)] = &[(
     "docker/login-action",
     "`.github/actions/setup-dev-image/action.yml` is a whole major behind \
-     `dev-image.yml` (v3 vs v4.5.1). Its three pins were set by hand in #65 and \
+     `dev-image.yml` (v3 vs v4.5.2). Its three pins were set by hand in #65 and \
      have not moved since, while the workflow copies have been bumped several \
      times — Dependabot's `github-actions` ecosystem at `directory: \"/\"` is \
      not reaching `.github/actions/`. Bumping it is a major-version change to \
@@ -252,6 +252,160 @@ fn pin_failure(reference: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// one action's call sites, read together
+// ---------------------------------------------------------------------------
+
+/// One commit-pinned `uses:`: what GitHub resolves, and what a reader does.
+struct Site {
+    /// `owner/repo`, never the subpath. `github/codeql-action/init` and
+    /// `github/codeql-action/analyze` are two `uses:` strings naming one
+    /// repository at one tag — two observations of one pin, not two pins
+    /// carrying one observation each, which is the state this file can say
+    /// nothing about.
+    repo: String,
+    commit: String,
+    /// The `# v1.2.3` beside the ref, where the file carries one.
+    comment: Option<String>,
+    /// `file:line`.
+    at: String,
+}
+
+/// The `owner/repo` an action path names, dropping any subpath after it.
+fn action_repo(action: &str) -> &str {
+    action
+        .match_indices('/')
+        .nth(1)
+        .map_or(action, |(slash, _)| &action[..slash])
+}
+
+/// Every commit-pinned `uses:` across `(label, contents)` pairs. Floating
+/// refs are `every_action_this_repo_runs_is_named_by_an_immutable_commit`'s
+/// to fail on; here they would be noise about a file that is already red.
+fn sites_in(files: &[(String, String)]) -> Vec<Site> {
+    let mut out = Vec::new();
+    for (label, text) in files {
+        for one in uses_in(text) {
+            if let Some((action, git_ref)) = one.reference.rsplit_once('@')
+                && is_commit(git_ref)
+            {
+                out.push(Site {
+                    repo: action_repo(action).to_owned(),
+                    commit: git_ref.to_owned(),
+                    comment: one.comment,
+                    at: format!("{label}:{}", one.line),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// What reading one repository's call sites against each other says.
+#[derive(Debug)]
+struct PinReport {
+    /// One repo at two commits, minus the splits `PIN_DRIFT` records: a call
+    /// site that has stopped being bumped with the others.
+    drifted: Vec<String>,
+    /// One commit under two version comments. Forty hex characters are one
+    /// release, so at most one of the comments is true.
+    mislabelled: Vec<String>,
+    /// Every repo found at two commits, `PIN_DRIFT`'s included, so a recorded
+    /// split can be held to still being one.
+    split: BTreeSet<String>,
+}
+
+fn review_pins(sites: &[Site]) -> PinReport {
+    let mut report = PinReport {
+        drifted: Vec::new(),
+        mislabelled: Vec::new(),
+        split: BTreeSet::new(),
+    };
+    let repos: BTreeSet<&str> = sites.iter().map(|site| site.repo.as_str()).collect();
+
+    for repo in repos {
+        let mine: Vec<&Site> = sites.iter().filter(|site| site.repo == repo).collect();
+        let commits: BTreeSet<&str> = mine.iter().map(|site| site.commit.as_str()).collect();
+
+        if commits.len() > 1 {
+            report.split.insert(repo.to_owned());
+            if !PIN_DRIFT.iter().any(|&(name, _)| name == repo) {
+                let where_at: Vec<&str> = mine.iter().map(|site| site.at.as_str()).collect();
+                report.drifted.push(format!(
+                    "  {repo} at {} commits: {where_at:?}",
+                    commits.len()
+                ));
+            }
+        }
+
+        // Keyed per commit, not per repo, so this needs no `PIN_DRIFT`
+        // exemption and gets none: a recorded split is two pins, each still
+        // answerable for its own label. What it will not allow is one commit
+        // answering to two.
+        for commit in commits {
+            let here: Vec<&&Site> = mine.iter().filter(|site| site.commit == commit).collect();
+            let labels: BTreeSet<&str> = here
+                .iter()
+                .filter_map(|site| site.comment.as_deref())
+                .collect();
+            if labels.len() > 1 {
+                let where_at: Vec<&str> = here.iter().map(|site| site.at.as_str()).collect();
+                report.mislabelled.push(format!(
+                    "  {repo}@{commit} is called {labels:?} at {where_at:?}"
+                ));
+            }
+        }
+    }
+    report
+}
+
+/// Every `vN`, `vN.N` or `vN.N.N` a sentence names. A `v` inside a word
+/// ("several", "rev2") is a letter, not a version.
+fn versions_named_in(prose: &str) -> BTreeSet<&str> {
+    let mut out = BTreeSet::new();
+    for (start, _) in prose.match_indices('v') {
+        if prose[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+        {
+            continue;
+        }
+        let tail = &prose[start + 1..];
+        if !tail.starts_with(|ch: char| ch.is_ascii_digit()) {
+            continue;
+        }
+        let end = tail
+            .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .unwrap_or(tail.len());
+        out.insert(prose[start..=start + end].trim_end_matches('.'));
+    }
+    out
+}
+
+/// Recorded splits whose reason describes a tree that is no longer there. A
+/// `PIN_DRIFT` entry is a bug report, and a bug report naming a version this
+/// repo does not pin any more is one nobody can act on.
+fn stale_reasons(sites: &[Site], drift: &[(&str, &str)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for &(name, reason) in drift {
+        let labels: BTreeSet<&str> = sites
+            .iter()
+            .filter(|site| site.repo == name)
+            .filter_map(|site| site.comment.as_deref())
+            .collect();
+        for named in versions_named_in(reason) {
+            if !labels.contains(named) {
+                out.push(format!(
+                    "  {name}: the reason says `{named}`, and the call sites are pinned at \
+                     {labels:?}"
+                ));
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // the repo
 // ---------------------------------------------------------------------------
 
@@ -412,66 +566,53 @@ fn one_action_is_pinned_to_one_commit_across_the_whole_repo() {
     // when it stops moving at all. Two call sites of one action are two
     // observations of the same pin, and a disagreement between them is the
     // only signal in the tree that one of the two is no longer maintained.
-    let root = repo_root();
-    let mut sites: Vec<(String, String, String)> = Vec::new();
-    for (label, text) in scanned_files(&root) {
-        for one in uses_in(&text) {
-            if let Some((action, git_ref)) = one.reference.rsplit_once('@')
-                && is_commit(git_ref)
-            {
-                sites.push((
-                    action.to_owned(),
-                    git_ref.to_owned(),
-                    format!("{label}:{}", one.line),
-                ));
-            }
-        }
-    }
-
-    let actions: BTreeSet<&String> = sites.iter().map(|(action, _, _)| action).collect();
-    let mut split = BTreeSet::new();
-    let mut drifted = Vec::new();
-    for action in actions {
-        let commits: BTreeSet<&String> = sites
-            .iter()
-            .filter(|(name, _, _)| name == action)
-            .map(|(_, commit, _)| commit)
-            .collect();
-        if commits.len() < 2 {
-            continue;
-        }
-        split.insert(action.clone());
-        if PIN_DRIFT.iter().any(|&(name, _)| name == action) {
-            continue;
-        }
-        let where_at: Vec<&str> = sites
-            .iter()
-            .filter(|(name, _, _)| name == action)
-            .map(|(_, _, at)| at.as_str())
-            .collect();
-        drifted.push(format!(
-            "  {action} at {} commits: {where_at:?}",
-            commits.len()
-        ));
-    }
+    let sites = sites_in(&scanned_files(&repo_root()));
+    let report = review_pins(&sites);
 
     assert!(
-        drifted.is_empty(),
+        report.drifted.is_empty(),
         "one action, two commits — one of these call sites is not being bumped:\n{}\n\
          Pin both to the same commit, or record the split in PIN_DRIFT with the reason.",
-        drifted.join("\n")
+        report.drifted.join("\n")
+    );
+    // The readable half of the same claim, and the half that fails first. A
+    // version comment is what a reviewer bumps by, so one commit answering to
+    // two of them is the split arriving before the SHAs move:
+    // `taiki-e/install-action` sat at ONE commit under `# v2` in the composite
+    // action and `# v2.81.10` in the workflows, which read as a deliberately
+    // loose major pin and was in fact the only thing in the tree saying that
+    // this call site is not on Dependabot's path. #229 then bumped the five
+    // annotated `# v2.81.10` and left the one annotated `# v2` behind.
+    assert!(
+        report.mislabelled.is_empty(),
+        "one commit, two version comments — a single pin described two ways:\n{}\n\
+         Forty hex characters are one release, so at most one comment is true. \
+         Put the version that commit actually is beside every copy.",
+        report.mislabelled.join("\n")
     );
     // The other direction, so a recorded defect cannot outlive itself: an
     // entry here whose drift is gone is a bug report nobody closed.
     let healed: Vec<&str> = PIN_DRIFT
         .iter()
         .map(|&(name, _)| name)
-        .filter(|name| !split.contains(*name))
+        .filter(|name| !report.split.contains(*name))
         .collect();
     assert!(
         healed.is_empty(),
         "PIN_DRIFT records a split that no longer exists: {healed:?}. Delete the \
          entry — it is a defect that has been fixed."
+    );
+    // Nor can it outlive its own description. Bumping one side of a recorded
+    // split is exactly the change that leaves the sentence describing it
+    // stale, and a reason naming a version nobody pins any more is a bug
+    // report about a tree that is gone.
+    let stale = stale_reasons(&sites, PIN_DRIFT);
+    assert!(
+        stale.is_empty(),
+        "PIN_DRIFT reasons that no longer describe this repo:\n{}\n\
+         The entry is the whole record of why the split is allowed to stand. \
+         Re-read it against the pins and say what is true now.",
+        stale.join("\n")
     );
 }
 
@@ -635,6 +776,163 @@ fn a_floating_ref_is_reported_and_a_commit_is_not() {
     assert!(
         pin_failure(&format!("actions/checkout@{}", "z".repeat(SHA_LEN))).is_some(),
         "40 non-hex characters were accepted"
+    );
+}
+
+/// `(label, contents)` pairs the way `scanned_files` returns them.
+fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|&(label, text)| (label.to_owned(), text.to_owned()))
+        .collect()
+}
+
+#[test]
+fn one_commit_under_two_version_comments_is_reported() {
+    // #229's precursor, as this repo actually held it for months.
+    // `taiki-e/install-action` was at ONE commit across six call sites: five
+    // workflows saying `# v2.81.10`, and the composite action — the one file
+    // Dependabot's `directory: "/"` does not reach — saying `# v2`. Every
+    // gate was green, and correctly so by its own question:
+    // `one_action_is_pinned_to_one_commit_across_the_whole_repo` compared the
+    // SHAs and they agreed, `every_commit_pin_says_which_version_it_is` asked
+    // whether a comment was present and it was. Neither asked the two
+    // comments to say the same thing, so the single difference the tree
+    // recorded between the call sites Dependabot bumps and the one it cannot
+    // see was the one thing nothing read.
+    let sha = "7a79fe8c3a13344501c80d99cae481c1c9085912";
+    let mixed = files(&[
+        (
+            ".github/workflows/ci.yml",
+            &format!("      - uses: taiki-e/install-action@{sha}  # v2.81.10\n"),
+        ),
+        (
+            ".github/actions/setup-dev-image/action.yml",
+            &format!("    - uses: taiki-e/install-action@{sha} # v2\n"),
+        ),
+    ]);
+    let report = review_pins(&sites_in(&mixed));
+    assert!(
+        report.drifted.is_empty(),
+        "one commit was read as a split: {:?}",
+        report.drifted
+    );
+    assert_eq!(
+        report.mislabelled.len(),
+        1,
+        "one commit answering to both `v2` and `v2.81.10` passed"
+    );
+
+    // The other direction, or this fires on `release.yml` every run and
+    // teaches the next reader that red is normal. An ABSENT comment is not a
+    // disagreement: cargo-dist emits bare commits and `VERSION_COMMENT_EXEMPT`
+    // is where that is argued, so nothing is claimed here to contradict.
+    let bare = files(&[
+        (
+            ".github/workflows/fuzz.yml",
+            &format!("      - uses: actions/upload-artifact@{sha}  # v7.0.1\n"),
+        ),
+        (
+            ".github/workflows/release.yml",
+            &format!("      - uses: actions/upload-artifact@{sha}\n"),
+        ),
+    ]);
+    assert!(
+        review_pins(&sites_in(&bare)).mislabelled.is_empty(),
+        "an unannotated pin was read as disagreeing with an annotated one"
+    );
+}
+
+#[test]
+fn two_paths_into_one_action_repo_are_one_pin() {
+    // `github/codeql-action/init` and `github/codeql-action/analyze` are two
+    // `uses:` strings and one repository at one tag. Keyed by the `uses:`
+    // path — as this file keyed them until now — they are two pins holding
+    // one call site each, and a pin with one call site is the state this
+    // whole invariant cannot speak about: the disagreement IS the signal. So
+    // the exact defect the test exists to catch, one of two copies left
+    // behind by a bump, walked through it whenever the two copies happened to
+    // be spelled differently.
+    assert_eq!(
+        action_repo("github/codeql-action/init"),
+        "github/codeql-action"
+    );
+    assert_eq!(action_repo("actions/checkout"), "actions/checkout");
+
+    let old = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81";
+    let new = "69366f33c96575abad1ee0dba8212993eecbe998";
+    let half_bumped = files(&[(
+        ".github/workflows/codeql.yml",
+        &format!(
+            "      - uses: github/codeql-action/init@{new}  # v4.38.0\n\
+             \x20     - uses: github/codeql-action/analyze@{old}  # v4.37.3\n"
+        ),
+    )]);
+    let report = review_pins(&sites_in(&half_bumped));
+    assert_eq!(
+        report.drifted.len(),
+        1,
+        "one action repo at two commits passed because its two call sites \
+         spell different subpaths"
+    );
+    assert!(
+        report.mislabelled.is_empty(),
+        "two commits, each with its own version comment, were read as one \
+         commit with two: {:?}",
+        report.mislabelled
+    );
+}
+
+#[test]
+fn a_recorded_split_is_read_against_the_pins_it_describes() {
+    // Versions, and only versions: a `v` inside a word is a letter.
+    assert_eq!(
+        versions_named_in(
+            "a whole major behind (v3 vs v4.5.2). Set by hand in #65 and moved \
+             several times since — a major-version change."
+        ),
+        BTreeSet::from(["v3", "v4.5.2"])
+    );
+    assert!(
+        versions_named_in("every version of it, rev2, moved several times").is_empty(),
+        "a letter inside a word was read as a version"
+    );
+
+    // The state #229 arrived in. Dependabot bumped `docker/login-action` on
+    // one side of a split that `PIN_DRIFT` records, and could not know that a
+    // sentence in a Rust file describes that split — so the entry went on
+    // saying `v4.5.1` about a tree pinned at `v4.5.2`. `healed` above only
+    // asks whether the split still exists; the reason is the entire argument
+    // for why it is allowed to stand, and nothing read it.
+    let three = "c94ce9fb468520275223c153574b00df6fe4bcc9";
+    let four = "371161bbe7024a29a25c5e19bfcbc0804fe9ad2c";
+    let both_sites = files(&[
+        (
+            ".github/workflows/dev-image.yml",
+            &format!("        uses: docker/login-action@{four}  # v4.5.2\n"),
+        ),
+        (
+            ".github/actions/setup-dev-image/action.yml",
+            &format!("      uses: docker/login-action@{three} # v3\n"),
+        ),
+    ]);
+    let sites = sites_in(&both_sites);
+    assert!(
+        stale_reasons(
+            &sites,
+            &[("docker/login-action", "a major behind (v3 vs v4.5.2)")]
+        )
+        .is_empty(),
+        "a reason naming exactly the versions in the tree was reported stale"
+    );
+    assert_eq!(
+        stale_reasons(
+            &sites,
+            &[("docker/login-action", "a major behind (v3 vs v4.5.1)")]
+        )
+        .len(),
+        1,
+        "a reason still naming the version from before the bump passed"
     );
 }
 
