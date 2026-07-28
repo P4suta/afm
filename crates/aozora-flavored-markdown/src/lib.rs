@@ -301,14 +301,19 @@ impl Options {
 
 #[cfg(test)]
 impl Options {
-    // The conformance baseline: [`Options::commonmark`] with raw HTML passing
-    // through, because the spec's expected output contains it. Never
-    // reachable from outside the crate — that is the point of the `cfg`.
-    pub(crate) fn spec_commonmark() -> Self {
-        Self {
-            raw_html: true,
-            ..Self::commonmark()
-        }
+    // Raw-HTML passthrough, which both spec runners need because the expected
+    // output in both fixtures contains raw HTML.
+    //
+    // A builder rather than the `spec_commonmark` constructor it replaces, so
+    // that each runner reads as the public preset it is the proof of —
+    // `Options::commonmark()`, `Options::gfm()` — plus this one named delta,
+    // instead of as a private constructor a reader has to go and unfold. The
+    // README's compatibility claim is about those two presets; nothing else
+    // about them is allowed to be runner-specific. Never reachable from
+    // outside the crate — that is the point of the `cfg`.
+    pub(crate) fn with_raw_html(mut self, on: bool) -> Self {
+        self.raw_html = on;
+        self
     }
 
     // GFM's disallowed-raw-html filter. Only observable with raw HTML on, so
@@ -981,20 +986,34 @@ mod tests {
 
     // -------------------------------------------------------------------
     // (a) The spec runners need raw-HTML passthrough, and nothing else may
-    // have it. The constructor that supplies it is `#[cfg(test)]`, so these
+    // have it. The builder that supplies it is `#[cfg(test)]`, so these
     // two tests are the whole of what can reach `render.unsafe`.
     // -------------------------------------------------------------------
 
     #[test]
-    fn spec_commonmark_enables_raw_html_and_disables_aozora() {
-        let opts = Options::spec_commonmark();
+    fn the_runner_switch_adds_raw_html_and_changes_nothing_else() {
+        // What the conformance runners render with is a public preset plus
+        // this one switch, so the switch has to be exactly that: raw HTML on,
+        // every other knob still the preset's.
+        for preset in [Options::commonmark(), Options::gfm()] {
+            let opts = preset.clone().with_raw_html(true);
+            assert!(
+                opts.comrak().render.r#unsafe,
+                "with_raw_html must enable raw-HTML passthrough for the runner"
+            );
+            assert_eq!(
+                opts.with_raw_html(false),
+                preset,
+                "with_raw_html must move no knob but its own"
+            );
+        }
         assert!(
-            opts.comrak().render.r#unsafe,
-            "spec_commonmark must enable raw-HTML passthrough for the runner"
-        );
-        assert!(!opts.aozora, "spec_commonmark must skip the aozora pass");
-        assert!(
-            opts.with_tagfilter(true).comrak().extension.tagfilter,
+            Options::commonmark()
+                .with_raw_html(true)
+                .with_tagfilter(true)
+                .comrak()
+                .extension
+                .tagfilter,
             "the runner's per-example tagfilter must reach comrak"
         );
     }
