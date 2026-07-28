@@ -5923,10 +5923,38 @@ fn a_new_advisory_arrives_as_an_issue_and_not_only_as_a_red_square() {
 }
 
 /// Files that describe this repository's own CI to a reader. History is out:
-/// `CHANGELOG.md` and the ADRs record what was true when they were written,
-/// and editing them to match today is how a record stops being one.
-const CI_PROSE_ROOTS: &[&str] = &["", "docs"];
-const CI_PROSE_HISTORY: &[&str] = &["CHANGELOG.md", "docs/adr"];
+/// `CHANGELOG.md` records what was true when it was written, and editing it to
+/// match today is how a record stops being one.
+///
+/// The ADRs used to be out on the same reasoning, and that was the hole. An
+/// ADR is not a log entry — `- Status: accepted` means the decision is in
+/// force, which is exactly the authority that makes a wrong sentence in one
+/// expensive. ADR-0015 carried "`cargo semver-checks` cannot run until a
+/// baseline exists on crates.io" for as long as the check went unwired, and
+/// the reason it went unwired is that somebody read it. So an accepted ADR is
+/// read here, and a superseded, deprecated or proposed one is not: those are
+/// the ADRs that genuinely record rather than instruct.
+const CI_PROSE_ROOTS: &[&str] = &["", "docs", "docs/adr"];
+const CI_PROSE_HISTORY: &[&str] = &["CHANGELOG.md"];
+
+/// The `- Status:` an ADR declares, lower-cased. `None` for a document with
+/// no such line, which is every `.md` outside `docs/adr`.
+fn adr_status(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("- Status:"))
+        .map(|status| status.trim().to_lowercase())
+}
+
+/// Is this document in force, as opposed to recording something that was?
+/// Everything outside `docs/adr` is; an ADR is when its status is `accepted`.
+/// The template's placeholder status names all four states at once and is
+/// therefore none of them.
+fn describes_this_repo_now(label: &str, text: &str) -> bool {
+    if !label.starts_with("docs/adr/") {
+        return true;
+    }
+    adr_status(text).is_some_and(|status| status.starts_with("accepted"))
+}
 
 /// Words that deny, and the scheduled-run nouns they must not be attached to.
 /// The sentence this exists for is SECURITY.md's "Both ride every pull
@@ -5956,17 +5984,58 @@ fn prose_words(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every line of `text` on which a word from `negations` reaches a word from
+/// `nouns`, one-based line number and the line itself.
+///
+/// A denial inside straight double quotes is a quotation, not a claim, and the
+/// distinction has to be made or the rule cannot be obeyed: the amendment that
+/// closed ADR-0015 quotes the sentence it retired, and the only thing that
+/// stopped the quotation from reading as a fresh assertion was where the line
+/// happened to wrap. Quote parity is counted from the start of the paragraph
+/// rather than the file, so an unbalanced `"` costs one paragraph.
+fn denials_in(text: &str, negations: &[&str], nouns: &[&str]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut quoted = false;
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            quoted = false;
+        }
+        let mut words: Vec<(bool, String)> = Vec::new();
+        let mut word = String::new();
+        for ch in line.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                word.push(ch.to_ascii_lowercase());
+                continue;
+            }
+            if !word.is_empty() {
+                words.push((quoted, mem::take(&mut word)));
+            }
+            if ch == '"' {
+                quoted = !quoted;
+            }
+        }
+        if !word.is_empty() {
+            words.push((quoted, word));
+        }
+        let denies = words.iter().enumerate().any(|(at, (in_quotes, word))| {
+            !in_quotes
+                && negations.contains(&word.as_str())
+                && words
+                    .iter()
+                    .skip(at + 1)
+                    .take(NEGATION_REACH)
+                    .any(|(_, later)| nouns.contains(&later.as_str()))
+        });
+        if denies {
+            out.push((index + 1, line.trim().to_owned()));
+        }
+    }
+    out
+}
+
 /// Does this line deny that a scheduled run exists?
 fn denies_a_schedule(line: &str) -> bool {
-    let words = prose_words(line);
-    words.iter().enumerate().any(|(at, word)| {
-        NEGATIONS.contains(&word.as_str())
-            && words
-                .iter()
-                .skip(at + 1)
-                .take(NEGATION_REACH)
-                .any(|later| SCHEDULE_NOUNS.contains(&later.as_str()))
-    })
+    !denials_in(line, NEGATIONS, SCHEDULE_NOUNS).is_empty()
 }
 
 /// Every `.md` that describes this repo rather than recording its past.
@@ -5991,6 +6060,9 @@ fn ci_prose_files() -> Vec<(String, String)> {
                 continue;
             }
             let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+            if !describes_this_repo_now(&label, &text) {
+                continue;
+            }
             out.push((label, text));
         }
     }
@@ -6008,10 +6080,8 @@ fn no_document_denies_a_scheduled_run_this_repo_makes() {
 
     let mut denials = Vec::new();
     for (label, text) in &documents {
-        for (index, line) in text.lines().enumerate() {
-            if denies_a_schedule(line) {
-                denials.push(format!("  {label}:{}: {}", index + 1, line.trim()));
-            }
+        for (line, denial) in denials_in(text, NEGATIONS, SCHEDULE_NOUNS) {
+            denials.push(format!("  {label}:{line}: {denial}"));
         }
     }
     assert!(
@@ -6972,5 +7042,952 @@ fn the_files_a_diff_can_hide_behind_are_the_ones_measured_here() {
         "these are recorded as unwatched and are not: {dead:?}\n\
          The filter caught up with them; drop the row so the list stays the measurement it \
          claims to be."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a check nothing ran, and the sentence that kept it that way
+// ---------------------------------------------------------------------------
+//
+// The sixth way, and the first way over again with the one list nobody was
+// reading. `just semver` was written, tagged `[group('lint')]`, and invoked by
+// nothing: not by `just lint`, which bundles its dependencies by hand, and not
+// by CI, which expands `[group('gate')]`. Every rule at the top of this file
+// passed on it. `every_tool_this_repo_declares_is_a_tool_this_repo_runs` asks
+// the question in the right words and asks it of `mise.toml`, so a tool the
+// image installs and a recipe drives is out of its reach. And
+// `every_lint_the_bundle_runs_is_a_gate_the_manifest_declares` compares the
+// bundle against the manifest, so a recipe in neither is in neither
+// difference. The group attribute — the one place that said "this is a lint"
+// — was read by nothing at all.
+//
+// What it cost is the whole public-surface rebuild: every entry point, every
+// IR name and every error type moved with the one tool that measures such a
+// move sitting idle. And the reason it sat idle was written down as policy,
+// in an accepted ADR, in a document class this file had excused as history:
+// "`cargo semver-checks` cannot run until a baseline exists on crates.io". It
+// was never true — `--baseline-rev` resolves out of git — but it read like a
+// decision, so it was treated as one. That is SECURITY.md's "there is no cron
+// workflow" again, one document class further out.
+//
+// So: the manifest has to reach every recipe that calls itself a check, no
+// current document may deny that a check this repo owns can run, and the gate
+// itself has to be held to what it now asserts — a baseline it can resolve, an
+// exclusion list no larger than the crates that baseline predates, and
+// arguments measured to fail on a break rather than trusted to.
+
+/// The `[group('lint')]` recipes no `[group('gate')]` declares, minus the two
+/// shapes in that group that are not checks: an aggregate (dependencies and no
+/// command of its own) and the writing half of a pair whose `-check` half is
+/// gated.
+fn checks_no_gate_runs(justfile: &str) -> Vec<String> {
+    let gates = recipes_in_group(justfile, "gate");
+    recipes_in_group(justfile, "lint")
+        .into_iter()
+        .filter(|recipe| !gates.contains(recipe))
+        .filter(|recipe| !gates.contains(&format!("{recipe}-check")))
+        .filter(|recipe| {
+            joined_body(justfile, recipe)
+                .iter()
+                .any(|line| !line.trim().is_empty())
+        })
+        .collect()
+}
+
+#[test]
+fn every_check_this_repo_declares_is_one_a_gate_runs() {
+    let justfile = read("Justfile");
+    let declared = recipes_in_group(&justfile, "lint");
+    assert!(
+        declared.len() >= 10,
+        "`[group('lint')]` came out as {declared:?}; the reader is not finding the attribute"
+    );
+
+    let idle = checks_no_gate_runs(&justfile);
+    assert!(
+        idle.is_empty(),
+        "declared a lint and gated by nothing: {idle:?}\n\
+         `[group('lint')]` is this repo saying a recipe is a check. `[group('gate')]` is the \
+         only thing that makes one run — `just ci` and the CI matrix both read it and nothing \
+         else. A recipe in the first group and not the second runs when somebody remembers, \
+         which for `just semver` was never. Tag it, or take the lint group off it."
+    );
+}
+
+#[test]
+fn the_lint_group_as_it_stood_held_a_check_nothing_ran() {
+    // The `Justfile` as it was. Every other rule in this file passed on it:
+    // the recipe is not in `just lint`'s dependency list, so the bundle
+    // comparison never saw it, and it is not in the manifest, so neither did
+    // anything reading that.
+    let before = concat!(
+        "[group('lint')]\n",
+        "lint: fmt-check clippy\n",
+        "\n",
+        "[group('gate')]\n",
+        "[group('lint')]\n",
+        "fmt-check:\n",
+        "    cargo fmt --all -- --check\n",
+        "\n",
+        "[group('lint')]\n",
+        "fmt:\n",
+        "    cargo fmt --all\n",
+        "\n",
+        "[group('lint')]\n",
+        "semver:\n",
+        "    cargo semver-checks check-release --workspace\n",
+    );
+    assert_eq!(
+        checks_no_gate_runs(before),
+        vec!["semver".to_owned()],
+        "the reader no longer sees the defect it was written for. `lint` is the bundle and \
+         `fmt` is `fmt-check`'s writing half; `semver` is the check nothing ran."
+    );
+
+    let after = before.replace(
+        "[group('lint')]\nsemver:",
+        "[group('gate')]\n[group('lint')]\nsemver:",
+    );
+    assert!(
+        checks_no_gate_runs(&after).is_empty(),
+        "tagging the recipe is what settles it: {:?}",
+        checks_no_gate_runs(&after)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// prose that denies a check this repo can run
+// ---------------------------------------------------------------------------
+
+/// Denials of capability, as opposed to [`NEGATIONS`]' denials of fact. The
+/// two are answered by different evidence: "this does not run" is a claim
+/// about the manifest, and "this cannot run" is a claim about a tool, refuted
+/// by the repo owning a recipe that runs it.
+const CAPABILITY_DENIALS: &[&str] = &["cannot", "unable", "impossible"];
+
+/// The nouns a denial of a run attaches to.
+const RUN_NOUNS: &[&str] = &[
+    "run",
+    "runs",
+    "ran",
+    "running",
+    "gate",
+    "gates",
+    "gated",
+    "ci",
+    "pr",
+    "per-pr",
+    "pull-request",
+    "enforced",
+    "wired",
+    "invoked",
+];
+
+/// Sub-command and gate names that are also ordinary English. A document
+/// saying something "cannot run" or "is not gated" while the word `build` or
+/// `check` happens to appear on the line is discussing work, not asserting
+/// that a named tool is unavailable — and a reader that took these as names
+/// would fire on most sentences about a compile.
+const TOOL_WORDS_THAT_ARE_ALSO_PROSE: &[&str] = &[
+    "add", "bench", "build", "check", "clean", "coverage", "doc", "fuzz", "install", "metadata",
+    "pin", "prop", "publish", "remove", "run", "spec", "test", "tree", "update",
+];
+
+/// The tools this repo drives, as a document would spell them: the
+/// sub-command for a `cargo` call, the command name for anything else.
+///
+/// Every recipe, not only the gated ones, and that is the point. The claim
+/// being refuted is "this tool cannot run here", and a recipe that runs it is
+/// the refutation whether or not anything runs the recipe — which for
+/// `cargo semver-checks` was the entire defect.
+fn tool_vocabulary(justfile: &str) -> BTreeSet<String> {
+    let variables = plain_variables(justfile);
+    let mut out = BTreeSet::new();
+    for (_, line) in expanded_recipe_lines(justfile) {
+        for (tool, sub) in tool_commands(&expand(&line, &variables)) {
+            out.insert(sub);
+            if tool != "cargo" {
+                out.insert(tool);
+            }
+        }
+    }
+    out.retain(|word| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&word.as_str()));
+    out
+}
+
+/// The words of `line` that appear in `vocabulary`.
+fn names_any(line: &str, vocabulary: &BTreeSet<String>) -> Vec<String> {
+    let mut named: Vec<String> = prose_words(line)
+        .into_iter()
+        .filter(|word| vocabulary.contains(word))
+        .collect();
+    named.sort();
+    named.dedup();
+    named
+}
+
+#[test]
+fn no_document_denies_a_check_this_repo_can_run() {
+    let justfile = read("Justfile");
+    let tools = tool_vocabulary(&justfile);
+    assert!(
+        tools.contains("semver-checks"),
+        "the tool reader came out as {tools:?} and does not hold the tool this rule was written \
+         for; it is no longer reading the recipes"
+    );
+    let gates: BTreeSet<String> = recipes_in_group(&justfile, "gate")
+        .into_iter()
+        .filter(|gate| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&gate.as_str()))
+        .collect();
+
+    let documents = ci_prose_files();
+    assert!(
+        documents
+            .iter()
+            .any(|(label, _)| label.starts_with("docs/adr/")),
+        "the reader is not finding the accepted ADRs; it found {:?}. Excusing them as history \
+         is what let this rule's own sentence stand.",
+        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
+
+    let mut claims = Vec::new();
+    for (label, text) in &documents {
+        for (line, denial) in denials_in(text, CAPABILITY_DENIALS, RUN_NOUNS) {
+            let named = names_any(&denial, &tools);
+            if !named.is_empty() {
+                claims.push(format!(
+                    "  {label}:{line}: {denial}\n    a recipe here runs {named:?}"
+                ));
+            }
+        }
+        for (line, denial) in denials_in(text, NEGATIONS, RUN_NOUNS) {
+            let named = names_any(&denial, &gates);
+            if !named.is_empty() {
+                claims.push(format!(
+                    "  {label}:{line}: {denial}\n    {named:?} is in the gate manifest"
+                ));
+            }
+        }
+    }
+    assert!(
+        claims.is_empty(),
+        "prose that denies a check this repo can run:\n{}\n\
+         A document in force saying a tool cannot run, or that a gate is not gated, is not a \
+         description that has gone stale — it is an instruction not to look. ADR-0015's \
+         `cargo semver-checks` sentence held the public-surface rebuild open for exactly as \
+         long as it took somebody to disbelieve it.",
+        claims.join("\n")
+    );
+}
+
+#[test]
+fn a_capability_denial_is_read_and_a_quotation_of_one_is_not() {
+    // The sentence, as ADR-0015 carried it. The wrapping is the ADR's own:
+    // the tool and the denial share the first line, which is the only reason
+    // a line-at-a-time reader could attribute one to the other.
+    let before = concat!(
+        "`cargo semver-checks` cannot run until a baseline exists on crates.io, so it\n",
+        "is wired into the `publish-crates.yml` preflight *after* the first publish,\n",
+        "not into per-PR CI.\n",
+    );
+    let found = denials_in(before, CAPABILITY_DENIALS, RUN_NOUNS);
+    assert_eq!(
+        found.len(),
+        1,
+        "the reader no longer sees the sentence it was written for: {found:?}"
+    );
+    assert!(
+        !names_any(&found[0].1, &tool_vocabulary(&read("Justfile"))).is_empty(),
+        "the denial no longer reads as being about a tool this repo drives"
+    );
+
+    // The amendment quotes it, deliberately on one line with the tool name, so
+    // that what excuses the quotation is the quoting and not the wrapping.
+    let after = concat!(
+        "This ADR first said `cargo semver-checks` \"cannot run until a baseline\n",
+        "exists on crates.io\", and that was wrong the whole time.\n",
+    );
+    assert!(
+        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS).is_empty(),
+        "a quoted denial read as a fresh one: {:?}\n\
+         Recording a retired claim is how an amendment explains itself; a rule that forbids the \
+         quotation forbids the explanation.",
+        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS)
+    );
+
+    // And the quoting is not a way out: reopen the quote and the claim is the
+    // document's own again.
+    let unquoted = after.replace('"', "");
+    assert_eq!(
+        denials_in(&unquoted, CAPABILITY_DENIALS, RUN_NOUNS).len(),
+        1,
+        "the same sentence without its quotation marks stopped reading as a claim"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the baseline the semver gate compares against
+// ---------------------------------------------------------------------------
+//
+// Wiring the recipe up is one claim; the arguments in it are another. Three
+// ways this gate can run green over nothing, none of which any rule above
+// reaches. It can name a baseline the checkout cannot resolve, which fails
+// loudly in the one shape that reads like the tool being broken rather than
+// the API having moved. It can `--exclude` its way past a crate the baseline
+// does hold, which is the coverage-denominator defect in another file. And it
+// can pass because the version already declares a major bump, which is a
+// correct answer to a question nobody wanted asked.
+
+/// The recipe that compares this workspace's public API against a baseline.
+const SEMVER_GATE: &str = "semver";
+
+/// The arguments the [`SEMVER_GATE`] recipe hands `cargo semver-checks`.
+/// Continuations folded, run prefix and any unresolved `{{…}}` dropped.
+fn semver_arguments(justfile: &str) -> Vec<String> {
+    let tokens: Vec<String> = joined_body(justfile, SEMVER_GATE)
+        .iter()
+        .flat_map(|line| shell_tokens(line))
+        .filter(|token| !token.starts_with("{{"))
+        .collect();
+    let at = tokens
+        .iter()
+        .position(|token| token == "semver-checks")
+        .unwrap_or_else(|| {
+            panic!("`just {SEMVER_GATE}` no longer runs `cargo semver-checks`: {tokens:?}")
+        });
+    tokens[at + 1..].to_vec()
+}
+
+/// Every value `flag` is given, in order. `--exclude` is repeated once per
+/// crate, so the first hit is not the answer.
+fn flag_values<'a>(arguments: &'a [String], flag: &str) -> Vec<&'a str> {
+    arguments
+        .iter()
+        .zip(arguments.iter().skip(1))
+        .filter(|(name, _)| name.as_str() == flag)
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
+/// Does this flag's value name a git revision? `--baseline-rev` does.
+/// criterion's `--baseline`, which names a saved benchmark run and sits in the
+/// `bench-compare` recipe of this same file, does not — and a reader that took
+/// the word `baseline` for the question would have said it did.
+fn takes_a_revision(flag: &str) -> bool {
+    flag.starts_with("--") && flag.contains("-rev")
+}
+
+/// The flag naming a revision to compare against, and the revision. `None`
+/// when the recipe names none — in which case the check has no baseline but
+/// the registry, and nothing this workspace publishes is on one yet.
+fn baseline_revision(arguments: &[String]) -> Option<(String, String)> {
+    arguments
+        .iter()
+        .zip(arguments.iter().skip(1))
+        .find(|(flag, _)| takes_a_revision(flag))
+        .map(|(flag, value)| (flag.clone(), value.clone()))
+}
+
+/// `git` in this repository, stdout on success and `None` on any failure.
+fn git(arguments: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .args(arguments)
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("running `git {}`: {e}", arguments.join(" ")));
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// A `vMAJOR.MINOR.PATCH` tag as three numbers, for ordering. `None` for a tag
+/// this repo's release scheme does not produce.
+fn tag_version(tag: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = tag.strip_prefix('v')?.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// The `v*` tags this checkout can see, newest last.
+fn version_tags() -> Vec<String> {
+    let mut tags: Vec<(u64, u64, u64, String)> = git(&["tag", "--list", "v*"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|tag| tag_version(tag).map(|(x, y, z)| (x, y, z, tag.to_owned())))
+        .collect();
+    tags.sort_unstable();
+    tags.into_iter().map(|(_, _, _, tag)| tag).collect()
+}
+
+/// The `name` a manifest declares.
+fn package_name(manifest: &str) -> Option<&str> {
+    manifest_value(manifest, "package", "name").map(|name| name.trim_matches('"'))
+}
+
+/// The package names a revision's workspace holds. Read out of that revision
+/// rather than out of the checkout: which crates the baseline contains is the
+/// entire question an `--exclude` answers.
+fn packages_at(revision: &str) -> BTreeSet<String> {
+    let root = git(&["show", &format!("{revision}:Cargo.toml")])
+        .unwrap_or_else(|| panic!("`{revision}` has no Cargo.toml this checkout can read"));
+    let mut paths: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in root.lines() {
+        let body = strip_comment(line);
+        if !inside {
+            inside = body.trim_start().starts_with("members") && body.contains('[');
+            continue;
+        }
+        if body.trim_start().starts_with(']') {
+            break;
+        }
+        paths.extend(quoted_items(body));
+    }
+    assert!(
+        paths.len() >= 3,
+        "only {paths:?} read out of `{revision}`'s workspace members; the reader is not finding \
+         the list"
+    );
+    paths
+        .iter()
+        .filter_map(|path| git(&["show", &format!("{revision}:{path}/Cargo.toml")]))
+        .filter_map(|manifest| package_name(&manifest).map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn the_semver_gate_names_a_baseline_it_can_reach() {
+    let justfile = read("Justfile");
+    assert!(
+        recipes_in_group(&justfile, "gate").contains(SEMVER_GATE),
+        "`{SEMVER_GATE}` is not a `[group('gate')]` recipe. Everything below is about what its \
+         arguments assert, and nothing asserts anything while nothing runs it."
+    );
+
+    let arguments = semver_arguments(&justfile);
+    let (flag, revision) = baseline_revision(&arguments).unwrap_or_else(|| {
+        panic!(
+            "`just {SEMVER_GATE}` names no baseline revision: {arguments:?}\n\
+             Without one cargo-semver-checks compares against the registry, and nothing this \
+             workspace publishes is on the registry yet — so the gate errors rather than \
+             checks. `--baseline-rev <tag>` resolves out of this repository's own history, \
+             which is why the check was available long before the first publish."
+        )
+    });
+
+    assert!(
+        git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{revision}^{{commit}}")
+        ])
+        .is_some(),
+        "`{flag} {revision}` names a revision this checkout cannot resolve. Locally that is a \
+         missing tag; in CI it is a checkout without `fetch-depth: 0`, and either way the gate \
+         fails for a reason that looks like the tool being broken rather than the API having \
+         moved."
+    );
+
+    let tags = version_tags();
+    let newest = tags.last().unwrap_or_else(|| {
+        panic!("this checkout can see no `v*` tag at all; `fetch-depth: 0` fetches them")
+    });
+    assert_eq!(
+        &revision, newest,
+        "`{flag} {revision}` is behind `{newest}`, the newest release tag. The flag is \
+         scaffolding for the window before the first publish: while it is here it has to name \
+         the latest release, or the gate is quietly measuring against an older surface than the \
+         one anybody shipped. Once a version is on crates.io, delete the flag — the registry \
+         version is cargo-semver-checks' own default baseline and there is no literal left to \
+         keep in step."
+    );
+}
+
+#[test]
+fn every_package_the_semver_gate_excludes_is_one_its_baseline_does_not_hold() {
+    let justfile = read("Justfile");
+    let arguments = semver_arguments(&justfile);
+    let (_, revision) = baseline_revision(&arguments)
+        .unwrap_or_else(|| panic!("`just {SEMVER_GATE}` names no baseline revision"));
+    let baseline = packages_at(&revision);
+    assert!(
+        baseline.contains("aozora-flavored-markdown"),
+        "`{revision}` came out holding {baseline:?}; the reader is not finding its members"
+    );
+
+    let excluded: BTreeSet<&str> = flag_values(&arguments, "--exclude").into_iter().collect();
+    let still_there: Vec<&&str> = excluded
+        .iter()
+        .filter(|package| baseline.contains(**package))
+        .collect();
+    assert!(
+        still_there.is_empty(),
+        "the gate excludes {still_there:?}, and `{revision}` holds them. An exclusion is a \
+         statement that the baseline has nothing to compare against — the two epub crates \
+         joined this workspace after that tag (ADR-0018) and stop the run outright. A crate the \
+         baseline does hold is one this gate could check and has been told not to, which is how \
+         an exclusion list becomes the place breaking changes go to be unseen."
+    );
+
+    let published: BTreeSet<String> = workspace_members()
+        .iter()
+        .filter(|member| is_published(&member.manifest))
+        .filter_map(|member| package_name(&member.manifest).map(str::to_owned))
+        .collect();
+    assert!(
+        published.len() >= 2,
+        "only {published:?} read as published; the reader is not finding the manifests"
+    );
+    let unchecked: Vec<&String> = published
+        .iter()
+        .filter(|package| baseline.contains(*package) && excluded.contains(package.as_str()))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "these reach crates.io, are in the baseline, and are excluded from the only gate that \
+         compares their public API against it: {unchecked:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// what the arguments do when handed a break
+// ---------------------------------------------------------------------------
+
+/// The probe's clean public surface, and the same surface with one public
+/// field removed — a break every version of cargo-semver-checks reports, under
+/// its own `struct_pub_field_missing` lint.
+const PROBE_INTACT: &str = "pub struct Kept {\n    pub field: u8,\n}\n";
+const PROBE_BROKEN: &str = "pub struct Kept {}\n";
+
+/// The tag the probe repository carries on its intact revision.
+const PROBE_BASELINE: &str = "v0.1.0";
+
+/// A throwaway crate in a git repository of its own, tagged at an intact
+/// public surface. Rewriting it and asking the gate's own arguments about it
+/// is the only way to know those arguments report anything: every other rule
+/// here would pass just as well on a flag that is a typo.
+struct SemverProbe {
+    root: PathBuf,
+    dir: PathBuf,
+}
+
+impl SemverProbe {
+    fn new() -> Self {
+        // The build directory is a SIBLING of the crate, not the `target/`
+        // inside it. cargo-semver-checks clones the baseline revision into
+        // the build directory, and a clone under the project root is a second
+        // manifest for the same package name — cargo refuses the whole run as
+        // ambiguous before either surface is read.
+        let root = scratch("semver-probe");
+        let probe = Self {
+            dir: root.join("crate"),
+            root,
+        };
+        probe.write("0.1.0", PROBE_INTACT);
+        probe.git(&["init", "--quiet"]);
+        probe.git(&["add", "--all"]);
+        probe.git(&[
+            "-c",
+            "user.name=probe",
+            "-c",
+            "user.email=probe@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--message=probe",
+        ]);
+        probe.git(&["tag", PROBE_BASELINE]);
+        probe
+    }
+
+    fn write(&self, version: &str, source: &str) {
+        let src = self.dir.join("src");
+        fs::create_dir_all(&src).unwrap_or_else(|e| panic!("creating {}: {e}", src.display()));
+        let manifest = format!(
+            "[workspace]\n\n\
+             [package]\n\
+             name = \"aozora_md_semver_probe\"\n\
+             version = \"{version}\"\n\
+             edition = \"2021\"\n\n\
+             [lib]\n\
+             path = \"src/lib.rs\"\n"
+        );
+        fs::write(self.dir.join("Cargo.toml"), manifest)
+            .unwrap_or_else(|e| panic!("writing the probe manifest: {e}"));
+        fs::write(src.join("lib.rs"), source)
+            .unwrap_or_else(|e| panic!("writing the probe source: {e}"));
+    }
+
+    fn git(&self, arguments: &[&str]) {
+        let out = Command::new("git")
+            .args(arguments)
+            .current_dir(&self.dir)
+            .output()
+            .unwrap_or_else(|e| panic!("running `git {}`: {e}", arguments.join(" ")));
+        assert!(
+            out.status.success(),
+            "the probe repository could not be built (`git {}`):\n{}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Does the gate's own sub-command and baseline flag accept this version
+    /// of this source, compared against the intact tag?
+    fn accepts(&self, call: &SemverCall, version: &str, source: &str) -> bool {
+        self.write(version, source);
+        let out = Command::new("cargo")
+            .args([
+                "semver-checks",
+                &call.subcommand,
+                &call.baseline_flag,
+                PROBE_BASELINE,
+            ])
+            .current_dir(&self.dir)
+            .env("CARGO_TARGET_DIR", self.root.join("build"))
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "running cargo semver-checks: {e}\n\
+                     This suite runs inside the dev image (ADR-0002), where it is installed."
+                )
+            });
+        let accepted = out.status.success();
+        let report = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            report.contains("Summary"),
+            "cargo semver-checks did not reach a verdict on the probe:\n{report}"
+        );
+        accepted
+    }
+}
+
+impl Drop for SemverProbe {
+    fn drop(&mut self) {
+        drop(fs::remove_dir_all(&self.root));
+    }
+}
+
+/// How the gate calls cargo-semver-checks, for a probe to be asked the same
+/// way. `check-release` is what compares two surfaces; a bare `check` would be
+/// a different question, and reading the recipe rather than spelling the
+/// arguments here is what makes the probe measure this gate.
+struct SemverCall {
+    subcommand: String,
+    baseline_flag: String,
+}
+
+impl SemverCall {
+    fn of(justfile: &str) -> Self {
+        let arguments = semver_arguments(justfile);
+        let subcommand = arguments
+            .iter()
+            .find(|token| !token.starts_with('-'))
+            .unwrap_or_else(|| {
+                panic!("`just {SEMVER_GATE}` hands cargo-semver-checks no sub-command")
+            })
+            .clone();
+        let (baseline_flag, _) = baseline_revision(&arguments)
+            .unwrap_or_else(|| panic!("`just {SEMVER_GATE}` names no baseline revision"));
+        Self {
+            subcommand,
+            baseline_flag,
+        }
+    }
+}
+
+#[test]
+fn the_arguments_the_semver_gate_passes_are_what_makes_a_breaking_change_fail() {
+    let justfile = read("Justfile");
+    let call = SemverCall::of(&justfile);
+    let probe = SemverProbe::new();
+
+    // The control, and the reason the second half means anything: at a patch
+    // bump over an unchanged surface these arguments produce a pass. A gate
+    // that failed here would fail on everything, which is a different bug
+    // wearing this one's clothes.
+    assert!(
+        probe.accepts(&call, "0.1.1", PROBE_INTACT),
+        "`{} {}` rejects a patch release that changed nothing",
+        call.subcommand,
+        call.baseline_flag
+    );
+
+    assert!(
+        !probe.accepts(&call, "0.1.1", PROBE_BROKEN),
+        "`{} {}` passes a patch release that removed a public field. The recipe is wired, the \
+         leg is green, and the answer is worth nothing — which is the state this gate was in \
+         for the whole of the public-surface rebuild, for a different reason.",
+        call.subcommand,
+        call.baseline_flag
+    );
+}
+
+#[test]
+fn the_semver_gate_answers_vacuously_while_this_workspace_outruns_its_baseline() {
+    // A debt, pinned rather than described. cargo reads `0.4` -> `0.5` as a
+    // major bump, and a major bump permits every break there is: the same
+    // removal the test above catches is skipped here along with the other 252
+    // lints, and the run reports `no semver update required` and exits 0.
+    //
+    // That is the correct answer for this cycle — the breaking changes are the
+    // plan and 0.5.0 declares them — and it means the green leg on every PR
+    // until the next release asserts only that the declared version covers
+    // what changed. The gate starts biting the moment the baseline is a
+    // version this workspace is merely a patch ahead of, and that is the
+    // moment this test fails and wants deleting, along with the vacuity note
+    // in the recipe and in ADR-0015.
+    let justfile = read("Justfile");
+    let probe = SemverProbe::new();
+    assert!(
+        probe.accepts(&SemverCall::of(&justfile), "0.2.0", PROBE_BROKEN),
+        "a 0.y major bump no longer absorbs a removed public field. cargo-semver-checks has \
+         changed what it skips; this test recorded the opposite and the note it belongs to is \
+         now wrong in the Justfile and in ADR-0015."
+    );
+
+    let arguments = semver_arguments(&justfile);
+    let (_, revision) = baseline_revision(&arguments)
+        .unwrap_or_else(|| panic!("`just {SEMVER_GATE}` names no baseline revision"));
+    let baseline = tag_version(&revision)
+        .unwrap_or_else(|| panic!("`{revision}` is not a vMAJOR.MINOR.PATCH tag"));
+    let manifest = read("Cargo.toml");
+    let declared = manifest_value(&manifest, "workspace.package", "version").map_or_else(
+        || panic!("the workspace manifest declares no version"),
+        |version| format!("v{}", version.trim_matches('"')),
+    );
+    let declared = tag_version(&declared)
+        .unwrap_or_else(|| panic!("`{declared}` is not a MAJOR.MINOR.PATCH version"));
+
+    // cargo's 0.y rule: below 1.0 the minor is the breaking-change axis.
+    let breaking = if baseline.0 == 0 && declared.0 == 0 {
+        declared.1 > baseline.1
+    } else {
+        declared.0 > baseline.0
+    };
+    assert!(
+        breaking,
+        "this workspace declares {declared:?} against a {baseline:?} baseline, so the gate is \
+         no longer skipping its lints — it is comparing public API for real. Good: delete this \
+         test, and delete the note in the `{SEMVER_GATE}` recipe and in ADR-0015 that calls the \
+         pass vacuous, because it has stopped being one."
+    );
+}
+
+/// The target directory a command line points cargo at, as written. The value
+/// is a shell expansion and this reader does not expand it: the question is
+/// whether two gates aim cargo at the same directory, not what that directory
+/// is called on any one machine.
+fn target_directory_on(line: &str) -> Option<&str> {
+    line.split_once("CARGO_TARGET_DIR=")?
+        .1
+        .split_whitespace()
+        .next()
+}
+
+/// Where a recipe sends cargo's build output. `None` is not "nowhere" — it is
+/// the ambient directory the dev image bakes in, which is the one every gate
+/// that names none shares.
+fn target_directory_of(justfile: &str, recipe: &str) -> Option<String> {
+    joined_body(justfile, recipe)
+        .iter()
+        .find_map(|line| target_directory_on(line).map(str::to_owned))
+}
+
+#[test]
+fn the_semver_gate_does_not_build_its_rustdoc_where_the_doc_gates_build_theirs() {
+    // Both sides of this gate are rustdoc JSON for a crate called
+    // `aozora_flavored_markdown` — the current one and the baseline tag's — and
+    // rustdoc names its output file after the crate, not after the package it
+    // was built from. So both sides resolve to one `doc/<crate>.json` under
+    // whatever target directory cargo is aimed at: the same output-path clash
+    // `_NO_COLLISION` catches within a single `cargo doc` pass, one directory
+    // up and across two gates.
+    //
+    // Sharing it does not cost time, it costs the answer. Measured on the
+    // arrangement this test was written for: `just doc` first, then this gate,
+    // and cargo reads the crate's doc unit as fresh, skips the current-side
+    // build, and leaves the BASELINE's JSON where the current one belongs — so
+    // the gate compares the baseline against itself, reads the version as
+    // unchanged, drops out of "major bump, skip everything" into per-lint
+    // checking, and fails on a feature the released version has and this one
+    // dropped. That is `just ci`'s own order, and the failure it prints names a
+    // break in a workspace that has none.
+    //
+    // `cargo semver-checks` takes no `--target-dir`, so the environment is the
+    // only place to say this, and an env assignment is deletable in a way a
+    // flag is not. Hence a test.
+    let justfile = read("Justfile");
+    let semver_directory = target_directory_of(&justfile, SEMVER_GATE).unwrap_or_else(|| {
+        panic!(
+            "`just {SEMVER_GATE}` names no CARGO_TARGET_DIR, so it builds both of its rustdoc \
+             JSONs where the doc gates build theirs. After a `cargo doc` over the same \
+             directory this gate stops comparing the current surface at all and reports the \
+             baseline's own features as removed."
+        )
+    });
+
+    // Naming the ambient directory back to itself would satisfy the read above
+    // and change nothing, so the value has to go somewhere below it.
+    assert!(
+        semver_directory
+            .rsplit_once('}')
+            .is_none_or(|(_, tail)| tail.trim_matches('"').contains('/')),
+        "`just {SEMVER_GATE}` points cargo at `{semver_directory}`, which is the directory the \
+         doc gates already build in under another spelling"
+    );
+
+    let doc_gates: Vec<String> = recipes_in_group(&justfile, "gate")
+        .into_iter()
+        .filter(|recipe| {
+            joined_body(&justfile, recipe)
+                .iter()
+                .any(|line| builds_rustdoc(line))
+        })
+        .collect();
+    assert!(
+        doc_gates.len() >= 2,
+        "only {doc_gates:?} read as rustdoc-building gates; the reader is not finding them, so \
+         what follows compares this gate against nothing"
+    );
+
+    for gate in &doc_gates {
+        assert_ne!(
+            target_directory_of(&justfile, gate),
+            Some(semver_directory.clone()),
+            "`just {gate}` and `just {SEMVER_GATE}` aim cargo at one target directory, and both \
+             write rustdoc output for the same crate name into it"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the history a recipe needs and a checkout does not fetch
+// ---------------------------------------------------------------------------
+//
+// `actions/checkout` clones one commit. Everything else in this repo is happy
+// with that, which is why two gates that are not had to be found by hand: the
+// commit range `just commitlint` reads and the tag `just semver` resolves are
+// both in history a depth-1 clone does not carry. Getting it wrong fails in
+// the worst shape a gate has — the tool reports a missing revision, so the run
+// reads as broken tooling rather than as the thing the gate exists to say.
+
+/// The shape a revision range is written in. `origin/main..HEAD` sits in a
+/// recipe *header* as a parameter default, so the header is read too.
+const REVISION_RANGE: &str = "..";
+
+/// Does this token name a git revision range rather than a path? `../..` is
+/// the thing that is not one.
+fn names_a_revision(token: &str) -> bool {
+    token.contains(REVISION_RANGE) && !token.starts_with('.') && !token.contains("./")
+}
+
+/// The recipes that name a git revision, and therefore need the history that
+/// revision lives in.
+fn recipes_needing_history(justfile: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for recipe in justfile
+        .lines()
+        .filter(|line| !line.starts_with([' ', '\t', '#', '[']))
+        .filter_map(recipe_name)
+    {
+        let header = recipe_header(justfile, &recipe);
+        let mut tokens: Vec<String> = shell_tokens(strip_comment(header));
+        tokens.extend(
+            joined_body(justfile, &recipe)
+                .iter()
+                .flat_map(|line| shell_tokens(line)),
+        );
+        let names = tokens.iter().any(|token| names_a_revision(token))
+            || tokens.iter().any(|token| takes_a_revision(token));
+        if names {
+            out.insert(recipe);
+        }
+    }
+    out
+}
+
+/// The recipes a workflow job can run. A job whose matrix expands the gate
+/// manifest runs every containerized gate, one leg at a time, and names none
+/// of them — which is the whole point of deriving the legs and the reason a
+/// reader of `run:` lines alone would see that job as running nothing.
+fn recipes_a_job_can_run(justfile: &str, workflow: &str, job: &str) -> BTreeSet<String> {
+    let Some(lines) = job_lines(workflow, job) else {
+        return BTreeSet::new();
+    };
+    let mut out = recipes_invoked_in(&lines);
+    if lines
+        .iter()
+        .any(|line| strip_comment(line).contains("fromJSON(needs.gates.outputs."))
+    {
+        let native = recipes_in_group(justfile, "native");
+        out.extend(
+            recipes_in_group(justfile, "gate")
+                .into_iter()
+                .filter(|gate| !native.contains(gate)),
+        );
+    }
+    out
+}
+
+/// Does this job check out the whole history rather than the tip?
+fn checks_out_full_history(lines: &[&str]) -> bool {
+    lines
+        .iter()
+        .any(|line| strip_comment(line).trim() == "fetch-depth: 0")
+}
+
+#[test]
+fn every_job_that_runs_a_recipe_naming_a_revision_checks_out_the_history_it_needs() {
+    let justfile = read("Justfile");
+    let needs_history = recipes_needing_history(&justfile);
+    assert_eq!(
+        needs_history,
+        [SEMVER_GATE.to_owned(), "commitlint".to_owned()]
+            .into_iter()
+            .collect::<BTreeSet<String>>(),
+        "the recipes naming a git revision are no longer the two this rule was measured \
+         against. A new one is a new job to check; one gone is a reader that has stopped \
+         finding them."
+    );
+
+    let mut shallow = Vec::new();
+    let mut asked = 0;
+    for path in workflow_files() {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        for job in job_keys(&text) {
+            let running: BTreeSet<String> = recipes_a_job_can_run(&justfile, &text, &job)
+                .intersection(&needs_history)
+                .cloned()
+                .collect();
+            if running.is_empty() {
+                continue;
+            }
+            asked += 1;
+            let lines = job_lines(&text, &job).unwrap_or_default();
+            if !checks_out_full_history(&lines) {
+                shallow.push(format!("  {label}'s `{job}` job runs {running:?}"));
+            }
+        }
+    }
+    // The defect before the floor: a shallow job is a fact about this repo,
+    // and the count below is only a fact about the reader.
+    assert!(
+        shallow.is_empty(),
+        "jobs that resolve a revision out of a depth-1 clone:\n{}\n\
+         `actions/checkout` fetches one commit unless told otherwise. The recipe then fails on \
+         a revision it cannot find, which looks like the check being broken and not like the \
+         answer it was asked for. Add `fetch-depth: 0` to that job's checkout.",
+        shallow.join("\n")
+    );
+    assert!(
+        asked >= 3,
+        "only {asked} job(s) came out running a recipe that needs history; the reader is not \
+         finding them. Three is what this repo has: the gate matrix and the commit-range job in \
+         ci.yml, and the publish preflight."
     );
 }
