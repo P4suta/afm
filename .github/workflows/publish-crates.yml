@@ -1,13 +1,19 @@
 # cargo publish workflow for the aozora-flavored-markdown workspace.
 #
-# Publishes the two library/binary crates to crates.io in dependency
-# (topological) order: `aozora-flavored-markdown` (leaf) then `aozora-flavored-markdown-cli` (depends on it).
-# Each `cargo publish` waits for its crate to appear in the crates.io index
-# before returning (cargo >= 1.66), so aozora-flavored-markdown-cli's resolution finds the
-# aozora-flavored-markdown version just uploaded — no manual `sleep` between steps.
+# One command publishes the whole ladder. `cargo publish --workspace` reads the
+# dependency graph, uploads in topological order — each library before the
+# crates that depend on it — and waits for an upload to appear in the crates.io
+# index before uploading its dependents (cargo-publish(1), step 4), so no step
+# here sleeps or sequences anything by hand. Multi-package publish stabilised
+# in Cargo 1.89 (`-Zpackage-workspace`) and this workspace pins 1.96.0.
+# ADR-0015 rejected `--workspace` for not ordering first-publishes, on a
+# toolchain that already had it; the amended ADR records the dry-run that
+# reversed the finding.
 #
-# Members marked `publish = false` are intentionally absent: aozora-flavored-markdown-wasm
-# (ships via wasm-pack/npm), and aozora-flavored-markdown-test-support / xtask (dev-only).
+# The set is a fact about the manifests rather than a list this file keeps in
+# step: cargo skips the `publish = false` members itself. Those are
+# aozora-flavored-markdown-wasm (ships via wasm-pack/npm), and
+# aozora-flavored-markdown-test-support / xtask (dev-only).
 #
 # ADR-0002 scope exception: this runs on the native runner toolchain rather
 # than the dev image (like the `msrv` CI job). Publishing is a release
@@ -27,19 +33,28 @@
 # How to run a real publish (steady state, no secret):
 #   gh workflow run publish-crates.yml -f dry_run=false   # then approve
 #
-# Register the trusted publisher once per crate (these crates already
-# exist on crates.io, so no token bootstrap is needed): crates.io → the
-# crate → Settings → Trusted Publishing → GitHub, owner=P4suta,
+# Register the trusted publisher once per crate: crates.io → the crate →
+# Settings → Trusted Publishing → GitHub, owner=P4suta,
 # repo=aozora-flavored-markdown, workflow=publish-crates.yml,
-# environment=release. Then delete the CARGO_TOKEN secret. If you ever
-# need the legacy token path, run with `-f use_oidc=false`.
+# environment=release. Once all four carry one, delete the CARGO_TOKEN
+# secret.
 #
-# NOTE on dry-run coverage: only the dependency-free leaf (`aozora-flavored-markdown`)
-# can be dry-run before anything is on crates.io; an aozora-flavored-markdown-cli dry-run fails
-# because its just-bumped aozora-flavored-markdown dep isn't on the registry yet. The
-# real correctness gate is a green `ci-success` before tagging; the
-# per-crate verify build that `cargo publish` runs is the final pre-upload
-# check.
+# The bootstrap is not done yet, and going from two rungs to four is why:
+# `aozora-flavored-markdown` and its CLI are on crates.io (v0.4.1) and can be
+# configured today, but the two EPUB crates are 404 and crates.io has nothing
+# to attach a publisher to until a crate exists. One `cargo publish
+# --workspace` carries one token, so that is a fact about the whole ladder and
+# not those two rungs alone: the run that first uploads them goes through the
+# legacy token path (`-f use_oidc=false` with CARGO_TOKEN), and every run
+# after it can use OIDC.
+#
+# NOTE on dry-run coverage: the whole ladder is dry-runnable before any of it
+# exists on crates.io. Cargo packages each member into a temporary registry
+# under `target/package/` and resolves the next member against it, so a crate
+# whose dependency is not yet published still builds exactly as a consumer
+# will build it. Under `--dry-run` the "already exists on crates.io" check
+# that stops a real run is downgraded to a warning, which is what lets the
+# preflight below run on every dispatch.
 
 name: publish-crates
 
@@ -47,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry-run only (no upload): packages + verifies aozora-flavored-markdown"
+        description: "Dry-run only (no upload): packages + verifies every publishable crate"
         type: boolean
         default: true
       use_oidc:
@@ -67,8 +82,8 @@ concurrency:
 jobs:
   # Preflight — runs ungated on every dispatch (no credentials, so no
   # environment approval needed). Two questions, both answerable before an
-  # upload: does the package still build from its own metadata (only the leaf
-  # crate can be dry-run pre-publish), and does the version about to go out
+  # upload: do the packages still build from their own metadata (all of them,
+  # in the order they would go up), and does the version about to go out
   # cover the API changes in it. A live publish `needs:` this job, so either
   # regression surfaces before anything is uploaded — and an upload is the one
   # operation crates.io will not let anybody take back.
@@ -100,8 +115,8 @@ jobs:
         with:
           tool: cargo-semver-checks,just
 
-      - name: Dry-run aozora-flavored-markdown (metadata smoke test)
-        run: cargo publish -p aozora-flavored-markdown --dry-run --locked
+      - name: Dry-run the ladder (packages and verifies every publishable crate)
+        run: cargo publish --workspace --dry-run --locked
 
       - name: Semver preflight (public API against the baseline)
         run: just semver
@@ -136,45 +151,16 @@ jobs:
         if: ${{ inputs.use_oidc }}
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
 
-      # Resumable + rate-limit aware: each crate is (a) skipped if its
-      # version is already on the registry — so a re-run safely continues
-      # a partial publish — and (b) retried after a wait when the upload is
-      # rejected with HTTP 429.
-      - name: Publish to crates.io (topological, resumable)
+      # A partial run is NOT resumable by re-dispatch. Cargo checks every
+      # selected member against the registry before it packages or uploads
+      # anything, and a version already there is a hard error
+      # ("crate foo@1.2.3 already exists on crates.io"), not a skip — so a
+      # second dispatch stops on the crates that did land instead of
+      # continuing with the ones that did not. Finish such a run by hand,
+      # `cargo publish -p <crate> --locked` per crate still missing, in
+      # dependency order. The same goes for a rate-limited upload: it fails
+      # the run rather than sleeping inside it.
+      - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ inputs.use_oidc && steps.auth.outputs.token || secrets.CARGO_TOKEN }}
-        run: |
-          ua="aozora-md-release (+https://github.com/P4suta/aozora-flavored-markdown)"
-          ver="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "Publishing workspace version: ${ver}"
-          publish_one() {
-            crate="$1"
-            code="$(curl -s -H "User-Agent: ${ua}" -o /dev/null -w '%{http_code}' \
-              "https://crates.io/api/v1/crates/${crate}/${ver}" || echo 000)"
-            if [ "${code}" = "200" ]; then
-              echo "::notice::skip ${crate} ${ver} (already on crates.io)"
-              return 0
-            fi
-            tries=0
-            while :; do
-              tries=$((tries + 1))
-              if out="$(cargo publish -p "${crate}" --locked 2>&1)"; then
-                printf '%s\n' "${out}"
-                echo "::notice::published ${crate} ${ver}"
-                return 0
-              fi
-              printf '%s\n' "${out}"
-              if printf '%s' "${out}" | grep -qiE '429|too many|rate.?limit'; then
-                echo "::warning::rate-limited on ${crate} (attempt ${tries}); waiting 630s before retry"
-                sleep 630
-                continue
-              fi
-              echo "::error::failed to publish ${crate} (non-rate-limit error)"
-              return 1
-            done
-          }
-          for crate in aozora-flavored-markdown aozora-flavored-markdown-cli; do
-            echo "::group::publish ${crate}"
-            publish_one "${crate}" || exit 1
-            echo "::endgroup::"
-          done
+        run: cargo publish --workspace --locked

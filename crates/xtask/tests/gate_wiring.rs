@@ -7991,3 +7991,623 @@ fn every_job_that_runs_a_recipe_naming_a_revision_checks_out_the_history_it_need
          ci.yml, and the publish preflight."
     );
 }
+
+// ---------------------------------------------------------------------------
+// the ladder that reaches crates.io
+// ---------------------------------------------------------------------------
+//
+// `publish = false` is this workspace's one declaration of what leaves it for
+// crates.io, and three rules above already derive their subject from it: the
+// docs.rs build every published crate asks for, the coverage denominator no
+// published source may fall out of, and the binaries a test has to run as a
+// process. The consumer that never derived it is the workflow that does the
+// uploading. It spelled its crates as two literals in a shell `for` while the
+// manifests said four, so the EPUB pair consolidated in by ADR-0018 was
+// unreachable from every release path this repo has — and none of the three
+// readers above was pointed anywhere that could say so. A fourth reading of
+// one declaration, this time by the file that acts on it.
+//
+// The rule is over the SET and not over the spelling, because the spelling is
+// what was in question: `cargo publish --workspace` answers it by
+// construction, an explicit `-p` ladder answers it by listing, and a selection
+// assembled at run time out of a shell variable does not answer it at all.
+// That last state is not "unknown, therefore fine" — an upload nobody can
+// predict by reading the file is the defect itself, not a gap in the reader.
+
+/// The workflow that uploads to crates.io.
+const PUBLISH_WORKFLOW: &str = ".github/workflows/publish-crates.yml";
+
+/// The crates.io name of a member. The directory is not it: nothing makes a
+/// crate's name match the directory it sits in, and the name is what a `-p`
+/// selects and what crates.io serves.
+fn member_name(member: &Member) -> String {
+    package_name(&member.manifest)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}/Cargo.toml declares no `[package] name`; the reader cannot say what this \
+                 member is called on crates.io",
+                member.path
+            )
+        })
+        .to_owned()
+}
+
+/// Every crate this repo uploads to crates.io, by name, off the manifests.
+fn publishable_crates() -> BTreeSet<String> {
+    workspace_members()
+        .iter()
+        .filter(|member| is_published(&member.manifest))
+        .map(member_name)
+        .collect()
+}
+
+/// What one `cargo publish` selects, as that command spells it.
+#[derive(Debug, PartialEq, Eq)]
+enum Selection {
+    /// `--workspace`, less whatever `--exclude` drops. The set is a fact about
+    /// the manifests, so cargo answers it and this reader defers.
+    Workspace(BTreeSet<String>),
+    /// `-p` / `--package`, spelled out here.
+    Named(BTreeSet<String>),
+    /// The command names no set this file can resolve.
+    Opaque(String),
+}
+
+/// A crate name as an argument may spell it. A `$` or a `${…}` left over from
+/// a shell expansion is not one, which is the whole point of asking. Nor is a
+/// glob: `-p 'aozora-*'` is a set cargo resolves at run time, and a set this
+/// file cannot resolve is the state the rules below exist to reject.
+fn crate_name_word(token: &str) -> Option<String> {
+    let shaped = !token.is_empty()
+        && token.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    shaped.then(|| token.to_owned())
+}
+
+/// Where `cargo publish` starts in a token stream, skipping a `+toolchain`.
+fn publish_at(tokens: &[String]) -> Option<usize> {
+    (0..tokens.len()).find(|&at| {
+        if tokens[at] != "cargo" {
+            return false;
+        }
+        let mut next = at + 1;
+        while tokens.get(next).is_some_and(|token| token.starts_with('+')) {
+            next += 1;
+        }
+        tokens.get(next).map(String::as_str) == Some("publish")
+    })
+}
+
+/// The three sinks a package selector can land in, so one loop can fill them.
+#[derive(Default)]
+struct Selectors {
+    named: BTreeSet<String>,
+    excluded: BTreeSet<String>,
+    opaque: Vec<String>,
+}
+
+impl Selectors {
+    /// One `-p` / `--exclude` value, which cargo lets carry a comma list.
+    fn take(&mut self, exclude: bool, raw: &str) {
+        for part in raw.split(',').filter(|part| !part.trim().is_empty()) {
+            match (crate_name_word(part), exclude) {
+                (Some(name), false) => {
+                    self.named.insert(name);
+                }
+                (Some(name), true) => {
+                    self.excluded.insert(name);
+                }
+                (None, _) => self
+                    .opaque
+                    .push(format!("`{part}` is not a crate name this file spells out")),
+            }
+        }
+    }
+}
+
+fn publish_selection(tokens: &[String]) -> Selection {
+    let mut found = Selectors::default();
+    let mut workspace = false;
+    let mut pending: Option<bool> = None;
+    for token in tokens {
+        if let Some(exclude) = pending.take() {
+            found.take(exclude, token);
+            continue;
+        }
+        let (flag, inline) = token
+            .split_once('=')
+            .map_or((token.as_str(), None), |(flag, value)| (flag, Some(value)));
+        match flag {
+            "--workspace" | "--all" => workspace = true,
+            "-p" | "--package" | "--exclude" => match inline {
+                Some(value) => found.take(flag == "--exclude", value),
+                None => pending = Some(flag == "--exclude"),
+            },
+            _ => {}
+        }
+    }
+    if pending.is_some() {
+        found
+            .opaque
+            .push("a package flag with nothing after it".to_owned());
+    }
+    if !found.opaque.is_empty() {
+        return Selection::Opaque(found.opaque.join("; "));
+    }
+    if workspace {
+        return Selection::Workspace(found.excluded);
+    }
+    if found.named.is_empty() {
+        return Selection::Opaque(
+            "neither `--workspace` nor a `-p`, so cargo publishes whichever single crate the \
+             working directory happens to hold"
+                .to_owned(),
+        );
+    }
+    Selection::Named(found.named)
+}
+
+/// One `cargo publish` a workflow runs.
+struct PublishCall {
+    job: String,
+    command: String,
+    dry_run: bool,
+    selection: Selection,
+}
+
+fn publish_calls(workflow: &str) -> Vec<PublishCall> {
+    let mut out = Vec::new();
+    for job in job_keys(workflow) {
+        for line in job_lines(workflow, &job).unwrap_or_default() {
+            let body = strip_comment(line);
+            let tokens = shell_tokens(body);
+            let Some(at) = publish_at(&tokens) else {
+                continue;
+            };
+            let rest = &tokens[at..];
+            out.push(PublishCall {
+                job: job.clone(),
+                command: body.trim().to_owned(),
+                dry_run: rest.iter().any(|token| token == "--dry-run"),
+                selection: publish_selection(rest),
+            });
+        }
+    }
+    out
+}
+
+/// The crates a set of calls reaches, and the calls whose reach is unreadable.
+/// `--workspace` is resolved against the manifests, which is the same answer
+/// cargo derives and the reason that spelling cannot fall behind them.
+fn crates_reached(
+    calls: &[&PublishCall],
+    publishable: &BTreeSet<String>,
+) -> (BTreeSet<String>, Vec<String>) {
+    let mut reached = BTreeSet::new();
+    let mut opaque = Vec::new();
+    for call in calls {
+        match &call.selection {
+            Selection::Workspace(excluded) => {
+                reached.extend(publishable.difference(excluded).cloned());
+            }
+            Selection::Named(named) => reached.extend(named.iter().cloned()),
+            Selection::Opaque(why) => {
+                opaque.push(format!("  {}: {why}\n      {}", call.job, call.command));
+            }
+        }
+    }
+    (reached, opaque)
+}
+
+/// The message an unreadable selection fails with, spelled once because both
+/// rules below reject the same state for the same reason.
+fn unreadable(opaque: &[String]) -> String {
+    format!(
+        "a `cargo publish` whose crates cannot be read off the file:\n{}\n\
+         The manifests are the one statement of what reaches crates.io — `publish = false` is \
+         the opt-out and cargo honours it — and this workflow is the only thing that acts on \
+         that statement. A selection assembled at run time out of a shell variable means \
+         nothing here can compare the two, so the set can fall behind the manifests exactly as \
+         it did when the EPUB pair arrived. Spell it `--workspace` and let cargo derive the \
+         set, or list the crates with `-p`.",
+        opaque.join("\n")
+    )
+}
+
+#[test]
+fn every_crate_this_repo_publishes_is_one_the_publish_workflow_uploads() {
+    let members = workspace_members();
+    let publishable = publishable_crates();
+    // The same blindness check the docs.rs rule makes, for the same reason:
+    // a reader that cannot tell `publish = false` from its absence answers
+    // every question below with the whole workspace or with nothing.
+    assert!(
+        publishable.len() >= 2 && publishable.len() < members.len(),
+        "{} of {} members read as published; the reader is not telling `publish = false` apart \
+         from its absence",
+        publishable.len(),
+        members.len()
+    );
+
+    let workflow = read(PUBLISH_WORKFLOW);
+    let calls = publish_calls(&workflow);
+    let uploads: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
+    assert!(
+        !uploads.is_empty(),
+        "{PUBLISH_WORKFLOW} came out running no `cargo publish` that uploads anything. Either \
+         the release path has moved and this rule points at nothing, or the reader has stopped \
+         finding it — and a reader finding nothing calls every ladder complete."
+    );
+
+    let (uploaded, opaque) = crates_reached(&uploads, &publishable);
+    assert!(opaque.is_empty(), "{}", unreadable(&opaque));
+    assert_eq!(
+        uploaded,
+        publishable,
+        "the crates {PUBLISH_WORKFLOW} uploads are not the crates this workspace publishes.\n  \
+         never uploaded: {:?}\n  uploaded but not a publishable member: {:?}\n\
+         A crate whose manifest says it goes to crates.io and that no release path names is a \
+         crate nobody can `cargo add`, which is the problem ADR-0015 exists to solve.",
+        publishable.difference(&uploaded).collect::<Vec<_>>(),
+        uploaded.difference(&publishable).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_publish_preflight_verifies_every_crate_the_live_step_uploads() {
+    // The preflight's whole claim is that a packaging regression surfaces
+    // "before anything is uploaded", and an upload is the one operation
+    // crates.io will not let anybody take back. That claim is about a SET, and
+    // the job was dry-running one crate in front of a ladder that uploaded
+    // two — so the rung most likely to break was the rung it never packaged.
+    let publishable = publishable_crates();
+    let workflow = read(PUBLISH_WORKFLOW);
+    let calls = publish_calls(&workflow);
+
+    let packaged: Vec<&PublishCall> = calls.iter().filter(|call| call.dry_run).collect();
+    let uploading: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
+    let (verified, dry_opaque) = crates_reached(&packaged, &publishable);
+    let (uploaded, live_opaque) = crates_reached(&uploading, &publishable);
+    let opaque: Vec<String> = dry_opaque.into_iter().chain(live_opaque).collect();
+    assert!(opaque.is_empty(), "{}", unreadable(&opaque));
+    assert!(
+        !verified.is_empty() && !uploaded.is_empty(),
+        "{PUBLISH_WORKFLOW} came out with {} crate(s) dry-run and {} uploaded; a rule about one \
+         set covering another says nothing over an empty one",
+        verified.len(),
+        uploaded.len()
+    );
+
+    let unverified: Vec<&String> = uploaded.difference(&verified).collect();
+    assert!(
+        unverified.is_empty(),
+        "{PUBLISH_WORKFLOW} uploads {unverified:?} without packaging them first. The preflight \
+         is the only check standing between a broken manifest and an upload nobody can \
+         retract, and it is only that for the crates it actually packages."
+    );
+
+    // A preflight that covers the set and does not run first covers nothing.
+    let upload_jobs: BTreeSet<&str> = uploading.iter().map(|call| call.job.as_str()).collect();
+    let packaging: BTreeSet<&str> = packaged.iter().map(|call| call.job.as_str()).collect();
+    for job in upload_jobs {
+        let waits_on = job_needs(&workflow, job);
+        assert!(
+            packaging.iter().any(|first| waits_on.contains(*first)),
+            "{PUBLISH_WORKFLOW}'s `{job}` job uploads to crates.io without `needs:` on a job \
+             that dry-runs first (it waits on {waits_on:?}, the preflight is {packaging:?}). \
+             Two jobs with no edge between them run at once."
+        );
+    }
+}
+
+/// Shell words that cut text out of a file rather than asking a tool for it.
+const TEXT_EXTRACTORS: &[&str] = &["grep", "sed", "awk", "cut"];
+
+/// Does this line read a version out of a Cargo manifest as text?
+fn reads_a_manifest_version(line: &str) -> bool {
+    let body = strip_comment(line);
+    if !body.contains("Cargo.toml") || !body.contains("version") {
+        return false;
+    }
+    shell_tokens(body)
+        .iter()
+        .any(|token| TEXT_EXTRACTORS.contains(&token.as_str()))
+}
+
+#[test]
+fn no_workflow_reads_a_crate_version_out_of_a_manifest_by_hand() {
+    // The version half of the same defect, and the half a `-p` ladder would
+    // carry forward. `grep -m1 '^version' Cargo.toml` answers with the
+    // workspace's version, which is an answer only while every publishable
+    // crate is on the workspace line. Two of the four are not: the EPUB pair
+    // is deliberately on its own 0.1.x line (ADR-0018), so that one grep names
+    // a version those crates do not have — and it was being used to decide
+    // whether they were already on crates.io.
+    //
+    // Scope is the workflows, which are where this repo names a version to a
+    // registry. The `Justfile`'s `verify-version-pins` greps manifests too and
+    // is not in scope: what it reads there is a dependency REQUIREMENT, and
+    // comparing two declarations of one requirement is exactly the right way
+    // to ask whether they agree.
+    let mut hand_read = Vec::new();
+    let mut scanned = 0_usize;
+    for path in workflow_files() {
+        let label = label_of(&path);
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
+        scanned += 1;
+        for (index, line) in text.lines().enumerate() {
+            if reads_a_manifest_version(line) {
+                hand_read.push(format!("  {label}:{}: {}", index + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        scanned >= 5,
+        "only {scanned} workflow(s) read; the scan is not finding the files it is written over"
+    );
+    assert!(
+        hand_read.is_empty(),
+        "a workflow cuts a version out of a Cargo manifest:\n{}\n\
+         A crate's version is cargo's answer, not a manifest's text. This workspace publishes on \
+         more than one version line, so a single read of the root manifest names the wrong \
+         version for some crate and names it silently. Let `cargo publish` carry the version it \
+         is already holding, or ask `cargo metadata --format-version 1 --no-deps` per package.",
+        hand_read.join("\n")
+    );
+}
+
+/// The ADR that decides the publishable set, and the lead-in of the section
+/// that states it.
+const PUBLICATION_ADR: &str = "docs/adr/0015-crates-io-publication-and-semver.md";
+const PUBLISHABLE_SET_SECTION: &str = "**Publishable set & order";
+
+/// The lines of one bold-lead-in section of an ADR, up to the next lead-in or
+/// heading.
+fn adr_section(text: &str, lead_in: &str) -> Option<String> {
+    let mut out: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if out.is_empty() {
+            if line.starts_with(lead_in) {
+                out.push(line);
+            }
+            continue;
+        }
+        if line.starts_with("**") || line.starts_with("## ") {
+            break;
+        }
+        out.push(line);
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+/// Is `name` in `text` as a whole crate name? `aozora-flavored-markdown` is a
+/// prefix of three others here, so a substring match would let one mention
+/// answer for all four.
+fn names_crate(text: &str, name: &str) -> bool {
+    let bounded = |ch: Option<char>| {
+        !ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    };
+    text.match_indices(name).any(|(at, _)| {
+        bounded(text[..at].chars().next_back()) && bounded(text[at + name.len()..].chars().next())
+    })
+}
+
+#[test]
+fn the_publication_adr_accounts_for_every_member_of_this_workspace() {
+    // The decision half. ADR-0015 is where this repo says which crates go to
+    // crates.io and which stay, and it named two of four for as long as the
+    // workflow did — the same drift, written where a reader looks for the
+    // reason rather than the command. Vale exempts `docs/adr/*` from the
+    // retired-name rule on purpose (a decision record is dated), so no prose
+    // gate reaches this file and nothing else here reads it (DEV-237).
+    //
+    // Over every member and not only the published ones: an ADR that lists
+    // what goes and forgets to say why the rest stays is how a crate ends up
+    // `publish = false` with nobody able to find out whether that was decided.
+    let text = read(PUBLICATION_ADR);
+    let section = adr_section(&text, PUBLISHABLE_SET_SECTION).unwrap_or_else(|| {
+        panic!(
+            "{PUBLICATION_ADR} has no `{PUBLISHABLE_SET_SECTION}` section any more. It is the \
+             one place the publishable set is decided rather than executed; if it was renamed, \
+             retarget this rule rather than leaving it reading nothing."
+        )
+    });
+
+    let members = workspace_members();
+    let missing: Vec<String> = members
+        .iter()
+        .map(member_name)
+        .filter(|name| !names_crate(&section, name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{PUBLICATION_ADR}'s publishable-set section does not account for {missing:?}.\n\
+         Every member is either published or `publish = false`, and both are decisions. A member \
+         the section never names is one whose status nobody decided — which is how the EPUB pair \
+         sat in this workspace, publishable by its manifests, reachable by no release path, with \
+         the ADR still describing a two-rung ladder.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// what the ladder reader claims, pinned both ways
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_workspace_publish_is_the_manifests_answer_and_an_exclude_narrows_it() {
+    let publishable: BTreeSet<String> = ["alpha", "beta", "gamma"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let call = |run: &str| PublishCall {
+        job: "publish".to_owned(),
+        command: run.to_owned(),
+        dry_run: run.contains("--dry-run"),
+        selection: publish_selection(
+            &shell_tokens(run)[publish_at(&shell_tokens(run))
+                .unwrap_or_else(|| panic!("`{run}` reads as no `cargo publish` at all"))..],
+        ),
+    };
+
+    let whole = call("cargo publish --workspace --locked");
+    assert_eq!(whole.selection, Selection::Workspace(BTreeSet::new()));
+    assert_eq!(crates_reached(&[&whole], &publishable).0, publishable);
+
+    // `--exclude` is the knob a recovery run reaches for — it is cargo's own
+    // answer to the resumability the deleted 404 probe used to buy — so it has
+    // to subtract rather than read as noise. Otherwise a workflow that skips a
+    // crate on purpose still passes here as publishing all of them.
+    let narrowed = call("cargo publish --workspace --exclude beta --locked");
+    let (reached, opaque) = crates_reached(&[&narrowed], &publishable);
+    assert!(opaque.is_empty(), "{opaque:?}");
+    assert!(
+        !reached.contains("beta") && reached.len() == 2,
+        "`--exclude` did not narrow the set cargo would take: {reached:?}"
+    );
+
+    // And both spellings of an explicit ladder, which is the fallback ADR-0015
+    // records: readable, and compared against the manifests like any other.
+    let listed = call("cargo publish -p alpha --package gamma --locked");
+    assert_eq!(
+        crates_reached(&[&listed], &publishable).0,
+        ["alpha", "gamma"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<String>>()
+    );
+}
+
+#[test]
+fn the_ladder_that_stood_before_this_reader_could_not_be_compared_to_the_manifests() {
+    // The workflow as it was, verbatim in the shapes that matter: a preflight
+    // that dry-ran the leaf alone, and an upload whose crate came from a shell
+    // variable fed by a two-name `for`. Both rules above fail on it, and they
+    // fail for the two different reasons it was wrong.
+    let before = concat!(
+        "jobs:\n",
+        "  package:\n",
+        "    steps:\n",
+        "      - name: Dry-run aozora-flavored-markdown (metadata smoke test)\n",
+        "        run: cargo publish -p aozora-flavored-markdown --dry-run --locked\n",
+        "  publish:\n",
+        "    needs: package\n",
+        "    steps:\n",
+        "      - name: Publish to crates.io (topological, resumable)\n",
+        "        run: |\n",
+        "          for crate in aozora-flavored-markdown aozora-flavored-markdown-cli; do\n",
+        "            if out=\"$(cargo publish -p \"${crate}\" --locked 2>&1)\"; then\n",
+        "              echo \"::notice::published ${crate}\"\n",
+        "            fi\n",
+        "          done\n",
+    );
+    let calls = publish_calls(before);
+    assert_eq!(calls.len(), 2, "the reader no longer finds both calls");
+
+    let publishable = publishable_crates();
+    let packaged: Vec<&PublishCall> = calls.iter().filter(|call| call.dry_run).collect();
+    let (verified, dry_opaque) = crates_reached(&packaged, &publishable);
+    assert!(dry_opaque.is_empty(), "{dry_opaque:?}");
+    assert_eq!(
+        verified.len(),
+        1,
+        "the preflight packaged one crate and the reader saw {verified:?}"
+    );
+
+    let uploading: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
+    let (_, live_opaque) = crates_reached(&uploading, &publishable);
+    assert_eq!(
+        live_opaque.len(),
+        1,
+        "a ladder that names its crates in a shell variable read as a decidable set: \
+         {live_opaque:?}"
+    );
+
+    // And the same ladder with its two names written out, which is the state
+    // the rule has to bite on for reasons of substance rather than spelling:
+    // readable, comparable, and two crates short.
+    let literal = publish_calls(concat!(
+        "jobs:\n",
+        "  publish:\n",
+        "    steps:\n",
+        "      - run: cargo publish -p aozora-flavored-markdown --locked\n",
+        "      - run: cargo publish -p aozora-flavored-markdown-cli --locked\n",
+    ));
+    let listed: Vec<&PublishCall> = literal.iter().collect();
+    let (uploaded, opaque) = crates_reached(&listed, &publishable);
+    assert!(opaque.is_empty(), "{opaque:?}");
+    assert_ne!(
+        uploaded, publishable,
+        "the two-rung ladder read as covering every publishable crate; it covers {uploaded:?} \
+         of {publishable:?}"
+    );
+    assert!(
+        verified.len() < uploaded.len(),
+        "the preflight covered {verified:?} and the ladder uploaded {uploaded:?}; the gap this \
+         rule was written for is not being measured"
+    );
+}
+
+#[test]
+fn a_bare_publish_names_no_set_and_a_version_grep_is_told_from_a_paths_filter() {
+    // A `cargo publish` with no selector is not "the whole workspace by
+    // default" — it is whichever crate the working directory holds, which in a
+    // virtual manifest root is an error and one directory down is a silent
+    // ladder of one.
+    let bare = publish_selection(&shell_tokens("cargo publish --locked"));
+    assert!(
+        matches!(bare, Selection::Opaque(_)),
+        "a publish naming no package read as a set: {bare:?}"
+    );
+
+    // The line as the workflow carried it.
+    assert!(reads_a_manifest_version(
+        "          ver=\"$(grep -m1 '^version' Cargo.toml | sed -E 's/.*\"([^\"]+)\".*/\\1/')\""
+    ));
+    // And the three shapes a workflow legitimately writes a version or a
+    // manifest in: a paths filter, prose, and release-pins.yml's read of the
+    // cargo-dist pin out of `dist-workspace.toml` — a tool's own version, in a
+    // file that is not a Cargo manifest. Reading any of them as a crate
+    // version would make this rule unlivable, and an unlivable rule gets
+    // switched off rather than obeyed.
+    assert!(!reads_a_manifest_version("              - 'Cargo.toml'"));
+    assert!(!reads_a_manifest_version(
+        "# a file no updater reads (Dependabot's cargo ecosystem parses Cargo.toml / version)"
+    ));
+    assert!(!reads_a_manifest_version(
+        "          have=\"v$(grep -oE 'cargo-dist-version = \"[0-9.]+\"' dist-workspace.toml)\""
+    ));
+}
+
+#[test]
+fn an_adr_section_ends_where_the_next_one_starts_and_a_crate_name_is_read_whole() {
+    let adr = concat!(
+        "**Publishable set & order (amended).** `alpha` and `alpha-cli` go up.\n",
+        "`alpha-wasm` stays `publish = false`.\n",
+        "\n",
+        "**Automation (amended).** One command: `beta`.\n",
+    );
+    let section = adr_section(adr, PUBLISHABLE_SET_SECTION).expect("the lead-in went unread");
+    assert!(
+        names_crate(&section, "alpha-wasm"),
+        "a name in the section's second line went unread"
+    );
+    assert!(
+        !names_crate(&section, "beta"),
+        "the next section's content leaked into this one, so a name recorded anywhere in the \
+         ADR would answer for the publishable set"
+    );
+    // The prefix trap: three of this workspace's four published crates start
+    // with the name of the fourth, so a `contains` would let one backtick pair
+    // account for all of them.
+    assert!(
+        !names_crate("only `alpha-cli` is here", "alpha"),
+        "a longer crate name answered for the shorter one it starts with"
+    );
+    assert!(names_crate("only `alpha-cli` is here", "alpha-cli"));
+    assert!(
+        adr_section(adr, "**Nothing writes this").is_none(),
+        "a section that is not there read as present"
+    );
+}
