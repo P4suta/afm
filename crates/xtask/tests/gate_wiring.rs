@@ -1031,6 +1031,28 @@ fn tool_commands(line: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Is this call the upload rather than the packaging? A `cargo publish` is
+/// both commands under one name, and only one of them is a build: with
+/// `--dry-run` it packages and verify-builds every selected crate, which is
+/// what `just package` owns, and without it the same run ends by pushing to
+/// crates.io. No recipe in this repo may do that — a gate is something anyone
+/// can run — so the upload is the one `cargo publish` a workflow has to spell
+/// out for itself, and the rule below has to let it.
+///
+/// The flag is looked for after `cargo publish` and not anywhere on the line,
+/// which is the difference between reading the command and reading the text
+/// around it: `echo --dry-run && cargo publish --locked` is an upload.
+fn uploads_to_a_registry(line: &str, tool: &str, sub: &str) -> bool {
+    if tool != "cargo" || sub != "publish" {
+        return false;
+    }
+    let tokens = shell_tokens(line);
+    let Some(at) = publish_at(&tokens) else {
+        return false;
+    };
+    !tokens[at..].iter().any(|token| token == "--dry-run")
+}
+
 /// Does this line build documentation? `cargo doc` and `cargo rustdoc` do;
 /// `just doc` does not — it runs the recipe that does, which is the whole
 /// point of the distinction.
@@ -1473,9 +1495,9 @@ fn the_doc_gates_warning_policy_is_not_parked_in_a_git_ignored_config() {
 // one definition of a build, wherever it is written
 // ---------------------------------------------------------------------------
 
-/// Workflow steps that spell out a build a gate already defines, each with the
-/// reason it cannot call the recipe instead. Every row is a second definition
-/// of one command — the arrangement removed here for rustdoc.
+/// Workflow steps that write a build out themselves, each with the reason it
+/// cannot call a recipe instead. A row excuses one `<tool> <sub-command>` in
+/// one file, from both halves of the rule below.
 ///
 /// Empty, and that is the finished state rather than a table nobody has filled
 /// in. It held three rows, all in `docs.yml`: the wasm-pack build, the bun
@@ -1488,13 +1510,76 @@ fn the_doc_gates_warning_policy_is_not_parked_in_a_git_ignored_config() {
 /// cannot reach its recipe adds a row and says why.
 const RE_SPELLED_BUILD: &[(&str, &str, &str, &str)] = &[];
 
+/// The two things that can be wrong with a build a workflow writes out, per
+/// workflow. Both are the same defect counted from opposite ends — a command
+/// whose one definition is not the Justfile's — so one walk answers both.
+#[derive(Default)]
+struct WorkflowBuilds {
+    /// A gate recipe defines this command and the workflow spelled it again.
+    re_spelled: Vec<String>,
+    /// No gate recipe defines it at all, so the only thing that ever runs it
+    /// is this workflow, on this workflow's triggers.
+    ungated: Vec<String>,
+    /// Commands looked at, exemptions included. Both lists above are empty in
+    /// the finished state, which is also what a reader that has stopped
+    /// finding commands reports — so what the reader saw is counted too.
+    examined: usize,
+}
+
+/// Every build one workflow drives, sorted into those two.
+fn workflow_builds(
+    label: &str,
+    text: &str,
+    owned: &BTreeMap<(String, String), String>,
+) -> WorkflowBuilds {
+    let mut out = WorkflowBuilds::default();
+    for line in jobs_block(text) {
+        let body = strip_comment(line);
+        for (tool, sub) in tool_commands(body) {
+            out.examined += 1;
+            if uploads_to_a_registry(body, &tool, &sub)
+                || RE_SPELLED_BUILD
+                    .iter()
+                    .any(|&(file, owner, name, _)| file == label && owner == tool && name == sub)
+            {
+                continue;
+            }
+            let written = body.trim();
+            match owned.get(&(tool.clone(), sub.clone())) {
+                Some(gate) => out.re_spelled.push(format!(
+                    "{label}: `{tool} {sub}` is the build `just {gate}` defines\n      {written}"
+                )),
+                None => out.ungated.push(format!(
+                    "{label}: `{tool} {sub}` is a build no `[group('gate')]` recipe \
+                     defines\n      {written}"
+                )),
+            }
+        }
+    }
+    out
+}
+
 #[test]
-fn no_workflow_spells_out_a_build_a_gate_recipe_already_defines() {
+fn every_build_a_workflow_drives_is_defined_once_and_by_a_gate() {
     // `the_workflow_hand_writes_no_gate_of_its_own` asks this of ci.yml, by
     // NAME. Both narrowings mattered: the duplicate lived in docs.yml, and it
     // never named the `doc` gate — it wrote the gate's command out instead.
     // What a check is, is the command it runs, so that is what has to be
     // single-sourced.
+    //
+    // The half below `ungated` is the other end of that sentence, and it was
+    // missing until DEV-224. The rule read a workflow's builds and asked only
+    // "does a gate already define this one" — so a build with TWO definitions
+    // failed and a build with NONE passed, silently, because `owned.get`
+    // returned `None` and the loop moved on. The command that lived in that
+    // blind spot was `publish-crates.yml`'s `cargo publish --workspace
+    // --dry-run --locked`: the one build in this repo that compiles the
+    // crates as a consumer receives them, in a workflow whose only trigger is
+    // `workflow_dispatch`. Nothing in front of a merge ran it, and the rule
+    // whose title is "one definition of a build, wherever it is written" was
+    // looking straight at it — a build defined nowhere is not one definition,
+    // and it is the worse of the two failures, because a second copy at least
+    // runs.
     let justfile = read("Justfile");
     let owned = commands_owned_by_gates(&justfile);
     assert!(
@@ -1502,35 +1587,40 @@ fn no_workflow_spells_out_a_build_a_gate_recipe_already_defines() {
         "the gates came out running {owned:?}; the reader is not finding their bodies"
     );
 
-    let mut re_spelled = Vec::new();
+    let mut found = WorkflowBuilds::default();
     for path in workflow_files() {
         let label = label_of(&path);
         let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {label}: {e}"));
-        for line in jobs_block(&text) {
-            let body = strip_comment(line);
-            for (tool, sub) in tool_commands(body) {
-                let Some(gate) = owned.get(&(tool.clone(), sub.clone())) else {
-                    continue;
-                };
-                if RE_SPELLED_BUILD
-                    .iter()
-                    .any(|&(file, owner, name, _)| file == label && owner == tool && name == sub)
-                {
-                    continue;
-                }
-                re_spelled.push(format!(
-                    "{label}: `{tool} {sub}` is the build `just {gate}` defines\n      {}",
-                    body.trim()
-                ));
-            }
-        }
+        let builds = workflow_builds(&label, &text, &owned);
+        found.re_spelled.extend(builds.re_spelled);
+        found.ungated.extend(builds.ungated);
+        found.examined += builds.examined;
     }
+    // Every build in this repo is a recipe's now, so both lists below are
+    // meant to be empty — which is also what this rule reports if the reader
+    // has gone blind. The one command still written where it runs is the
+    // upload, so the floor is one: past it, silence is a finding.
     assert!(
-        re_spelled.is_empty(),
+        found.examined >= 1,
+        "no workflow came out running any of {BUILD_TOOLS:?}, not even the crates.io upload. \
+         The reader is finding nothing, and a reader finding nothing passes every workflow."
+    );
+    assert!(
+        found.re_spelled.is_empty(),
         "workflow steps that re-spell a gate's build:\n{}\n\
          Run the recipe instead, or add the step to RE_SPELLED_BUILD with the reason it cannot — \
          a second copy drifts from the first in whichever direction nobody is looking.",
-        re_spelled.join("\n")
+        found.re_spelled.join("\n")
+    );
+    assert!(
+        found.ungated.is_empty(),
+        "workflow steps that build something no gate builds:\n{}\n\
+         A build only a workflow defines runs on that workflow's triggers and nowhere else, so \
+         whatever it would have caught is caught at whatever moment that workflow happens to \
+         fire — for a `workflow_dispatch` file, the moment somebody decides to release. Give the \
+         command a `[group('gate')]` recipe and call it from here, or add the step to \
+         RE_SPELLED_BUILD with the reason it cannot be one.",
+        found.ungated.join("\n")
     );
 }
 
@@ -2569,6 +2659,109 @@ fn a_recipes_own_command_is_owned_and_a_recipe_it_depends_on_is_too() {
     assert!(
         !owned.contains_key(&("cargo".to_owned(), "fmt".to_owned())),
         "a recipe no gate depends on had its command counted as gate-owned"
+    );
+}
+
+/// The Justfile as it stands for the pins below: one gate holding the dry run,
+/// which is what makes `cargo publish` a command a gate owns.
+const PACKAGING_GATE: &str = concat!(
+    "[group('gate')]\n",
+    "package:\n",
+    "    {{_dev}} cargo publish --workspace --dry-run --locked --allow-dirty\n",
+);
+
+#[test]
+fn the_upload_is_excused_from_the_build_rule_and_a_dry_run_written_out_is_not() {
+    // The exemption exists because one command name is two commands, and it is
+    // worth exactly as much as its narrowness. `cargo publish` without
+    // `--dry-run` is an upload: no recipe may do it, so the workflow spells it
+    // and the rule has to let it. `cargo publish` WITH `--dry-run` is the
+    // build `just package` owns, and it is the command DEV-224 moved out of
+    // this workflow — so an exemption that took the name and not the flags
+    // would hand the moved command a standing excuse to move back.
+    assert!(
+        uploads_to_a_registry(
+            "        run: cargo publish --workspace --locked",
+            "cargo",
+            "publish"
+        ),
+        "the live upload was not recognised, so the rule will demand a recipe that pushes to \
+         crates.io"
+    );
+    assert!(
+        !uploads_to_a_registry(
+            "        run: cargo publish --workspace --dry-run --locked",
+            "cargo",
+            "publish"
+        ),
+        "the dry run read as an upload; the exemption now covers the very command it was \
+         written to keep out of a workflow"
+    );
+    // The flag is the command's, not the line's.
+    assert!(
+        uploads_to_a_registry(
+            "        run: echo --dry-run && cargo publish --workspace --locked",
+            "cargo",
+            "publish"
+        ),
+        "a `--dry-run` sitting before the command was read as belonging to it"
+    );
+    assert!(
+        !uploads_to_a_registry("        run: cargo build --locked", "cargo", "build"),
+        "a command that is not a publish was excused as one"
+    );
+
+    // And end to end, on the three shapes this file can hold. The pre-DEV-224
+    // preflight is the middle one: a build, written out, that no gate defined.
+    let owned = commands_owned_by_gates(PACKAGING_GATE);
+    let verdicts = |run: &str| {
+        workflow_builds(
+            "publish-crates.yml",
+            &format!("jobs:\n  publish:\n    steps:\n      - run: {run}\n"),
+            &owned,
+        )
+    };
+
+    let upload = verdicts("cargo publish --workspace --locked");
+    assert!(
+        upload.re_spelled.is_empty() && upload.ungated.is_empty(),
+        "the upload was reported: {:?} {:?}",
+        upload.re_spelled,
+        upload.ungated
+    );
+
+    let before = verdicts("cargo publish --workspace --dry-run --locked");
+    assert_eq!(
+        before.re_spelled.len(),
+        1,
+        "the dry run this PR moved into a recipe is not reported when a workflow writes it out \
+         again: {:?}",
+        before.re_spelled
+    );
+
+    // The same file with no packaging gate behind it — the state of this repo
+    // before DEV-224 — and the same command has to be reported for the other
+    // reason: nothing else builds it.
+    let ungated = workflow_builds(
+        "publish-crates.yml",
+        "jobs:\n  publish:\n    steps:\n      - run: cargo publish --workspace --dry-run \
+         --locked\n",
+        &commands_owned_by_gates("[group('lint')]\nfmt:\n    {{_dev}} cargo fmt --all\n"),
+    );
+    assert_eq!(
+        ungated.ungated.len(),
+        1,
+        "a build no gate defines went unreported, which is the hole DEV-224 closed: {:?}",
+        ungated.ungated
+    );
+
+    // A step that names the recipe is neither.
+    let called = verdicts("just package");
+    assert!(
+        called.re_spelled.is_empty() && called.ungated.is_empty(),
+        "calling the recipe read as writing the build out: {:?} {:?}",
+        called.re_spelled,
+        called.ungated
     );
 }
 
@@ -8149,30 +8342,112 @@ fn publish_selection(tokens: &[String]) -> Selection {
     Selection::Named(found.named)
 }
 
-/// One `cargo publish` a workflow runs.
+/// One `cargo publish` this repo runs.
 struct PublishCall {
-    job: String,
+    /// Where it was found: a workflow job, or a `Justfile` recipe.
+    site: String,
+    /// The line as it is written, and behind a `→` the recipe line it reaches.
     command: String,
+    /// The recipe the site named, when it reached the command through one.
+    via: Option<String>,
     dry_run: bool,
+    /// The tokens from `cargo` onward, so a rule can ask about a flag.
+    arguments: Vec<String>,
     selection: Selection,
 }
 
-fn publish_calls(workflow: &str) -> Vec<PublishCall> {
+impl PublishCall {
+    /// Read one call off the tokens that start at its `cargo`.
+    fn read(site: String, command: String, via: Option<String>, tokens: &[String]) -> Self {
+        Self {
+            site,
+            command,
+            via,
+            dry_run: tokens.iter().any(|token| token == "--dry-run"),
+            arguments: tokens.to_vec(),
+            selection: publish_selection(tokens),
+        }
+    }
+
+    fn has(&self, flag: &str) -> bool {
+        self.arguments.iter().any(|token| token == flag)
+    }
+}
+
+/// Every command line a recipe runs, its dependencies included and `{{VAR}}`
+/// resolved: the walk [`commands_owned_by_gates`] makes over every gate, asked
+/// of one recipe.
+fn recipe_commands(justfile: &str, recipe: &str) -> Vec<String> {
+    let variables = plain_variables(justfile);
+    let mut pending = vec![recipe.to_owned()];
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) || !recipe_exists(justfile, &name) {
+            continue;
+        }
+        pending.extend(header_dependencies(recipe_header(justfile, &name)));
+        for line in recipe_body(justfile, &name) {
+            out.push(expand(strip_comment(line), &variables));
+        }
+    }
+    out
+}
+
+/// Every `cargo publish` a workflow drives, the ones it reaches through a
+/// recipe included.
+///
+/// Following the `just` is not a convenience. The dry run is a
+/// `[group('gate')]` recipe (DEV-224), so the workflow calls it instead of
+/// keeping a second copy of the command — and a reader that stopped at the
+/// `just` would find no preflight in this file at all, and report the
+/// arrangement that put packaging in front of every merge as the one that
+/// packages nothing.
+fn publish_calls(workflow: &str, justfile: &str) -> Vec<PublishCall> {
     let mut out = Vec::new();
     for job in job_keys(workflow) {
         for line in job_lines(workflow, &job).unwrap_or_default() {
-            let body = strip_comment(line);
-            let tokens = shell_tokens(body);
+            let written = strip_comment(line).trim().to_owned();
+            let mut bodies = vec![(None, written.clone())];
+            for recipe in recipes_invoked_in(&[line]) {
+                bodies.extend(
+                    recipe_commands(justfile, &recipe)
+                        .into_iter()
+                        .map(|body| (Some(recipe.clone()), body)),
+                );
+            }
+            for (via, body) in bodies {
+                let tokens = shell_tokens(&body);
+                let Some(at) = publish_at(&tokens) else {
+                    continue;
+                };
+                let command = match &via {
+                    Some(_) => format!("{written}  →  {}", body.trim()),
+                    None => written.clone(),
+                };
+                out.push(PublishCall::read(job.clone(), command, via, &tokens[at..]));
+            }
+        }
+    }
+    out
+}
+
+/// Every `cargo publish` a `[group('gate')]` recipe runs — the packaging a
+/// pull request does, read off the same file the gate manifest is read off.
+fn publish_calls_from_gates(justfile: &str) -> Vec<PublishCall> {
+    let mut out = Vec::new();
+    for gate in recipes_in_group(justfile, "gate") {
+        for body in recipe_commands(justfile, &gate) {
+            let tokens = shell_tokens(&body);
             let Some(at) = publish_at(&tokens) else {
                 continue;
             };
-            let rest = &tokens[at..];
-            out.push(PublishCall {
-                job: job.clone(),
-                command: body.trim().to_owned(),
-                dry_run: rest.iter().any(|token| token == "--dry-run"),
-                selection: publish_selection(rest),
-            });
+            out.push(PublishCall::read(
+                format!("just {gate}"),
+                body.trim().to_owned(),
+                Some(gate.clone()),
+                &tokens[at..],
+            ));
         }
     }
     out
@@ -8194,7 +8469,7 @@ fn crates_reached(
             }
             Selection::Named(named) => reached.extend(named.iter().cloned()),
             Selection::Opaque(why) => {
-                opaque.push(format!("  {}: {why}\n      {}", call.job, call.command));
+                opaque.push(format!("  {}: {why}\n      {}", call.site, call.command));
             }
         }
     }
@@ -8232,7 +8507,7 @@ fn every_crate_this_repo_publishes_is_one_the_publish_workflow_uploads() {
     );
 
     let workflow = read(PUBLISH_WORKFLOW);
-    let calls = publish_calls(&workflow);
+    let calls = publish_calls(&workflow, &read("Justfile"));
     let uploads: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
     assert!(
         !uploads.is_empty(),
@@ -8264,7 +8539,7 @@ fn the_publish_preflight_verifies_every_crate_the_live_step_uploads() {
     // two — so the rung most likely to break was the rung it never packaged.
     let publishable = publishable_crates();
     let workflow = read(PUBLISH_WORKFLOW);
-    let calls = publish_calls(&workflow);
+    let calls = publish_calls(&workflow, &read("Justfile"));
 
     let packaged: Vec<&PublishCall> = calls.iter().filter(|call| call.dry_run).collect();
     let uploading: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
@@ -8289,8 +8564,8 @@ fn the_publish_preflight_verifies_every_crate_the_live_step_uploads() {
     );
 
     // A preflight that covers the set and does not run first covers nothing.
-    let upload_jobs: BTreeSet<&str> = uploading.iter().map(|call| call.job.as_str()).collect();
-    let packaging: BTreeSet<&str> = packaged.iter().map(|call| call.job.as_str()).collect();
+    let upload_jobs: BTreeSet<&str> = uploading.iter().map(|call| call.site.as_str()).collect();
+    let packaging: BTreeSet<&str> = packaged.iter().map(|call| call.site.as_str()).collect();
     for job in upload_jobs {
         let waits_on = job_needs(&workflow, job);
         assert!(
@@ -8299,6 +8574,135 @@ fn the_publish_preflight_verifies_every_crate_the_live_step_uploads() {
              that dry-runs first (it waits on {waits_on:?}, the preflight is {packaging:?}). \
              Two jobs with no edge between them run at once."
         );
+    }
+}
+
+#[test]
+fn the_packaging_the_release_path_relies_on_is_a_gate_every_merge_runs() {
+    // The rule above compares two sets inside one file, and every answer it
+    // can give is about that file. `publish-crates.yml` runs on
+    // `workflow_dispatch` alone, so a preflight that covers the whole ladder
+    // there still first speaks on the day somebody decides to release — which
+    // is the day the packaging question is worth the least, because by then
+    // the tree is a tag and the change that broke it merged weeks ago. That
+    // was the state of this repo until DEV-224: `cargo publish --dry-run` was
+    // written out in that workflow and nowhere else, so no pull request has
+    // ever built these crates the way a consumer receives them, and while
+    // `comrak` was a path dependency (ADR-0024) the graph a consumer resolves
+    // had never been built on `main` at all.
+    //
+    // So this rule asks the Justfile, not the workflow: is the packaging a
+    // GATE. The gate manifest carries the rest — `[group('gate')]` is what
+    // `just ci` asserts its lanes against and what ci.yml expands its matrix
+    // from, both already rules of their own — so naming the group here is
+    // naming every path a gate runs on.
+    let justfile = read("Justfile");
+    let publishable = publishable_crates();
+    let packaging = publish_calls_from_gates(&justfile);
+    assert!(
+        !packaging.is_empty(),
+        "no `[group('gate')]` recipe runs a `cargo publish`, so nothing before a merge builds \
+         the four crates as a consumer receives them. Every other compile gate builds the \
+         WORKSPACE — one target directory, path dependencies resolved in place, every file on \
+         disk reachable from every crate — and none of them can see a file the build reads and \
+         the package does not carry, or a rung that only builds because the rung under it came \
+         out of the workspace instead of a registry."
+    );
+
+    for call in &packaging {
+        assert!(
+            call.dry_run,
+            "`{}` runs a `cargo publish` that is not a dry run:\n      {}\nA gate is something \
+             anyone can run, and an upload is the one operation crates.io will not let anybody \
+             take back.",
+            call.site, call.command
+        );
+        // `--no-verify` is the flag that would leave this gate green while
+        // measuring nothing: cargo still writes the tarball and skips the
+        // build of it, which is the entire question being asked here.
+        assert!(
+            !call.has("--no-verify"),
+            "`{}` packages without building what it packaged:\n      {}\n`--no-verify` skips the \
+             verify build, so the gate would answer \"the files can be collected\" to a question \
+             about whether they compile.",
+            call.site,
+            call.command
+        );
+    }
+
+    let calls: Vec<&PublishCall> = packaging.iter().collect();
+    let (packaged, opaque) = crates_reached(&calls, &publishable);
+    assert!(opaque.is_empty(), "{}", unreadable(&opaque));
+    assert_eq!(
+        packaged,
+        publishable,
+        "the crates a gate packages are not the crates this workspace publishes.\n  \
+         never packaged: {:?}\n  packaged but not a publishable member: {:?}\n\
+         A rung nothing packages is a rung whose first build as a package happens during the \
+         release.",
+        publishable.difference(&packaged).collect::<Vec<_>>(),
+        packaged.difference(&publishable).collect::<Vec<_>>()
+    );
+
+    // And the release path reaches that same recipe rather than keeping a
+    // copy: the preflight is the gate, so a change to what packaging means
+    // cannot reach one of the two and not the other.
+    let workflow = read(PUBLISH_WORKFLOW);
+    let gates = recipes_in_group(&justfile, "gate");
+    let mut preflights = 0;
+    for call in publish_calls(&workflow, &justfile)
+        .iter()
+        .filter(|call| call.dry_run)
+    {
+        preflights += 1;
+        let via = call.via.as_deref().unwrap_or("");
+        assert!(
+            gates.contains(via),
+            "{PUBLISH_WORKFLOW}'s `{}` job writes its own dry run:\n      {}\nThe packaging gate \
+             exists; this step is a second copy of it, and the copy that drifts is whichever one \
+             nobody is reading.",
+            call.site,
+            call.command
+        );
+    }
+    assert!(
+        preflights > 0,
+        "{PUBLISH_WORKFLOW} came out with no dry run at all, so the release path packages \
+         nothing before it uploads"
+    );
+}
+
+#[test]
+fn the_upload_still_answers_to_git_though_the_gate_does_not() {
+    // `--allow-dirty` is the one thing the gate asks for that a release must
+    // not: it suppresses "is every file in this package committed", which is
+    // not the packaging gate's question — `just ci` runs BEFORE the commit
+    // exists, and a gate that declines to answer there is a gate that only
+    // ever runs on a runner — but IS the upload's, because the tarball
+    // crates.io serves carries a `.cargo_vcs_info.json` naming the revision it
+    // claims to come from. The flag is the seam between the two, so the seam
+    // is what gets asserted rather than left to the recipe's comment.
+    let justfile = read("Justfile");
+    let workflow = read(PUBLISH_WORKFLOW);
+    let uploads: Vec<PublishCall> = publish_calls(&workflow, &justfile)
+        .into_iter()
+        .filter(|call| !call.dry_run)
+        .collect();
+    assert!(
+        !uploads.is_empty(),
+        "{PUBLISH_WORKFLOW} runs no upload, so this rule is measuring nothing"
+    );
+    for call in &uploads {
+        for flag in ["--allow-dirty", "--no-verify"] {
+            assert!(
+                !call.has(flag),
+                "{PUBLISH_WORKFLOW}'s `{}` job uploads with `{flag}`:\n      {}\nThat flag \
+                 belongs to the packaging gate, where the tree is a working tree. On the upload \
+                 it publishes a tarball that answers to no commit.",
+                call.site,
+                call.command
+            );
+        }
     }
 }
 
@@ -8441,14 +8845,11 @@ fn a_workspace_publish_is_the_manifests_answer_and_an_exclude_narrows_it() {
         .into_iter()
         .map(str::to_owned)
         .collect();
-    let call = |run: &str| PublishCall {
-        job: "publish".to_owned(),
-        command: run.to_owned(),
-        dry_run: run.contains("--dry-run"),
-        selection: publish_selection(
-            &shell_tokens(run)[publish_at(&shell_tokens(run))
-                .unwrap_or_else(|| panic!("`{run}` reads as no `cargo publish` at all"))..],
-        ),
+    let call = |run: &str| {
+        let tokens = shell_tokens(run);
+        let at = publish_at(&tokens)
+            .unwrap_or_else(|| panic!("`{run}` reads as no `cargo publish` at all"));
+        PublishCall::read("publish".to_owned(), run.to_owned(), None, &tokens[at..])
     };
 
     let whole = call("cargo publish --workspace --locked");
@@ -8502,7 +8903,10 @@ fn the_ladder_that_stood_before_this_reader_could_not_be_compared_to_the_manifes
         "            fi\n",
         "          done\n",
     );
-    let calls = publish_calls(before);
+    // No `Justfile` behind these fixtures: the shape under test spelled every
+    // command out where it ran it, which is the state that made the recipe
+    // hop worth reading in the first place.
+    let calls = publish_calls(before, "");
     assert_eq!(calls.len(), 2, "the reader no longer finds both calls");
 
     let publishable = publishable_crates();
@@ -8527,13 +8931,16 @@ fn the_ladder_that_stood_before_this_reader_could_not_be_compared_to_the_manifes
     // And the same ladder with its two names written out, which is the state
     // the rule has to bite on for reasons of substance rather than spelling:
     // readable, comparable, and two crates short.
-    let literal = publish_calls(concat!(
-        "jobs:\n",
-        "  publish:\n",
-        "    steps:\n",
-        "      - run: cargo publish -p aozora-flavored-markdown --locked\n",
-        "      - run: cargo publish -p aozora-flavored-markdown-cli --locked\n",
-    ));
+    let literal = publish_calls(
+        concat!(
+            "jobs:\n",
+            "  publish:\n",
+            "    steps:\n",
+            "      - run: cargo publish -p aozora-flavored-markdown --locked\n",
+            "      - run: cargo publish -p aozora-flavored-markdown-cli --locked\n",
+        ),
+        "",
+    );
     let listed: Vec<&PublishCall> = literal.iter().collect();
     let (uploaded, opaque) = crates_reached(&listed, &publishable);
     assert!(opaque.is_empty(), "{opaque:?}");
@@ -8546,6 +8953,134 @@ fn the_ladder_that_stood_before_this_reader_could_not_be_compared_to_the_manifes
         verified.len() < uploaded.len(),
         "the preflight covered {verified:?} and the ladder uploaded {uploaded:?}; the gap this \
          rule was written for is not being measured"
+    );
+}
+
+/// A Justfile in the shape this repo's packaging now has: the dry run inside a
+/// gate, reached through a dependency, behind an unexpanded `{{VAR}}`.
+const PACKAGING_GATE_WITH_A_DEPENDENCY: &str = concat!(
+    "_DEV := \"docker compose run --rm dev\"\n",
+    "\n",
+    "[group('gate')]\n",
+    "package: build\n",
+    "    {{_DEV}} cargo publish --workspace --dry-run --locked --allow-dirty\n",
+    "\n",
+    "build:\n",
+    "    {{_DEV}} cargo build --locked --workspace\n",
+);
+
+#[test]
+fn a_step_that_names_a_recipe_is_read_as_the_command_that_recipe_runs() {
+    // Two readers hop from a `just <recipe>` into the recipe body, and both
+    // exist because the dry run stopped being written where it runs. A reader
+    // that stopped at the `just` would find no preflight in the publish
+    // workflow at all — and "no preflight" is how the rule above spells the
+    // failure it was written to catch, so the arrangement that put packaging
+    // in front of every merge would be reported as the one that packages
+    // nothing.
+    let justfile = PACKAGING_GATE_WITH_A_DEPENDENCY;
+
+    // A dependency's body counts as the recipe's, and `{{VAR}}` resolves —
+    // otherwise `{{_DEV}} cargo publish` reads as a command starting at a
+    // token no tokenizer can see past.
+    let commands = recipe_commands(justfile, "package");
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.contains("docker compose run --rm dev cargo publish")),
+        "the recipe's own line went unresolved: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|line| line.contains("cargo build")),
+        "a dependency's body was not read as part of the recipe: {commands:?}"
+    );
+    assert!(
+        recipe_commands(justfile, "no-such-recipe").is_empty(),
+        "a recipe that does not exist answered with somebody else's lines"
+    );
+
+    let workflow = concat!(
+        "jobs:\n",
+        "  package:\n",
+        "    steps:\n",
+        "      - run: just package\n",
+        "  publish:\n",
+        "    needs: package\n",
+        "    steps:\n",
+        "      - run: cargo publish --workspace --locked\n",
+    );
+    let calls = publish_calls(workflow, justfile);
+    assert_eq!(
+        calls.len(),
+        2,
+        "the reader found {} `cargo publish`(es) across a step that names a recipe and a step \
+         that writes the command out",
+        calls.len()
+    );
+
+    let through: Vec<&PublishCall> = calls.iter().filter(|call| call.dry_run).collect();
+    assert_eq!(
+        through.len(),
+        1,
+        "the dry run behind the recipe went unread"
+    );
+    assert_eq!(
+        through[0].via.as_deref(),
+        Some("package"),
+        "the call was found but not attributed to the recipe that holds it, so a rule asking \
+         whether a gate owns it has nothing to ask about"
+    );
+    assert!(
+        through[0].command.contains("just package") && through[0].command.contains("cargo publish"),
+        "the failure message names one of the two lines and not both: {}",
+        through[0].command
+    );
+    assert!(
+        through[0].has("--allow-dirty"),
+        "a flag inside the recipe did not reach the call the workflow drives"
+    );
+
+    // The upload is written where it runs, so it carries no recipe — and a
+    // rule that demanded one of every call would demand a recipe that pushes
+    // to crates.io.
+    let live: Vec<&PublishCall> = calls.iter().filter(|call| !call.dry_run).collect();
+    assert_eq!(live.len(), 1);
+    assert!(
+        live[0].via.is_none(),
+        "a command a workflow spells out was attributed to a recipe"
+    );
+}
+
+#[test]
+fn a_publish_reads_as_a_gates_only_where_the_group_attribute_says_it_is_one() {
+    // The gate-side reader answers off the Justfile alone, which is what makes
+    // "does a pull request package this" a question about the manifest of
+    // gates rather than about a workflow. What it must not do is answer yes to
+    // a recipe that merely exists: `package` also carries `[group('release')]`,
+    // and a reader taking any group would call an ungated packaging recipe a
+    // gate — the exact claim the rule above is making.
+    let justfile = PACKAGING_GATE_WITH_A_DEPENDENCY;
+    let gated = publish_calls_from_gates(justfile);
+    assert_eq!(
+        gated.len(),
+        1,
+        "the gate's own publish went unread: {}",
+        gated.len()
+    );
+    assert!(gated[0].dry_run && gated[0].via.as_deref() == Some("package"));
+    assert!(
+        gated[0].has("--allow-dirty"),
+        "the recipe's flags did not reach the call read off it"
+    );
+    assert!(
+        publish_calls_from_gates(&justfile.replace("[group('gate')]\n", "")).is_empty(),
+        "a recipe in no group read as a gate, so an ungated packaging recipe would satisfy the \
+         rule that asks for a gated one"
+    );
+    assert!(
+        publish_calls_from_gates(&justfile.replace("[group('gate')]", "[group('release')]"))
+            .is_empty(),
+        "a recipe in a group that is not `gate` read as one"
     );
 }
 
