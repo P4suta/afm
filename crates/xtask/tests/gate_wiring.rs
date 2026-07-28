@@ -3368,7 +3368,7 @@ fn crate_directories() -> BTreeSet<String> {
 /// from here on lands on this list as an unanswered question rather than
 /// silently skipping the one crate that cannot inherit it.
 const LINTS_A_NON_MEMBER_CRATE_MAY_SKIP: &[(&str, &str)] = &[
-    // Surface policy for a published library. This crate is four `#![no_main]`
+    // Surface policy for a published library. This crate is `#![no_main]`
     // binaries whose whole body is one `fuzz_target!` invocation: it has no
     // API, no types a consumer names, and no lifetimes written by hand.
     ("missing_debug_implementations", SKIP_NO_SURFACE),
@@ -5888,7 +5888,7 @@ const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[
     (
         "fuzz-lock",
         "it acts on the fuzz workspace's lockfile and not on its targets: one \
-         `cargo update` re-resolves the single graph all four `[[bin]]`s are built \
+         `cargo update` re-resolves the single graph every `[[bin]]` is built \
          from, so there is no per-target step for a list to drive. Recorded here \
          rather than filtered out of `whole_set_fuzz_recipes`, and that carve-out is \
          a real cost — the classifier's premise, that a recipe taking no argument \
@@ -5906,14 +5906,20 @@ const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[
 /// of the derivation is that there are none of those.
 const FUZZ_RECIPES_THAT_NAME_A_TARGET: &[(&str, &str)] = &[(
     "fuzz-seed",
-    "`sjis_decode` is the one target whose input is bytes rather than text: it hands \
-     them to `decode_sjis`, which rejects a UTF-8 seed at its first multi-byte \
-     character, so its seeds are transcoded to CP932 and every other target's are \
-     not. The encoding a target wants is a per-target fact with nowhere else in this \
-     repo to live — and that is the defect, not the workaround: a second \
-     byte-oriented `[[bin]]` would be seeded with UTF-8 it cannot read, `just \
-     fuzz-seed` would report its seed count as cheerfully as for the rest, and \
-     nothing here would say so",
+    "the input FORMAT a target reads is a per-target fact with nowhere else in this \
+     repo to live, and two targets read something other than \"the whole input is \
+     UTF-8 source\". `sjis_decode` hands its bytes to `decode_sjis`, which rejects a \
+     UTF-8 seed at its first multi-byte character, so its seeds are transcoded to \
+     CP932; `options_space` reads a two-byte option mask before its source, so its \
+     seeds carry that prefix. That is the defect, not the workaround, and it is one \
+     this entry predicted in as many words before `options_space` existed: a second \
+     `[[bin]]` with an input format of its own was seeded with documents it could \
+     not read, `just fuzz-seed` reported its seed count as cheerfully as for the \
+     rest, and nothing here said so. Nothing HERE still does — this text grew a \
+     clause. What now does is `fuzz_regressions.rs`, which reads every target's \
+     corpus back through the shape that target reads and fails when the bytes are \
+     not the documents they were made from; the name in the recipe stays a copy, \
+     and a copy that lies is now caught one directory over rather than never",
 )];
 
 /// The fuzz targets the regression suite replays: the first argument of each
@@ -6301,6 +6307,15 @@ fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
     // already fuzzed on upstream, and a seed set of nothing else would leave
     // the aozora layer — the reason this crate exists — unreached by every
     // sweep while the counts above all looked healthy.
+    //
+    // `some target's corpus, verbatim` is as far as this file can put it, and
+    // it is not far enough: only one target is seeded with the document as it
+    // stands, so the `any` below is held up by `parse_render` alone and says
+    // nothing about the other four. It cannot say more from here — a seed is
+    // in the shape ITS target reads, and the decoders for those shapes live in
+    // the library's own test suite, one of them in a crate this one does not
+    // depend on. `fuzz_regressions.rs` asks the same question per target with
+    // those decoders in hand; what stays here is the half that needs git.
     let documents = seed_source_documents();
     assert!(
         documents.len() >= 5,
@@ -7160,6 +7175,48 @@ fn every_licence_exemption_is_pinned_to_the_licence_it_was_written_for() {
          the nightly failure that follows will point at the wrong file.",
         mismatched.join("\n")
     );
+
+    // And the other half of the prose: every entry ends with a sentence about
+    // when to drop it, and issue #197 is the story of one of those sentences
+    // being false from the day it was written — `libfuzzer-sys`' entry said to
+    // drop it once the fuzz crate moved to libafl_libfuzzer, which turns out
+    // to depend on libfuzzer-sys itself, so the condition could never come
+    // due. Four months, nothing able to say so, and the sentence read as a
+    // plan every time somebody opened the file.
+    //
+    // What IS decidable here is the precondition every one of those sentences
+    // shares: the exemption waives a package this repo actually resolves. Two
+    // lockfiles, because the fuzz crate is its own workspace and its
+    // dependencies appear in neither the other file nor `cargo deny` — which
+    // is exactly why libfuzzer-sys needs an entry here in the first place. An
+    // exemption for a package no lockfile mentions waives nothing, and waits
+    // to waive whatever takes that name next.
+    let lockfiles = [
+        ("Cargo.lock", read("Cargo.lock")),
+        (FUZZ_LOCK, read(FUZZ_LOCK)),
+    ];
+    for (name, text) in &lockfiles {
+        assert!(
+            text.contains("[[package]]"),
+            "{name} parsed as {} byte(s) with no `[[package]]` table; the reader is not finding \
+             the lockfile and the check below would excuse every exemption",
+            text.len()
+        );
+    }
+    for package in &exempted {
+        let declaration = format!("name = \"{package}\"");
+        assert!(
+            lockfiles
+                .iter()
+                .any(|(_, text)| text.contains(&declaration)),
+            "{LICENCE_REVIEW} exempts `{package}` from the licence check and neither {} nor \
+             {FUZZ_LOCK} resolves it any more. The entry now waives a name rather than a \
+             dependency: delete it, and its row in {LICENCE_WATCH} with it. This is the \
+             `Drop this entry once …` sentence beside it, evaluated — the half of those \
+             sentences that does not need somebody to remember.",
+            lockfiles[0].0
+        );
+    }
 }
 
 /// Scheduled workflows whose only output is a red square, each with why it is

@@ -26,7 +26,7 @@ members = ["."]
 # The lint policy the parent cannot hand down. The `[workspace]` table above is
 # what keeps libfuzzer-sys out of a stable `--workspace` build, and it is also
 # what puts this crate beyond the reach of `[lints] workspace = true`. Nothing
-# carried over — so until this table existed, the four fuzz targets compiled
+# carried over — so until this table existed, the fuzz targets compiled
 # under no lint policy at all, `unsafe_code` included, while every other crate
 # here forbids it (DEV-312).
 #
@@ -34,8 +34,8 @@ members = ["."]
 # than a copy left half-finished. The rest of `[workspace.lints.rust]` is
 # API-surface and style policy for a published library — `unreachable_pub`,
 # `missing_debug_implementations`, the lifetime-hygiene block — and this crate
-# publishes nothing and exposes nothing: four `#![no_main]` bins whose whole
-# body is one `fuzz_target!`. Nothing holds the two tables in sync (there is no
+# publishes nothing and exposes nothing: `#![no_main]` bins whose whole body
+# is one `fuzz_target!`. Nothing holds the two tables in sync (there is no
 # mechanism that could, which is the same `[workspace]` boundary again), so a
 # line here has to be worth re-typing by hand. These four are: the safety
 # property, the two that catch a target rotting away from the API it fuzzes,
@@ -60,6 +60,13 @@ dead_code        = "deny"
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "options_space"
+path = "fuzz_targets/options_space.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "parse_render"

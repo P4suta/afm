@@ -21,8 +21,9 @@
 //! exactly what it means for a consumer from crates.io.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aozora_flavored_markdown::{
     Diagnostic, Options, RenderedBlocks, canonicalize, diagnose, render, render_blocks,
@@ -215,6 +216,173 @@ fn no_retired_options_method_has_come_back() {
              does not re-export or turns on `render.unsafe`"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// the same surface, one workspace boundary away
+// ---------------------------------------------------------------------------
+//
+// `crates/aozora-flavored-markdown/fuzz` declares its own `[workspace]`
+// because libfuzzer-sys is nightly-only, so nothing in this crate's
+// `--all-targets` build compiles it and no test here can import it. Its
+// `options_space` target nevertheless carries a SECOND hand-written copy of
+// the table above — one bit per knob, one slot per constructor — and that copy
+// decides which configurations arbitrary bytes are ever rendered under.
+//
+// Over there the copy is held to `src/lib.rs` by two `const` assertions, and
+// what those compare is a COUNT. A knob added upstream is caught; a row whose
+// `name:` says one method while its own closure calls another is not, and
+// neither is the bit order that `AOZORA_BIT` reads back to decide which inputs
+// the target skips. Text is the only thing that crosses the workspace
+// boundary, so the rows are read as text and compared by NAME here, in the
+// suite `just test` runs, rather than by height in the nightly one.
+
+/// Where the fuzz harnesses live, relative to this crate's manifest.
+const FUZZ_TARGET_DIR: &str = "fuzz/fuzz_targets";
+
+/// One row of an `Options` table in a fuzz harness: the file it sits in, the
+/// name the row gives itself, and the method the row's own function calls.
+struct FuzzRow {
+    file: String,
+    declared: String,
+    called: String,
+}
+
+/// Every `Options` row every fuzz harness declares.
+///
+/// A row is `name: "…"` followed by the function that acts on it, which is the
+/// shape rustfmt keeps both tables in. Reading both halves is the point: the
+/// name is what a crash label and the bit-order assertion read, the call is
+/// what actually runs, and nothing over there compares the two.
+fn fuzz_option_rows() -> Vec<FuzzRow> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(FUZZ_TARGET_DIR);
+    let mut harnesses: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    harnesses.sort();
+    assert!(
+        !harnesses.is_empty(),
+        "{} holds no `.rs` harness; the reader is looking in the wrong place",
+        dir.display()
+    );
+
+    let mut rows = Vec::new();
+    for path in harnesses {
+        let file = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+            .to_owned();
+        let src =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let mut declared: Option<String> = None;
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("name: \"") {
+                declared = rest.split('"').next().map(str::to_owned);
+                continue;
+            }
+            let called = trimmed
+                .strip_prefix("set: |o, on| o.")
+                .and_then(|rest| rest.split('(').next())
+                .or_else(|| {
+                    trimmed
+                        .strip_prefix("build: Options::")
+                        .and_then(|rest| rest.split(',').next())
+                });
+            if let Some(called) = called {
+                rows.push(FuzzRow {
+                    file: file.clone(),
+                    // `None` is a function with no name above it, which the
+                    // count assertion below turns into a failure rather than
+                    // into a row that quietly does not exist.
+                    declared: declared.take().unwrap_or_default(),
+                    called: called.trim().to_owned(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+#[test]
+fn the_fuzzed_surface_is_the_whole_public_surface() {
+    let declared_api = public_options_api();
+    let rows = fuzz_option_rows();
+    assert!(
+        !rows.is_empty(),
+        "no fuzz harness under {FUZZ_TARGET_DIR} declares an `Options` table, so every fuzz \
+         target renders with `Options::default()` and nothing else — which is the state this \
+         file's own header describes and the state `options_space` exists to end. Arbitrary \
+         bytes would again reach exactly one of the {} configurations a consumer can build.",
+        declared_api.len()
+    );
+
+    let mismatched: Vec<String> = rows
+        .iter()
+        .filter(|row| row.declared != row.called)
+        .map(|row| {
+            format!(
+                "  {}: row `{}` calls `{}`",
+                row.file, row.declared, row.called
+            )
+        })
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "a fuzz harness's `Options` row names one method and calls another:\n{}\n\
+         The name is what the crash label and the bit-order assertion read; the call is what \
+         runs. The `const` assertions over there compare table HEIGHT, so the two halves of a \
+         row can say different things and still build.",
+        mismatched.join("\n")
+    );
+
+    let fuzzed: BTreeSet<String> = rows.iter().map(|row| row.declared.clone()).collect();
+    assert_eq!(
+        fuzzed, declared_api,
+        "the public `Options` surface and the surface the fuzz harnesses sweep have come apart. \
+         A knob missing there is an axis of the configuration space that arbitrary bytes never \
+         reach, while the harness goes on reporting a full sweep of it."
+    );
+    assert_eq!(
+        rows.len(),
+        declared_api.len(),
+        "{} `Options` row(s) across the fuzz harnesses for {} public method(s). Two rows for one \
+         method leave another with none, and a function with no `name:` above it is a row this \
+         reader cannot attribute.",
+        rows.len(),
+        declared_api.len()
+    );
+}
+
+#[test]
+fn nothing_but_impl_options_declares_a_method_at_impl_indentation() {
+    // The premise the fuzz harness's own `const` scanner rests on, checked
+    // here because it is a fact about THIS file that only breaks when someone
+    // edits it. That scanner cannot parse: it counts `\n    pub fn ` across
+    // the whole of `src/lib.rs` and asserts the total is its table's height,
+    // so a `pub fn` added to any other `impl` block at the same indentation
+    // fails the nightly `just fuzz-build` with a message about `impl Options`
+    // — a red gate, pointing at the wrong file, for a change that broke
+    // nothing. Stated here so the failure arrives in seconds and says what it
+    // is.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let src = fs::read_to_string(&path).expect("src/lib.rs must be readable");
+    let at_impl_indentation = src.matches("\n    pub fn ").count();
+    assert_eq!(
+        at_impl_indentation,
+        public_options_api().len(),
+        "{} declares {at_impl_indentation} `pub fn` at `impl` indentation and only {} of them \
+         are `impl Options` methods. `fuzz/fuzz_targets/options_space.rs` counts the first \
+         number and checks it against its own table of the second: give the new method more \
+         than four spaces of indentation, move it out of this file, or teach that scanner the \
+         block it belongs to.",
+        path.display(),
+        public_options_api().len()
+    );
 }
 
 // ---------------------------------------------------------------------------

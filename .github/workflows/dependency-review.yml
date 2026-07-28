@@ -80,10 +80,16 @@ jobs:
           #   crates/aozora-flavored-markdown/fuzz, which is `publish = false`
           #   and outside the cargo workspace. That exclusion is also why
           #   cargo-deny never sees this edge and only this action does.
-          #   Drop this entry if the fuzz crate stops depending on
-          #   libfuzzer-sys — libafl_libfuzzer is a drop-in replacement under
-          #   MIT OR Apache-2.0, and libFuzzer itself has been in
-          #   maintenance-only mode upstream since late 2022.
+          #
+          #   This entry used to end "drop it once the fuzz crate moves to
+          #   libafl_libfuzzer, a drop-in replacement under MIT OR Apache-2.0"
+          #   — a removal condition that could never come due. libafl_libfuzzer
+          #   is a shim over this package, not a substitute for it: its
+          #   manifest carries `libfuzzer-sys = "0.4.7"` as a normal
+          #   dependency and its `src/lib.rs` is `pub use libfuzzer_sys::*;`,
+          #   so the swap leaves the NCSA declaration exactly where it is.
+          #   ADR-0025 measured that and three other costs and decided to stay;
+          #   read it before proposing the swap again (issue #197).
           #
           # Each of the three cargo entries waives the check for the PACKAGE,
           # not for the licence it happens to declare today, so a relicence

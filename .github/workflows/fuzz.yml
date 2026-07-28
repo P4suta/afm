@@ -53,7 +53,7 @@ jobs:
   sweep:
     name: sweep (${{ github.event_name == 'schedule' && 'deep' || 'quick' }})
     runs-on: ubuntu-latest
-    # Four targets x 5 min, plus a cold sanitizer build of the graph. Generous
+    # Every target for 5 min, plus a cold sanitizer build of the graph. Generous
     # rather than tight: the failure this bounds is libFuzzer hanging, and each
     # recipe already wraps its own run in `timeout`.
     timeout-minutes: 60
