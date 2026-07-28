@@ -418,20 +418,61 @@ fuzz-lock:
 fuzz *ARGS:
     {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{ARGS}}'
 
-# 60-second smoke fuzz. `timeout` is a hard backstop if libFuzzer ever hangs.
+# What the backstop below allows on top of libFuzzer's own `-max_total_time`,
+# in seconds. It pays for a shutdown rather than for a search: libFuzzer leaves
+# its loop when the budget is up, then writes back the corpus it grew and
+# prints its final stats, and in front of that sits cargo satisfying itself
+# that the target it is about to exec is still up to date. Thirty seconds
+# covers both several times over and is still nowhere near a hang.
+_FUZZ_GRACE := "30"
+
+# Build the named target, then fuzz it for SECONDS with the `timeout` around
+# the run and nothing else.
+#
+# Two commands rather than one, because `cargo fuzz run` is two things: it
+# compiles the target, then executes it. A `timeout` wrapped around that pair
+# spends the fuzzing budget on the build — and on a cold runner an
+# AddressSanitizer build of this graph is minutes, not seconds, so what the
+# budget bought was a SIGKILL somewhere inside the compile. fuzz.yml's
+# `sweep (quick)` (90 s around a 60 s run) exited 124 on all five runs it ever
+# had and libFuzzer never started once; the pull requests it was red on merged
+# regardless, because a fuzz finding is a bug report and the job is advisory
+# on purpose (#224).
+#
+# Locally it looked fine, because a warm target directory makes the build a
+# no-op — which is the same reason no gate here caught it. `just ci` runs
+# `fuzz-build`, and by the time anything runs a target the compile has already
+# been paid for somewhere else.
+#
+# The backstop stays. What it bounds is real and is not the build: libFuzzer
+# hanging on an input, with `-max_total_time` promising nothing about a run
+# that never reaches the end of its loop. It now bounds that alone.
+#
+# One recipe rather than three copies of it. `fuzz-quick`, `fuzz-deep` and
+# `fuzz-marathon` differ in one number, and each carried its own hand-computed
+# second number beside it; the defect above was in all three and was noticed in
+# the one CI happened to run. The arithmetic is here now, so a caller cannot
+# get the two budgets the wrong way round and a fourth recipe cannot reopen it.
+_fuzz-timed TARGET SECONDS:
+    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && \
+        cargo +nightly fuzz build --target {{_FUZZ_TRIPLE}} {{TARGET}} && \
+        timeout --kill-after=10s $(( {{SECONDS}} + {{_FUZZ_GRACE}} ))s \
+            cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time={{SECONDS}}'
+
+# 60-second smoke fuzz.
 [group('fuzz')]
 fuzz-quick TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 90s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=60'
+    @just _fuzz-timed {{TARGET}} 60
 
 # 5-minute deep fuzz — the gate to clear before tagging a release.
 [group('fuzz')]
 fuzz-deep TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 360s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=300'
+    @just _fuzz-timed {{TARGET}} 300
 
 # 15-minute marathon fuzz — strongest single-target soak; exits cleanly at 15 min.
 [group('fuzz')]
 fuzz-marathon TARGET:
-    {{_fuzz}} bash -c 'cd crates/aozora-flavored-markdown && timeout --kill-after=10s 1000s cargo +nightly fuzz run --target {{_FUZZ_TRIPLE}} {{TARGET}} -- -max_total_time=900'
+    @just _fuzz-timed {{TARGET}} 900
 
 # Reproduce every artifact under `fuzz/artifacts/<target>/` and print
 # (bytes, panic-message) for each. Exit status is the count of artifacts

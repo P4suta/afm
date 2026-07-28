@@ -62,6 +62,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde_json::Value;
@@ -5321,6 +5322,505 @@ fn no_fuzz_build_compiles_for_a_statically_linked_libc() {
         "`{CARGO_FUZZ_DEFAULT_TRIPLE}` no longer reports `crt-static`, so the account this test \
          and the `_FUZZ_TRIPLE` comment both give of why the default could not work is out of date"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the fuzzing budget, and the backstop wrapped around it
+// ---------------------------------------------------------------------------
+//
+// The section above walked `fuzz-quick`'s single line on every run, and asked
+// it one question: does it name a triple. It did. The `timeout` at the front of
+// the same line was the reason that recipe had never fuzzed anything.
+//
+// `cargo fuzz run` is two things — it compiles the target, then executes it —
+// so a `timeout` around the whole of it is a wall clock over the build as well
+// as the search, and the number beside it had been chosen as the search budget
+// plus a little: `timeout 90s` around `-max_total_time=60`. An AddressSanitizer
+// build of this graph does not fit in the "little" on a cold runner, so
+// fuzz.yml's `sweep (quick)` exited 124 on all five runs it ever had and
+// libFuzzer never started once. `fuzz-deep` (360/300) and `fuzz-marathon`
+// (1000/900) carried the identical shape; CI happened to run only the first
+// (#224).
+//
+// Nothing in this repo could have said so. `just ci` runs `fuzz-build`, which
+// is the compile with no run at all, and every other reader of these recipes
+// asked about the text after `--target`. Locally the build is warm, so the
+// recipe fits its budget and looks right — the defect exists only on a machine
+// that has to compile, which is every machine except the author's.
+//
+// The three below are therefore about the `timeout` and not about cargo-fuzz's
+// flags: where it sits relative to the compile, where its number comes from,
+// and whether it still does the one job it is there for.
+
+/// The `Justfile`'s commands with `\` continuations folded, so one entry is one
+/// thing a shell runs rather than one line a reader sees.
+///
+/// [`expanded_recipe_lines`] is per physical line, which is the right grain for
+/// "what did this line hand its tool" and the wrong one for "what else is
+/// inside the command this `timeout` bounds": the timed fuzz recipe spreads a
+/// single `bash -c` over four lines, with the backstop on one of them and the
+/// compile it must not cover on another.
+fn logical_commands(justfile: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut pending: Option<(String, String)> = None;
+    for (recipe, line) in expanded_recipe_lines(justfile) {
+        // A continuation belongs to the recipe the command STARTED in.
+        let (owner, joined) = match pending.take() {
+            Some((owner, head)) => (owner, format!("{head} {}", line.trim())),
+            None => (recipe, line),
+        };
+        match joined.trim_end().strip_suffix('\\') {
+            Some(head) => pending = Some((owner, head.trim_end().to_owned())),
+            None => out.push((owner, joined)),
+        }
+    }
+    out.extend(pending);
+    out
+}
+
+/// Flags a `cargo fuzz` call takes a detached value after, so that the word
+/// behind one is not the target name. Short of parsing cargo-fuzz's clap
+/// definition this is a list, and it is the conservative direction: a flag
+/// missing from it makes its value read as a target name, which fails the
+/// assertion below rather than passing it quietly.
+const FUZZ_FLAGS_TAKING_A_VALUE: &[&str] = &[
+    "--target",
+    "--target-dir",
+    "--sanitizer",
+    "-s",
+    "--jobs",
+    "-j",
+    "--features",
+];
+
+/// The fuzz target a `cargo fuzz <sub>` call names, given tokens starting at
+/// the sub-command.
+///
+/// `None` is a call that names none. For `build` that is every registered
+/// target — the widest compile there is, so it answers "was this one built
+/// first" with yes rather than escaping the question.
+fn fuzz_target_argument(tokens: &[String]) -> Option<String> {
+    // Only cargo-fuzz's own side of a bare `--`; past it the words belong to
+    // libFuzzer, which has no target argument and plenty of bare ones.
+    let own = tokens.split(|token| token == "--").next().unwrap_or(&[]);
+    let mut at = 1;
+    while let Some(token) = own.get(at) {
+        if FUZZ_FLAGS_TAKING_A_VALUE.contains(&token.as_str()) {
+            at += 2;
+        } else if token.starts_with('-') {
+            at += 1;
+        } else {
+            return Some(token.clone());
+        }
+    }
+    None
+}
+
+/// Every `cargo fuzz` call in `tokens` that compiles, as (sub-command, target).
+/// [`fuzz_builds`] asks this of one line and keeps the first; a command holds
+/// several, and which side of the backstop each falls on is the whole question.
+fn fuzz_compiles(tokens: &[String]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = tokens;
+    while let Some(at) = fuzz_build_at(rest) {
+        out.push((rest[at].clone(), fuzz_target_argument(&rest[at..])));
+        rest = &rest[at + 1..];
+    }
+    out
+}
+
+/// The `timeout` invocation in a command, as written: from the word `timeout`
+/// up to the command whose wall clock it bounds.
+///
+/// Text rather than tokens, because the duration is an arithmetic expansion and
+/// [`shell_tokens`] takes `$((` and `))` out as punctuation — which is the
+/// right thing for reading a command and destroys the only part of this one
+/// that has to be evaluated rather than read.
+fn timeout_invocation(command: &str) -> Option<&str> {
+    // A word, the way the token readers see one: `--timeout 30` holds this
+    // text and is a different flag on a different program.
+    let (at, _) = command
+        .match_indices("timeout ")
+        .find(|&(at, _)| at == 0 || command[..at].ends_with(char::is_whitespace))?;
+    let bounded = command[at..].find("cargo")?;
+    Some(&command[at..at + bounded])
+}
+
+/// Every command in the `Justfile` that wraps a `cargo fuzz` compile in a
+/// `timeout`, as (recipe, whole command).
+///
+/// All of them and not the first. One recipe carries this shape today because
+/// this PR folded three copies into it; before that there were three, all three
+/// were wrong, and the one CI ran is the one anybody looked at. A reader that
+/// stopped at the first would be that arrangement again.
+fn timed_fuzz_commands(justfile: &str) -> Vec<(String, String)> {
+    logical_commands(justfile)
+        .into_iter()
+        .filter(|(_, command)| {
+            let tokens = shell_tokens(command);
+            tokens
+                .iter()
+                .position(|token| token == "timeout")
+                .is_some_and(|at| !fuzz_compiles(&tokens[at..]).is_empty())
+        })
+        .collect()
+}
+
+/// What `timeout` is actually handed when the recipe's `SECONDS` parameter is
+/// `seconds`: its flags and its duration, with the arithmetic evaluated.
+///
+/// Asked of a shell rather than parsed, because a shell is what evaluates it.
+/// `timeout` becomes `echo`, so the same text that runs in the recipe is the
+/// text that reports here — a second copy computed in Rust would agree with the
+/// recipe exactly until the day it mattered.
+fn timeout_arguments(invocation: &str, parameter: &str, seconds: i64) -> Vec<String> {
+    let script = invocation_for(invocation, parameter, seconds).replacen("timeout", "echo", 1);
+    let out = Command::new("bash")
+        .args(["-c", &script])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running bash: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where bash is installed."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "the recipe's own `timeout` arguments are not something a shell can evaluate:\n  \
+         {script}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The name of a recipe parameter as a body spells it: `RANGE="a..b"` is
+/// `RANGE` where it is used, and `*ARGS` is `ARGS`.
+fn parameter_name(parameter: &str) -> &str {
+    let bare = parameter.trim_start_matches(['*', '+', '$']);
+    bare.split('=').next().unwrap_or(bare)
+}
+
+/// The seconds `timeout` will wait, read off the duration it was handed — its
+/// last argument, and the only one with no leading dash.
+fn timeout_budget(arguments: &[String]) -> i64 {
+    let duration = arguments
+        .last()
+        .unwrap_or_else(|| panic!("the recipe's `timeout` was handed no arguments at all"));
+    duration.trim_end_matches('s').parse().unwrap_or_else(|e| {
+        panic!(
+            "`timeout {duration}` is not a whole number of seconds ({e}). It may well be a \
+             duration `timeout` accepts — `2m`, `1h` — but then the arithmetic this reader \
+             compares against libFuzzer's own budget is in different units from it."
+        )
+    })
+}
+
+#[test]
+fn every_timed_fuzz_run_has_its_compile_paid_for_outside_the_backstop() {
+    // The defect itself, stated over every command in the file rather than over
+    // the three recipes that had it. Written that way for the reason the triple
+    // assertions above are: a fourth timed recipe is this hole reopened, and a
+    // list of today's three would not see it.
+    let justfile = read("Justfile");
+    let mut bounded = 0usize;
+    for (recipe, command) in logical_commands(&justfile) {
+        let tokens = shell_tokens(&command);
+        let Some(backstop) = tokens.iter().position(|token| token == "timeout") else {
+            continue;
+        };
+        let ahead = fuzz_compiles(&tokens[..backstop]);
+        for (sub, target) in fuzz_compiles(&tokens[backstop..]) {
+            bounded += 1;
+            let paid = ahead.iter().any(|(earlier, built)| {
+                earlier == "build" && (built.is_none() || built.as_deref() == target.as_deref())
+            });
+            assert!(
+                paid,
+                "`just {recipe}` runs `cargo fuzz {sub}` under a `timeout` and compiles nothing \
+                 before it. `cargo fuzz {sub}` builds the target and then executes it, so that \
+                 wall clock buys an AddressSanitizer build of the whole graph first and a search \
+                 with whatever is left over — on a cold runner, nothing, and an exit 124 that \
+                 reads like a hang. Run `cargo fuzz build` for the same target ahead of the \
+                 `timeout` and let the backstop bound the run alone (#224):\n      {}",
+                command.trim()
+            );
+        }
+    }
+    assert!(
+        bounded >= 1,
+        "no `cargo fuzz` call in the Justfile runs under a `timeout` any more, so this reader is \
+         holding nothing. The backstop is not decoration: `-max_total_time` promises an exit only \
+         to a libFuzzer that reaches the end of its loop, and a run wedged on one input reaches \
+         nothing — which is the failure the sweep's own job-level `timeout-minutes` would then be \
+         the first thing to notice, an hour later and with no artifact."
+    );
+}
+
+/// A `timeout` in the `Justfile` that bounds a fuzz run: the recipe it is in,
+/// the invocation as written, and the `-max_total_time` the run inside it hands
+/// libFuzzer.
+struct TimedFuzzRun {
+    recipe: String,
+    invocation: String,
+    budget: String,
+}
+
+/// Every one of them, in file order.
+fn timed_fuzz_runs(justfile: &str) -> Vec<TimedFuzzRun> {
+    let mut out = Vec::new();
+    for (recipe, command) in timed_fuzz_commands(justfile) {
+        let invocation = timeout_invocation(&command)
+            .unwrap_or_else(|| {
+                panic!(
+                    "`just {recipe}` has a `timeout` and nothing to read between it and the \
+                     command it bounds"
+                )
+            })
+            .to_owned();
+        let Some((_, after)) = command.split_once("-max_total_time=") else {
+            panic!(
+                "`just {recipe}` runs a fuzz target under a `timeout` and gives libFuzzer no \
+                 `-max_total_time`. Then the backstop is the only thing that ends the run, and \
+                 what ends it is a SIGTERM: no corpus written back, no final stats, exit 124 on a \
+                 run that found nothing wrong."
+            );
+        };
+        let budget = after
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('\'')
+            .to_owned();
+        out.push(TimedFuzzRun {
+            recipe,
+            invocation,
+            budget,
+        });
+    }
+    out
+}
+
+/// Every recipe that runs `just <recipe>`, with the words it passes after the
+/// name. Read off the folded commands, so a call spread over a continuation is
+/// still one call.
+fn callers_of(justfile: &str, recipe: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for (caller, command) in logical_commands(justfile) {
+        if caller == recipe || !line_runs_recipe(&command, recipe) {
+            continue;
+        }
+        let arguments: Vec<String> = dotted_words(strip_comment(&command))
+            .skip_while(|word| *word != recipe)
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+        out.push((caller, arguments));
+    }
+    out
+}
+
+/// The recipe parameter `run`'s duration is written in terms of, and every
+/// search that backstop is therefore asked to bound, as (who asked, seconds).
+///
+/// A literal duration bounds exactly one search, the one written beside it. A
+/// parameterised one bounds whatever its callers pass, and the callers are then
+/// the only place in the file those numbers appear at all — which is why this
+/// question is asked of them rather than of the recipe.
+fn searches_bounded_by(justfile: &str, run: &TimedFuzzRun) -> (String, Vec<(String, i64)>) {
+    let spelled: BTreeSet<&str> = words(&run.invocation).collect();
+    let parameters = recipe_parameters(recipe_header(justfile, &run.recipe));
+    let Some(at) = parameters
+        .iter()
+        .position(|p| spelled.contains(parameter_name(p)))
+    else {
+        let seconds: i64 = run.budget.trim_end_matches('s').parse().unwrap_or_else(|e| {
+            panic!(
+                "`just {}` gives libFuzzer `-max_total_time={}`, which is not a whole number of \
+                 seconds ({e})",
+                run.recipe, run.budget
+            )
+        });
+        return (String::new(), vec![(run.recipe.clone(), seconds)]);
+    };
+    let parameter = parameter_name(parameters[at]);
+    let callers = callers_of(justfile, &run.recipe);
+    assert!(
+        !callers.is_empty(),
+        "`just {}` takes a fuzzing budget as a parameter and nothing calls it, so no number in \
+         this file is the budget it computes its backstop from",
+        run.recipe
+    );
+    let mut out = Vec::new();
+    for (caller, arguments) in callers {
+        let passed = arguments.get(at).unwrap_or_else(|| {
+            panic!(
+                "`just {caller}` calls `{}` with {arguments:?} and gives it no `{parameter}`. Its \
+                 budget is then the empty string, its backstop is whatever `$(( + grace ))` comes \
+                 to, and neither is what the recipe's own doc comment promises.",
+                run.recipe
+            )
+        });
+        let seconds: i64 = passed.parse().unwrap_or_else(|e| {
+            panic!(
+                "`just {caller}` passes `{passed}` as `{}`'s `{parameter}` ({e}). The arguments \
+                 are positional and the other one is a target name, so the two swapped round is a \
+                 recipe that fuzzes a target called `{passed}` for as many seconds as the target \
+                 name comes to — which in shell arithmetic is zero.",
+                run.recipe
+            )
+        });
+        out.push((caller, seconds));
+    }
+    (parameter.to_owned(), out)
+}
+
+#[test]
+fn the_backstop_counts_a_wall_clock_derived_from_the_budget_it_wraps() {
+    // The other half of the defect, and the half that would have grown back.
+    // `timeout 90s` beside `-max_total_time=60` is two numbers written by hand
+    // that have to agree, in three recipes, each carrying its own pair — and
+    // the pair was wrong in all three. Correcting them is a fix for today; the
+    // arithmetic is what stops the fourth pair from being written wrong.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`; the reader is not finding \
+         it, or the backstop is gone"
+    );
+
+    for run in &runs {
+        let spelled: BTreeSet<&str> = words(&run.invocation).collect();
+        for word in words(&run.budget) {
+            assert!(
+                spelled.contains(word),
+                "`just {}` bounds a `-max_total_time={}` run with `{}`, and the two numbers have \
+                 nothing to do with each other. They are one number: the backstop is the search \
+                 budget plus a shutdown, so it has to be computed from it. Written side by side \
+                 they drift — which they had, in all three recipes, in the direction that spent \
+                 the whole search on the build (#224).",
+                run.recipe,
+                run.budget,
+                run.invocation.trim()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_backstop_outlasts_every_search_it_is_asked_to_bound() {
+    // Naming the budget is only half of "computed from it": `timeout $SECONDS`
+    // around `-max_total_time=$SECONDS` names it and truncates it. Measured
+    // against the numbers the callers actually pass, so what is held is the
+    // recipe as it is invoked rather than as it is parameterised — and a
+    // caller that passes the two positional arguments the wrong way round is
+    // read here rather than at the far end of a sweep.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`, so this reader is holding \
+         nothing"
+    );
+
+    for run in &runs {
+        let (parameter, searches) = searches_bounded_by(&justfile, run);
+        for (asked_by, seconds) in &searches {
+            let wall = timeout_budget(&timeout_arguments(&run.invocation, &parameter, *seconds));
+            assert!(
+                wall > *seconds,
+                "`just {asked_by}` asks for a {seconds}-second search and the backstop around it \
+                 fires at {wall}s. A backstop that cuts the search short is not a backstop; it is \
+                 a shorter search that reports itself as a hang — and libFuzzer killed mid-loop \
+                 writes back neither the corpus it grew nor the stats that say what it covered."
+            );
+        }
+    }
+}
+
+#[test]
+fn the_backstop_around_a_fuzz_run_kills_a_run_that_never_ends() {
+    // Run rather than read, and the reason is the change that made the two
+    // assertions above pass: the duration stopped being the literal `90s` and
+    // became `$(( … ))`, i.e. text that is correct only if a shell evaluates it
+    // where the recipe puts it. Quoted one layer differently and `timeout`
+    // receives the expression verbatim, exits 125 without waiting, and every
+    // fuzz run in this repo loses its backstop while both readers above go on
+    // reporting it present. The same goes for `--kill-after`, which neither of
+    // them reads at all.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`, so nothing here is \
+         demonstrated"
+    );
+
+    for run in &runs {
+        let recipe = &run.recipe;
+        let (parameter, _) = searches_bounded_by(&justfile, run);
+
+        // The grace this recipe allows on top of a search, measured by asking
+        // the expression what it comes to at zero. A budget of one second is
+        // then a search of `1 - grace`, which is nonsense as a search and is
+        // exactly the point: what is timed here is the backstop, not a fuzzer.
+        let grace = timeout_budget(&timeout_arguments(&run.invocation, &parameter, 0));
+        let shrunk = 1 - grace;
+        let wall = timeout_budget(&timeout_arguments(&run.invocation, &parameter, shrunk));
+        assert_eq!(
+            wall, 1,
+            "`just {recipe}` computes a {wall}-second backstop for a {shrunk}-second search, so \
+             its wall clock is not the search budget plus a fixed grace and this demonstration \
+             cannot shrink the recipe's own invocation to something it can wait for. Either the \
+             duration went back to a literal — the arrangement the reader above rejects — or it \
+             grew a factor, in which case rewrite the shrink and not the recipe."
+        );
+        let ready = invocation_for(&run.invocation, &parameter, shrunk);
+
+        // The demonstration: the recipe's own invocation, around something that
+        // never ends.
+        let started = Instant::now();
+        let hung = bash(&format!("{ready} sleep 300"));
+        let waited = started.elapsed();
+        assert_eq!(
+            hung.code(),
+            Some(124),
+            "`just {recipe}`'s backstop did not kill a command that never ends. 124 is the status \
+             `timeout` reports when it fires, and the status fuzz.yml reported five times for a \
+             reason that was never a hang."
+        );
+        assert!(
+            waited < Duration::from_secs(30),
+            "`just {recipe}`'s backstop fired after {waited:?} on a one-second budget, so what \
+             ended the command was not the duration the recipe computes"
+        );
+
+        // The control. A backstop that fires on a run which finished is a red X
+        // on every sweep, and a red X on every sweep is what taught six pull
+        // requests to merge past this job in the first place.
+        let finished = bash(&format!("{ready} true"));
+        assert!(
+            finished.success(),
+            "`just {recipe}`'s backstop reports {finished:?} for a command that exited immediately"
+        );
+    }
+}
+
+/// The recipe's `timeout` invocation with its budget parameter filled in, ready
+/// for a shell.
+fn invocation_for(invocation: &str, parameter: &str, seconds: i64) -> String {
+    invocation.replace(&format!("{{{{{parameter}}}}}"), &seconds.to_string())
+}
+
+/// Run a script the way the recipes run theirs, and report only how it ended.
+fn bash(script: &str) -> process::ExitStatus {
+    Command::new("bash")
+        .args(["-c", script])
+        .status()
+        .unwrap_or_else(|e| panic!("running bash: {e}"))
 }
 
 // ---------------------------------------------------------------------------
