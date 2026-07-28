@@ -154,6 +154,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # History and tags, not the default depth-1 tip. One leg compares
+          # this workspace's public API against the last release tag and
+          # resolves that tag out of THIS checkout, so a shallow clone fails
+          # it on a missing revision rather than on an API change — the worst
+          # shape a gate can take, since the fix looks like "the check is
+          # broken". The legs are generated from the Justfile, so the option
+          # cannot be scoped to the one that needs it; a full clone of a repo
+          # this size is a second, and every other leg simply ignores it.
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-dev-image
       # Through the environment rather than spliced into the script: the leg

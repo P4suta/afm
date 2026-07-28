@@ -26,6 +26,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
+// Aliased: `Command` in this file is the shell command a config line spells,
+// which is the other half of the same word.
+use std::process::Command as Spawn;
 
 // ---------------------------------------------------------------------------
 // the rules
@@ -772,6 +775,55 @@ fn a_subcommand_that_takes_no_locked_flag_is_exempt() {
             scanned.unbound
         );
     }
+}
+
+/// The one entry on [`CARGO_SELF_LOCKING`] whose reason names no substitute,
+/// because there is none.
+const UNPINNED_BASELINE: &str = "semver-checks";
+
+#[test]
+fn the_exemption_nothing_stands_in_for_is_measured_rather_than_asserted() {
+    // Every other reason on that list is a fact about this repo, and something
+    // here holds it: `fmt` and `audit` cannot resolve a different graph at all,
+    // and the `fuzz` entry names a committed lockfile plus the two gates that
+    // watch it. This one is a fact about somebody else's CLI. The `semver`
+    // gate builds the baseline revision in a worktree of its own and that
+    // build resolves its own graph, so which graph proved the comparison is
+    // the one resolution in this repo that is not pinned (DEV-298) — and the
+    // whole justification for accepting that is a sentence about a flag not
+    // existing, written once, about a tool that ships releases.
+    let (_, reason) = CARGO_SELF_LOCKING
+        .iter()
+        .find(|(sub, _)| *sub == UNPINNED_BASELINE)
+        .unwrap_or_else(|| {
+            panic!("`{UNPINNED_BASELINE}` is no longer an exemption; this reader is stale")
+        });
+    assert!(
+        reason.contains("--locked"),
+        "the exemption for `{UNPINNED_BASELINE}` no longer claims the flag is missing: {reason}"
+    );
+
+    let help = Spawn::new("cargo")
+        .args([UNPINNED_BASELINE, "check-release", "--help"])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running cargo {UNPINNED_BASELINE}: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where it is installed."
+            )
+        });
+    let usage = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        usage.contains("--baseline-rev"),
+        "cargo {UNPINNED_BASELINE} printed no usage this reader recognises:\n{usage}"
+    );
+    assert!(
+        !usage.contains("--locked"),
+        "cargo {UNPINNED_BASELINE} now takes `--locked`. The exemption was true when it was \
+         written and is not any more: move `{UNPINNED_BASELINE}` to CARGO_RESOLVING, pass the \
+         flag in the `semver` recipe, and close DEV-298 — the baseline build has stopped being \
+         the one resolution here that nothing pins."
+    );
 }
 
 #[test]

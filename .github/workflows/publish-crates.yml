@@ -65,15 +65,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Metadata smoke test — runs ungated on every dispatch (no credentials,
-  # so no environment approval needed). Only the leaf crate can be dry-run
-  # pre-publish. A live publish `needs:` this job, so a packaging/metadata
-  # regression surfaces before any upload.
+  # Preflight — runs ungated on every dispatch (no credentials, so no
+  # environment approval needed). Two questions, both answerable before an
+  # upload: does the package still build from its own metadata (only the leaf
+  # crate can be dry-run pre-publish), and does the version about to go out
+  # cover the API changes in it. A live publish `needs:` this job, so either
+  # regression surfaces before anything is uploaded — and an upload is the one
+  # operation crates.io will not let anybody take back.
+  #
+  # The semver step is the SAME recipe the PR gate runs, not a second spelling
+  # of it: `AOZORA_MD_IN_CONTAINER` tells the Justfile's `_in` switch this job
+  # is already outside the dev image, so the recipe resolves its tool from what
+  # `install-action` put on the runner. Asking it again here is not redundant
+  # with the PR gate — a tag is what gets published, and a tag is not required
+  # to be a commit any PR ever ran.
   package:
     runs-on: ubuntu-latest
+    env:
+      AOZORA_MD_IN_CONTAINER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # The semver step resolves its baseline as a TAG out of this
+          # checkout; the default depth-1 clone carries none.
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
         with:
@@ -81,9 +96,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: publish-crates-package
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
+        with:
+          tool: cargo-semver-checks,just
 
       - name: Dry-run aozora-flavored-markdown (metadata smoke test)
         run: cargo publish -p aozora-flavored-markdown --dry-run --locked
+
+      - name: Semver preflight (public API against the baseline)
+        run: just semver
 
   # Live publish in topological order, gated behind the `release`
   # environment (required-reviewer approval + deployment branch/tag

@@ -48,9 +48,36 @@ breaking-change axis (cargo treats `0.y`→`0.(y+1)` as breaking). Breaking =
 a change to rendered HTML for any CommonMark/GFM input, the
 `aozora-md.diagnostics.v1` schema (ADR-0012), the public IR enums (ADR-0013), or
 `Options::default`. Patch = additive features and fixes.
-`cargo semver-checks` cannot run until a baseline exists on crates.io, so it
-is wired into the `publish-crates.yml` preflight *after* the first publish,
-not into per-PR CI.
+
+**Semver enforcement (amended).** `cargo semver-checks` runs as `just semver`:
+a `[group('gate')]` recipe, so a per-PR CI leg, and a step of the
+`publish-crates.yml` preflight. This ADR first said the check "cannot run until
+a baseline exists on crates.io" and deferred it past the first publish. That
+was wrong, and the correction is the reason for this amendment:
+`--baseline-rev <tag>` takes the baseline out of this repository's git
+history and needs no registry presence at all. The check was available the
+whole time the public surface was being rebuilt.
+
+The baseline is `v0.4.1`, the newest tag, and the flag is scaffolding — after
+the first publish it comes out and the registry version, cargo-semver-checks'
+own default, is the baseline. Both callers check out with `fetch-depth: 0`,
+since a depth-1 clone carries no tag to resolve.
+
+Two limits, recorded rather than implied. The two epub crates are `--exclude`d:
+they joined this workspace after `v0.4.1` (ADR-0018) on their own 0.1.x line,
+so the baseline holds nothing to compare them against; they re-enter the check
+at the first tag that contains them. And `cargo semver-checks` takes no
+`--locked`, so the baseline build resolves its own dependency graph — the one
+resolution in this repo that is not bound to a lockfile, with no in-repo
+substitute (DEV-298).
+
+While the current version is already a major bump ahead of the baseline
+(`0.4.1`→`0.5.0` under the rule above), every lint is skipped: a major bump
+permits any break, so the gate asserts only that the declared version covers
+what changed. That is the correct reading for the 0.5.0 cycle, where the
+breaking changes *are* the plan — and it is a vacuous pass, not a clean bill
+of health. The gate starts reporting breakage the moment the baseline is a
+version this workspace is merely a patch ahead of.
 
 ## Consequences
 

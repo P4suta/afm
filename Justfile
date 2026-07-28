@@ -1176,10 +1176,68 @@ audit:
 udeps:
     {{_fuzz}} cargo +nightly udeps --locked --workspace --all-targets
 
-# Semver break detection (runs against published baseline once crates are on crates.io)
+# Semver gate: the version this workspace declares covers the API changes in it.
+#
+# The recipe existed and nothing ran it. ADR-0015 deferred wiring it until "a
+# baseline exists on crates.io", and that reason was wrong: `--baseline-rev`
+# takes the baseline out of THIS repository's git history, so the check has
+# been available since the tag it names was cut. What believing otherwise cost
+# is the entire public-surface rebuild — every entry point, every IR name,
+# every error type moved with the one tool that measures such a move unwired.
+#
+# `v0.4.1` is the newest tag and it is scaffolding: nothing is on crates.io
+# yet, so a tag is the only baseline there is. After the first publish, delete
+# the flag — the registry version is what cargo-semver-checks compares against
+# by default, and then there is no literal here for anyone to keep in step.
+#
+# `--exclude`: the two epub crates were consolidated into this workspace after
+# that tag was cut and carry their own 0.1.x line (ADR-0018), so the baseline
+# holds nothing to compare them against — semver-checks stops with "package
+# not found" rather than skipping them. Only the library one stops it today;
+# the CLI is excluded because it is the same fact about the same pair, and a
+# lib target added to it later would otherwise fail this gate for a reason
+# that has nothing to do with the change under test. The `publish = false`
+# members and the other binary-only crates need no flag: cargo-semver-checks
+# skips both kinds itself (measured — naming them changes nothing).
+#
+# What it asserts TODAY, stated plainly rather than implied: cargo reads
+# 0.4.1 -> 0.5.0 as a major bump, so all 253 lints are skipped and the answer
+# is only "the version you declared covers whatever you changed". That is the
+# correct answer for this cycle — every break landed so far is absorbed by the
+# 0.5.0 this workspace has not released — and it is a vacuous pass, so say so:
+# the gate starts reporting breakage the moment the baseline is a version this
+# workspace is merely a patch ahead of. To watch it fail, set the workspace
+# version to 0.4.2 and run this recipe.
+#
+# No `--locked`, per the block at the top of this file. It is the one entry
+# there with nothing else covering it: the baseline build resolves its own
+# graph, so which graph proved the comparison is not pinned. DEV-298 tracks
+# it; there is no offline or in-repo substitute to write here instead.
+#
+# Both callers check out with `fetch-depth: 0` — `--baseline-rev` resolves a
+# TAG out of the checkout, and a depth-1 clone carries none.
+#
+# The private target directory is not a speed knob, it is the verdict. Both
+# halves of this check are rustdoc JSON, and rustdoc names its output after the
+# CRATE, not the package it came from: current and baseline are both
+# `aozora-flavored-markdown`, so both land on `target/doc/<crate>.json` — the
+# same output-path clash `_NO_COLLISION` above catches inside one `cargo doc`
+# pass, one directory up. `cargo semver-checks` takes no `--target-dir`, so the
+# only place to answer it is the environment. Sharing the directory the doc
+# gates write costs a WRONG ANSWER, not a slow one: after `just doc`, cargo
+# reads this crate's doc unit as fresh, skips the current-side rustdoc, and
+# leaves the baseline's JSON in place — so the gate compares 0.4.1 against
+# itself, reports "no change; assume minor", and fails on the `html` feature
+# 0.5.0 removed. That is `just ci`'s own order (doc, doc-public, semver), so it
+# was reproducible, and it reads as a real break in a workspace that has none.
+[group('gate')]
 [group('lint')]
 semver:
-    {{_dev}} cargo semver-checks check-release --workspace
+    {{_dev}} bash -c 'CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/semver-gate" \
+        cargo semver-checks check-release --workspace \
+        --baseline-rev v0.4.1 \
+        --exclude aozora-flavored-markdown-epub \
+        --exclude aozora-flavored-markdown-epub-cli'
 
 # --- upstream sources ---------------------------------------------------------
 
@@ -1459,12 +1517,17 @@ ci:
 
     # Why this shape (no gate is weakened vs. the old sequential loop):
     #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/doc-public/
-    #     coverage/udeps)
+    #     semver/coverage/udeps)
     #     all share ONE cargo target dir, so they contend on its build lock and
     #     CANNOT truly run in parallel — they stay sequential, ordered
     #     cheap-to-expensive so a failure surfaces fast. `msrv` leads: inside the
     #     dev image it is a bare `cargo check`, so it is also the cheapest
-    #     possible "does it still compile".
+    #     possible "does it still compile". `semver` follows the two doc gates
+    #     because it is a third one: what it builds is rustdoc's JSON, here and
+    #     again in a worktree of the baseline tag. It does NOT share their
+    #     target dir — it keeps its own, and this order is why: on the shared
+    #     one a preceding `cargo doc` makes it answer about the baseline twice
+    #     (see the recipe).
     #   * deny / shear / audit invoke NO rustc and take no build lock (and
     #     spawn no sccache server, so no multi-server churn on the shared cache),
     #     so a BACKGROUND lane overlaps them onto the compile lane for free.
@@ -1520,7 +1583,7 @@ ci:
     fg_steps=(typos fmt-check strict-code verify-version-pins \
               zizmor actionlint vale comment-discipline commitlint \
               msrv clippy build dist-assets-check \
-              test test-doc prop spec doc doc-public coverage udeps \
+              test test-doc prop spec doc doc-public semver coverage udeps \
               fuzz-build test-wasm \
               playground-lint playground-test playground-build)
 
