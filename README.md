@@ -40,6 +40,12 @@ the five private-use codepoints this crate substitutes one per 青空文庫
 construct are not source text, so a source that types `U+E001`–`U+E004`
 gets `U+FFFD` back from a render. The file extension stays `.md`.
 
+CommonMark also owns rule rows at every width. In particular, a long `-` or
+`=` row directly below prose is a setext heading underline, not an
+Aozora-specific decorative separator. The real-corpus compatibility
+measurement behind that choice is in
+[ADR-0027](docs/adr/0027-commonmark-owns-rule-rows-at-every-width.md).
+
 None of these claims is a promise, and this page deliberately states none
 of the counts. They live on the
 [crate page](./crates/aozora-flavored-markdown/README.md) alone, because
@@ -80,6 +86,7 @@ CLI:
 ```sh
 cargo install aozora-flavored-markdown-cli --locked
 aozora-flavored-markdown render input.md
+aozora-flavored-markdown fmt --check input.md
 ```
 
 Pre-built binaries for Linux x86_64, macOS arm64 and Windows x86_64 are

@@ -72,6 +72,9 @@ Render the input to HTML on stdout
 aozora\-flavored\-markdown\-check(1)
 Parse the input and report diagnostics without rendering
 .TP
+aozora\-flavored\-markdown\-fmt(1)
+Canonicalize source and check, display, or write the result
+.TP
 aozora\-flavored\-markdown\-completions(1)
 Generate a shell completion script on stdout
 .TP
@@ -83,6 +86,7 @@ EXAMPLES:
   aozora\-flavored\-markdown render input.md \-o out.html
   cat input.md | aozora\-flavored\-markdown render \-
   aozora\-flavored\-markdown check \-\-strict \-\-format json input.md
+  aozora\-flavored\-markdown fmt \-\-check input.md
   aozora\-flavored\-markdown completions zsh > _aozora\-flavored\-markdown
 .SH VERSION
 v0.5.0

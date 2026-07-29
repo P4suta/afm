@@ -33,6 +33,11 @@ cat input.md | aozora-flavored-markdown render -
 # Parse and report, without rendering
 aozora-flavored-markdown check input.md
 
+# Check canonical form without writing, review a diff, or update in place
+aozora-flavored-markdown fmt --check input.md
+aozora-flavored-markdown fmt --diff input.md
+aozora-flavored-markdown fmt --write input.md
+
 # Raw Aozora Bunko files are Shift_JIS
 aozora-flavored-markdown render --encoding sjis 56656.txt
 
@@ -58,7 +63,7 @@ observations, the way a compiler's warnings are, not refusals.
 | Exit code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | the command failed (unreadable input, unwritable output) |
+| 1 | the command failed, or `fmt --check` / `--diff` found drift |
 | 2 | `--strict` and at least one diagnostic |
 
 ## Related crates

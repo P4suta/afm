@@ -26,6 +26,11 @@ aozora-flavored-markdown-epub build \
     --input    my-book/manuscript \
     --metadata my-book/book.toml \
     --output   my-book.epub
+
+# Run every pre-package phase without writing an EPUB
+aozora-flavored-markdown-epub check \
+    --input    my-book/manuscript \
+    --metadata my-book/book.toml
 ```
 
 `--input` takes a directory or a single chapter file. `--help` is the
@@ -46,7 +51,7 @@ diagnostics are observations, not refusals.
 | Exit code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | the build failed (missing manuscript, unreadable `book.toml`, unwritable output) |
+| 1 | validation/build failed (invalid metadata or spine, unreadable input, invalid XML text, or unwritable output) |
 | 2 | `--strict` and at least one chapter diagnostic |
 
 ## Related crates

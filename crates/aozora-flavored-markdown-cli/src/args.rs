@@ -18,6 +18,7 @@ use clap::{ArgAction, ArgGroup, Parser, Subcommand, ValueEnum};
         aozora-flavored-markdown render input.md -o out.html\n  \
         cat input.md | aozora-flavored-markdown render -\n  \
         aozora-flavored-markdown check --strict --format json input.md\n  \
+        aozora-flavored-markdown fmt --check input.md\n  \
         aozora-flavored-markdown completions zsh > _aozora-flavored-markdown",
 )]
 pub(crate) struct Cli {
