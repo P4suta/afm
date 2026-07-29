@@ -52,11 +52,6 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
   source run cannot be recovered (the fallback path a parser-rewritten
   document takes) now renders as nothing *and says so*, rather than
   silently emitting empty markup. (#158)
-- **`cargo xtask comment-discipline`**, wired into `just lint` and the CI
-  lint matrix — a comment naming a retired upstream path fails the build.
-  `//`, `///` and `//!` are all in scope, and `_` / `-` spellings are
-  folded together so one banned entry covers a manifest name and its
-  intra-doc link alike. (#153)
 - **Proptest input strategies in
   `aozora-flavored-markdown-test-support`** — `config::default_config`
   (the `AOZORA_PROPTEST_CASES` knob) and `generators::{kanji_fragment,
@@ -74,8 +69,8 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
   `&`, `<`, `>`, `"` and `'` (numeric `&#39;`, HTML 4 having no `&apos;`), so
   one call is right in text and in a quoted attribute alike. The EPUB
   envelope's private copy is gone; the two agreed character for character and
-  nothing could have noticed if a fix had landed on one side only. A second
-  escape table now fails `just strict-code`. (#182)
+  nothing could have noticed if a fix had landed on one side only. The shared
+  implementation is covered by the library's direct tests. (#182)
 - **Three ADRs** — [ADR-0021](docs/adr/0021-aozora-boundary-is-the-public-surface.md)
   (the boundary is the parser's public surface only, and an upstream API
   request must be justified from upstream's side alone),
@@ -131,21 +126,12 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Changed
 
-- **Retired upstream paths are gated in prose, by Vale.** `just vale` is a
-  gate; `.vale.ini` says what it reads and `styles/Aozora/RetiredPaths.yml`
-  holds the banned names. It replaces the `.rs` + `.toml` comment scan inside
-  `cargo xtask comment-discipline`, whose file list could not open a Markdown
-  document at all — so `UPSTREAM_DIFF.md` went stale in full with every gate
-  green. The gate is handed every file git tracks, with no pathspec and no
-  list of file kinds, because a list of file kinds is what the replaced scan
-  got wrong; the first full-tree run found a retired crate named in the
-  `Justfile`, which has no extension to match. The rule reads raw markup for
-  the same reason: a crate name in a document is written in backticks, which
-  is what a prose linter skips by default. `CHANGELOG.md` and `docs/adr/` are
-  exempt, history being a record rather than drift. What stayed in xtask is
-  what a prose linter cannot answer: the retired *repo* path scan, which reads
-  whole lines of files that have no comments at all, and the doc-comment
-  volume ratchet, which is a count.
+- **Native, locked mise is the supported development and CI environment.**
+  The repository now has one `mise.toml` plus `mise.lock`, with Rust, Bun,
+  Node and every directly invoked tool fixed. CI has five static jobs that
+  execute the same `just ci-{rust,web,repo,release,fuzz}` recipes as a local
+  checkout. Correctness is established by compiler lints, official tools and
+  real builds/tests rather than by parsing repository configuration.
 - **Sentinel substitution moved into this crate, in one coordinate
   space.** `src/sentinel_stream.rs` is replaced by `src/constructs.rs`:
   the masked source is tiled here — bytes between constructs copied
@@ -178,7 +164,7 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
   `README.md` / `README.ja.md` are compressed to Quickstart + links (both
   languages stay), and the doc comments under `crates/*/src` no longer
   name an upstream-internal path — 21% of `src` was doc comments, much of
-  it teaching imports that cannot compile. `just lint` keeps it that way.
+  it teaching imports that cannot compile.
   (#153)
 - **The Tier-A predicate has exactly one definition.**
   `check_no_bare_bracket` now excepts `<code>` regions — a code element's
@@ -192,12 +178,6 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
   excused the check from every input that raised a diagnostic, which is the
   recovery path — where an unresolved construct is likeliest to survive.
   Un-gating it found the leak above on the first run. (#161)
-- **`cargo xtask comment-discipline` reads TOML comments too**, and runs
-  from the workspace root rather than `crates/` (`upstream/` stays out —
-  ADR-0001 budgets no edits there). A manifest note explaining why a lint is
-  set the way it is names upstream exactly as a doc comment does, and rotted
-  unseen. `aozora-lexer` / `aozora-parser` / `aozora-scan` join the banned
-  list. (#161)
 - **`just changelog` prints a draft instead of overwriting `CHANGELOG.md`.**
   This file is written by hand — an entry has to say what broke and what to
   do about it, which no commit subject carries — and `git-cliff -o
@@ -207,6 +187,13 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Removed
 
+- **The custom repository-policy layer and container development path.**
+  The configuration-parsing tests for gate wiring, Action pins and lock
+  binding are gone, together with Docker/Compose/devcontainer setup, the
+  dev-image workflow, the setup composite action, and process-monitoring
+  gates such as commitlint, Vale and source-shape scans. Rust, CLI, WASM,
+  Playground, EPUB, Pages and publication outputs remain covered by their
+  real compiler, test, package and release paths.
 - **`upstream/comrak/`** — the vendored comrak fork (139 files, 2.2 MB) is
   gone; `comrak = "0.52.0"` now resolves from crates.io like every other
   dependency ([ADR-0024](docs/adr/0024-depend-on-crates-io-comrak.md),

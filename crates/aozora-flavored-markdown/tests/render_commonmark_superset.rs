@@ -33,8 +33,8 @@ use aozora_flavored_markdown::{Options, render, sentinels, to_html};
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 
-const COMMONMARK: &str = include_str!("../../../spec/commonmark-0.31.2.json");
-const GFM: &str = include_str!("../../../spec/gfm-0.29-gfm.json");
+const COMMONMARK: &str = include_str!("../spec/commonmark-0.31.2.json");
+const GFM: &str = include_str!("../spec/gfm-0.29-gfm.json");
 
 /// A `@` stands for the row under test. Copied from
 /// `serialize_commonmark_identity.rs` deliberately: the point of this file is

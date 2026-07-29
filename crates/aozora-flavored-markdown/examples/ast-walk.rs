@@ -1,3 +1,9 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "this example is a command-line report intended to print AST counts and usage errors"
+)]
+
 //! Walk the IR of a document and report how often each 青空文庫 construct
 //! appears, plus the number of diagnostics the parse raised.
 //!

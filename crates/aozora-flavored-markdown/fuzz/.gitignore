@@ -12,6 +12,5 @@ corpus/*/*
 # resolution with, which left the fuzz targets free to build against a
 # different `aozora` / `comrak` than the library they exist to fuzz, with
 # nothing in the repo able to notice (DEV-293). Committing the lockfile is what
-# makes the resolution reviewable; `just fuzz-build` fails when a build
-# rewrites it, and `just verify-version-pins` compares what the two lockfiles
-# resolve to.
+# makes the resolution reviewable. `just fuzz-build` exercises this workspace
+# and cargo-deny checks its resolved graph directly.

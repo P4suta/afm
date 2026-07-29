@@ -50,8 +50,7 @@ spec corpora, so the page cannot disagree with what the suite renders.
 A second copy here could, and did.
 [`tests/render_commonmark_superset.rs`](./crates/aozora-flavored-markdown/tests/render_commonmark_superset.rs)
 sweeps the same corpora through the dialect and holds the claim above.
-`just spec` and `just test` (`cargo test -p aozora-flavored-markdown`) are
-the gates they have to pass on every PR.
+The conformance suites run with the workspace tests and coverage on every PR.
 
 ```text
 CommonMark  ──▶  GFM  ──▶  Aozora Flavored Markdown
@@ -114,7 +113,7 @@ Full API docs are on
 
 - **CommonMark / GFM compatibility, measured** — both spec suites run
   whole under `Options::commonmark()` and `Options::gfm()`, nothing
-  skipped, gated by `just spec`; the counts are on the
+  skipped; the counts are on the
   [crate page](./crates/aozora-flavored-markdown/README.md).
 - **Aozora Bunko compatibility target** — every notation listed at
   <https://www.aozora.gr.jp/annotation/> parses, and no unconsumed
@@ -127,14 +126,15 @@ Full API docs are on
 
 ## Development
 
-Every operation runs inside Docker; the host toolchain is never invoked
-directly (ADR-0002).
+The supported development environment is the native, lockfile-backed mise
+toolchain (ADR-0026). Install mise, trust this repository's configuration,
+and install the exact resolved tools:
 
 ```sh
-just setup             # build the dev image, install hooks, run tests
-just test              # cargo nextest via Docker
-just lint              # fmt + clippy + typos + strict-code + comments + workflows
-just ci                # the full gate set, locally
+mise trust
+mise install --locked
+just test              # workspace tests through cargo-nextest
+just ci                # the same five fixed suites GitHub Actions runs
 ```
 
 `just` with no arguments lists every recipe. See

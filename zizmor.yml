@@ -27,7 +27,7 @@ rules:
   # not actionable here; the fix belongs upstream in cargo-dist. Suppressed per
   # audit rather than per file so `unpinned-uses` still covers it: its action
   # refs ARE this repo's to choose, pinned by `[dist.github-action-commits]` in
-  # dist-workspace.toml and watched for staleness by release-pins.yml.
+  # dist-workspace.toml.
   template-injection:
     ignore:
       - release.yml

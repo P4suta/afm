@@ -5,5 +5,5 @@
 /docs/adr/            @P4suta
 /crates/aozora-flavored-markdown/ @P4suta
 /.github/workflows/   @P4suta
-/Dockerfile           @P4suta
-/docker-compose.yml   @P4suta
+/mise.toml            @P4suta
+/mise.lock            @P4suta

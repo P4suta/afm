@@ -1,4 +1,10 @@
 //! The generated `.d.ts`, checked as a namespace rather than as a compile.
+
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test-source inspection helpers use panics to report malformed fixtures with their source context"
+)]
 //!
 //! `tsify` hands wasm-pack one declaration per type through
 //! [`tsify::Tsify::DECL`], and wasm-bindgen hands it one per exported class;

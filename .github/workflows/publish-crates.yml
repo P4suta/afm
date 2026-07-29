@@ -1,56 +1,14 @@
-# cargo publish workflow for the aozora-flavored-markdown workspace.
-#
-# Why one command rather than a ladder, which crates go up and which do not,
-# and why the upload is manual: ADR-0015. Nothing about the set or the order
-# is restated here — cargo reads it out of the manifests and the dependency
-# graph on every run.
-#
-# ADR-0002 scope exception: this runs on the native runner toolchain rather
-# than the dev image (like the `msrv` CI job). Publishing is a release
-# operation that needs only cargo + rustc, not the dev-image tool belt.
-#
-# SECURITY MODEL (industry-standard, mirrors P4suta/aozora):
-#   * The live `publish` job runs in the `release` GitHub Environment, so
-#     it pauses for required-reviewer approval and can only reach
-#     credentials after a deployment protection rule passes. The `package`
-#     dry-run smoke test runs ungated (no credentials needed).
-#   * Default `use_oidc: true` mints a short-lived crates.io token via
-#     OIDC Trusted Publishing (rust-lang/crates-io-auth-action), revoked
-#     automatically when the job ends — no long-lived secret.
-#     Ref: https://crates.io/docs/trusted-publishing
-#   * Default `dry_run: true` so a stray "Run workflow" click cannot push.
-#
-# How to run a real publish (steady state, no secret):
-#   gh workflow run publish-crates.yml -f dry_run=false   # then approve
-#
-# BOOTSTRAP, IN THIS ORDER. The steady state above is not reachable yet, and
-# going from two rungs to four is why: `aozora-flavored-markdown` and its CLI
-# are on crates.io and can be given a trusted publisher today, but the two
-# EPUB crates are 404 and crates.io has nothing to attach one to until the
-# crate exists. One `cargo publish --workspace` carries one token, so that is
-# a fact about the whole ladder and not those two rungs alone.
-#
-#   1. Dispatch once with `-f use_oidc=false`, which authenticates the whole
-#      run from the CARGO_TOKEN secret and is what first registers the EPUB
-#      pair.
-#   2. Register the trusted publisher for each of the four: crates.io → the
-#      crate → Settings → Trusted Publishing → GitHub, owner=P4suta,
-#      repo=aozora-flavored-markdown, workflow=publish-crates.yml,
-#      environment=release.
-#   3. Only once all four carry one, delete the CARGO_TOKEN secret. Deleting
-#      it before step 1 makes step 1 impossible.
-
 name: publish-crates
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry-run only (no upload): packages + verifies every publishable crate"
+        description: "Dry-run only (no upload)"
         type: boolean
         default: true
       use_oidc:
-        description: "Authenticate via OIDC Trusted Publishing. Uncheck to fall back to the CARGO_TOKEN env secret."
+        description: "Use crates.io OIDC trusted publishing"
         type: boolean
         default: true
 
@@ -58,108 +16,57 @@ permissions:
   contents: read
 
 concurrency:
-  # Serialize publishes — crates.io accepts versions linearly and a second
-  # concurrent run would just waste tokens.
   group: publish-crates
   cancel-in-progress: false
 
 jobs:
-  # Preflight — runs ungated on every dispatch (no credentials, so no
-  # environment approval needed). Three questions, all answerable before an
-  # upload: is the version about to go out one the CHANGELOG describes, do the
-  # packages still build from their own metadata (all of them, in the order
-  # they would go up), and does that version cover the API changes in it. A
-  # live publish `needs:` this job, so any of the three surfaces before
-  # anything is uploaded — and an upload is the one operation crates.io will
-  # not let anybody take back.
-  #
-  # Both steps are the SAME recipes the PR gates run, not a second spelling of
-  # them: `AOZORA_MD_IN_CONTAINER` tells the Justfile's `_in` switch this job
-  # is already outside the dev image, so each recipe resolves its tool from what
-  # `install-action` put on the runner. Asking them again here is not redundant
-  # with the PR gates — a tag is what gets published, and a tag is not required
-  # to be a commit any PR ever ran.
-  #
-  package:
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
-    env:
-      AOZORA_MD_IN_CONTAINER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # The semver step resolves its baseline as a TAG out of this
-          # checkout; the default depth-1 clone carries none.
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
         with:
-          toolchain: stable
+          version: 2026.7.13
+          cache: true
+          install_args: >-
+            rust@1.96.0 just cargo:cargo-semver-checks
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          key: publish-crates-package
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2.85.2
-        with:
-          tool: cargo-semver-checks,just
+          key: publish-crates-preflight
+      - run: just changelog-check
+      - run: just package-smoke
+      - run: just semver
 
-      # The cheapest of the three, so it runs before either build. `just
-      # release` writes the section it looks for (`release.toml`'s
-      # pre-release-replacements cut `## [Unreleased]` into a dated heading);
-      # a tag cut by hand does not, and a tag is not required to be a commit
-      # any pull request ever ran. What gets published is whatever the
-      # dispatched ref holds, so this is the one moment the two can be
-      # compared — and the one gate list this step cannot join, because on a
-      # branch the section is still called `[Unreleased]` and always will be.
-      # The recipe is where the command lives all the same, so it can be run
-      # on a release ref by hand and read like every other check here.
-      - name: The version going out is one the CHANGELOG describes
-        run: just changelog-check
-
-      - name: Dry-run the ladder (packages and verifies every publishable crate)
-        run: just package
-
-      - name: Semver preflight (public API against the baseline)
-        run: just semver
-
-  # Live publish in topological order, gated behind the `release`
-  # environment (required-reviewer approval + deployment branch/tag
-  # restriction). Credentials are only reachable after approval.
   publish:
-    needs: package
+    name: publish
+    needs: preflight
     if: ${{ inputs.dry_run == false }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
       contents: read
-      id-token: write  # mint a short-lived crates.io token via OIDC
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
         with:
-          toolchain: stable
+          version: 2026.7.13
+          cache: true
+          install_args: rust@1.96.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: publish-crates-publish
-
-      # OIDC Trusted Publishing: exchange the job's OIDC token for a
-      # 30-minute crates.io API token, auto-revoked when the job ends.
-      # Skipped (legacy CARGO_TOKEN fallback) when use_oidc=false.
-      - name: Authenticate to crates.io (OIDC Trusted Publishing)
+      - name: Authenticate to crates.io
         id: auth
         if: ${{ inputs.use_oidc }}
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
-
-      # A partial run is NOT resumable by re-dispatch. Cargo checks every
-      # selected member against the registry before it packages or uploads
-      # anything, and a version already there is a hard error
-      # ("crate foo@1.2.3 already exists on crates.io"), not a skip — so a
-      # second dispatch stops on the crates that did land instead of
-      # continuing with the ones that did not. Finish such a run by hand,
-      # `cargo publish -p <crate> --locked` per crate still missing, in
-      # dependency order. The same goes for a rate-limited upload: it fails
-      # the run rather than sleeping inside it.
-      - name: Publish to crates.io
+      - name: Publish four crates in workspace dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ inputs.use_oidc && steps.auth.outputs.token || secrets.CARGO_TOKEN }}
         run: cargo publish --workspace --locked

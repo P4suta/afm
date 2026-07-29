@@ -1,15 +1,25 @@
-# mise (https://mise.jdx.dev/) — dev-tool versions for the host inner loop and
-# the commit-msg hook (`mise install`). Docker is the canonical build/test env
-# (ADR-0002); Rust + cargo plugins live in .config/mise/config.toml.
-#
-# The gates that run these tools live in the `Justfile` and execute inside the
-# dev image, where the Dockerfile pins the version. What is here is the host
-# copy, for editor integration and for reaching a tool without a container —
-# so "latest" is right here and a pin is right there.
+# Native development toolchain. `rust-toolchain.toml`, Cargo.lock and
+# playground/bun.lock remain the language-specific sources of truth.
+[settings]
+lockfile = true
+
 [tools]
-just = "latest"
-lefthook = "latest"
-"github:crate-ci/typos" = "latest"
-"github:crate-ci/committed" = "latest"
-actionlint = "latest"
-zizmor = "latest"
+rust = [
+    { version = "1.96.0", profile = "minimal", components = ["clippy", "rustfmt", "rust-src", "llvm-tools-preview"], targets = ["wasm32-unknown-unknown"] },
+    { version = "nightly-2026-07-15", profile = "minimal", components = ["rust-src"] },
+]
+bun = "1.3.14"
+node = "24.16.0"
+just = "1.51.0"
+"cargo:wasm-pack" = "0.15.0"
+actionlint = "1.7.12"
+zizmor = "1.28.0"
+"github:crate-ci/typos" = "1.47.2"
+"cargo:cargo-nextest" = "0.9.136"
+"cargo:cargo-deny" = "0.19.7"
+"cargo:cargo-llvm-cov" = "0.8.7"
+"cargo:cargo-fuzz" = "0.13.2"
+"cargo:cargo-release" = "1.1.2"
+"cargo:cargo-semver-checks" = "0.48.0"
+"cargo:cargo-dist" = "0.32.0"
+"cargo:git-cliff" = "2.13.1"

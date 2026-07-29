@@ -9,8 +9,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "lint": "biome check --error-on-warnings .",
-    "lint:fix": "biome check --write .",
+    "lint": "biome check --formatter-enabled=true --linter-enabled=true --error-on-warnings .",
+    "lint:fix": "biome check --formatter-enabled=true --linter-enabled=true --write .",
     "test": "vitest run"
   },
   "dependencies": {

@@ -32,8 +32,8 @@ use aozora_flavored_markdown::{Options, canonicalize, render, sentinels};
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 
-const COMMONMARK: &str = include_str!("../../../spec/commonmark-0.31.2.json");
-const GFM: &str = include_str!("../../../spec/gfm-0.29-gfm.json");
+const COMMONMARK: &str = include_str!("../spec/commonmark-0.31.2.json");
+const GFM: &str = include_str!("../spec/gfm-0.29-gfm.json");
 
 /// Measured 2026-07-26 over all 3 972 documents (1 324 examples × 3 shapes).
 /// Every one of them is a run of two or more blank lines collapsing to one —

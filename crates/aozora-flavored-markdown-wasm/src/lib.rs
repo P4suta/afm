@@ -194,6 +194,10 @@ impl AozoraDocument {
     /// Never in practice: the fallback parses the empty string.
     #[must_use]
     #[wasm_bindgen(constructor)]
+    #[allow(
+        clippy::expect_used,
+        reason = "the fallback is an empty document, which is unconditionally within aozora's span budget"
+    )]
     pub fn new(source: String) -> Self {
         Self {
             inner: aozora::parse(source)

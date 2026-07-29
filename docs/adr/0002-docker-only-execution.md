@@ -1,6 +1,6 @@
 # 0002. Every dev operation runs inside Docker
 
-- Status: accepted
+- Status: superseded by ADR-0026
 - Date: 2026-04-23
 - Tags: infra, dev-env
 
@@ -51,4 +51,4 @@ Harder:
 ## References
 
 - [Justfile](../../Justfile)
-- [Dockerfile](../../Dockerfile)
+- ADR-0026

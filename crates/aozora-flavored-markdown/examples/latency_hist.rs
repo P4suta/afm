@@ -1,3 +1,8 @@
+#![allow(
+    clippy::print_stdout,
+    reason = "this command-line benchmark example prints its measured latency report"
+)]
+
 //! Small-document `render` latency percentiles (p50/p90/p99).
 //!
 //! criterion's `render_small_doc` group reports the *mean*'s confidence
@@ -5,10 +10,10 @@
 //! individual renders — the p50/p99 the optimization program tracks for
 //! interactive (small-document) use. Times each render with a monotonic
 //! clock, sorts, and prints integer-microsecond percentiles (no float
-//! casts, so the file stays `#[allow]`-free under strict-code).
+//! casts, so the file stays warning-free).
 //!
 //! ```text
-//! just latency   # docker compose run --rm dev cargo run --release --example latency_hist -p aozora-flavored-markdown
+//! cargo run --locked --release --example latency_hist -p aozora-flavored-markdown
 //! ```
 
 use std::hint::black_box;

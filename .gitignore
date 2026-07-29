@@ -5,9 +5,7 @@
 
 # Cargo
 Cargo.lock.bak
-# CARGO_HOME inside the dev container resolves to /workspace/.cargo, which bind-mounts
-# onto this directory. The registry/git caches underneath are docker volumes and
-# should never be tracked.
+# Keep machine-local Cargo registry and credential state out of the repository.
 /.cargo/
 
 # Editor / OS
@@ -66,7 +64,6 @@ dhat-heap.json
 # Local env overrides
 .env
 .env.local
-/docker-compose.override.yml
 
 # Ad-hoc scratch files (render outputs, debug dumps, …)
 .tmp-*

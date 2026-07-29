@@ -1,87 +1,91 @@
-# Running the fuzz targets, as opposed to compiling them.
-#
-# Compiling them is `just fuzz-build`, a `[group('gate')]` recipe that ci.yml's
-# matrix expands like any other — that is the half a PR must pass, and it is
-# there because the fuzz crate declares its own `[workspace]` (it has to:
-# libfuzzer-sys is nightly-only) and so was compiled by nothing at all.
-#
-# This workflow is the other half: actually feeding the harnesses. It is
-# deliberately NOT a required check. A fuzzer is a search, so a red run here
-# means "an input was found", which is a bug report and not a reason to block
-# an unrelated PR — and a 20-minute search is not something to put in front of
-# every merge either. The split is per event:
-#
-#   * pull_request → `just fuzz-all-quick` (60 s a target), enough to catch an
-#     invariant a change broke on the very first mutation of a committed seed.
-#   * schedule     → `just fuzz-all-deep` (5 min a target), the sweep whose
-#     comment has always called it "the gate before tagging a release" and
-#     which nothing ran until DEV-230 gave the recipes a target triple they
-#     could build for.
-#
-# Whatever libFuzzer writes into `fuzz/artifacts/` on a failure is uploaded, so
-# a crash found on a runner can be replayed locally with `just fuzz-triage`
-# instead of re-found.
 name: fuzz
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'Dockerfile'
-      - 'docker-compose*.yml'
-      - 'Justfile'
-      - '.github/workflows/fuzz.yml'
   schedule:
-    # Daily, 16:20 UTC = 01:20 Asia/Tokyo. Off the hour, and clear of both the
-    # weekly CodeQL scan (Mon 04:23) and the release-pins watch (Sun 17:00).
-    - cron: "20 16 * * *"
+    - cron: "20 16 * * 6"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz
+  cancel-in-progress: false
 
 jobs:
-  sweep:
-    name: sweep (${{ github.event_name == 'schedule' && 'deep' || 'quick' }})
+  fuzz:
+    name: fuzz
     runs-on: ubuntu-latest
-    # Every target for 5 min, plus a cold sanitizer build of the graph. Generous
-    # rather than tight: the failure this bounds is libFuzzer hanging, and each
-    # recipe already wraps its own run in `timeout`.
-    timeout-minutes: 60
-    env:
-      # Chosen here rather than inside `run:`, so the event never reaches a
-      # shell as text (zizmor's template-injection rule, and the reason every
-      # computed value in this repo's workflows arrives through the
-      # environment).
-      SWEEP: ${{ github.event_name == 'schedule' && 'fuzz-all-deep' || 'fuzz-all-quick' }}
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
+        with:
+          version: 2026.7.13
+          cache: true
+          install_args: rust just cargo:cargo-fuzz
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: scheduled-fuzz
 
-      - uses: ./.github/actions/setup-dev-image
+      - name: Build every fuzz target
+        id: build
+        continue-on-error: true
+        run: just fuzz-build
 
-      # The corpus is committed (`just fuzz-seed`), so this starts from the
-      # repo's own example documents and every CommonMark / GFM spec example
-      # rather than from a single empty byte string.
-      - name: Sweep every registered fuzz target
-        run: just "$SWEEP"
+      - name: Exercise every fuzz target
+        id: run
+        if: ${{ steps.build.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=30s 55m just fuzz-all-deep
+          status=$?
+          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            echo "state=timeout" >> "$GITHUB_OUTPUT"
+          elif find crates/aozora-flavored-markdown/fuzz/artifacts -type f -print -quit 2>/dev/null | grep -q .; then
+            echo "state=crash" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 0 ]; then
+            echo "state=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=run-failure" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
 
-      - name: Upload the crashing inputs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - name: Record termination state
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          RUN_STATE: ${{ steps.run.outputs.state }}
+        run: |
+          mkdir -p target/fuzz-status
+          if [ "$BUILD_OUTCOME" != "success" ]; then
+            state=build-failure
+          else
+            state="$RUN_STATE"
+            test -n "$state" || state=run-failure
+          fi
+          printf '%s\n' "$state" | tee target/fuzz-status/state.txt
+          {
+            printf '## Fuzz termination state\n\n'
+            printf '`%s`\n' "$state"
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$state" in
+            success) ;;
+            build-failure) echo "::error::one or more fuzz targets did not build"; exit 1 ;;
+            timeout) echo "::error::the scheduled fuzz sweep exceeded its workflow budget"; exit 1 ;;
+            crash) echo "::error::libFuzzer wrote a crash artifact"; exit 1 ;;
+            *) echo "::error::the fuzz process failed without a crash artifact"; exit 1 ;;
+          esac
+
+      - name: Upload crash corpus and state
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v4.6.2
         with:
           name: fuzz-artifacts
-          path: crates/aozora-flavored-markdown/fuzz/artifacts/
-          # A failure that wrote nothing is a build or image problem, not a
-          # finding; say so with a warning instead of failing the upload.
           if-no-files-found: warn
+          path: |
+            target/fuzz-status/
+            crates/aozora-flavored-markdown/fuzz/artifacts/

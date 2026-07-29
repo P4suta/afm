@@ -1,18 +1,3 @@
-# aozora-flavored-markdown CI. The `setup-dev-image` composite action pulls the dev image published
-# by dev-image.yml (or falls back to a local build), then `just <target>` runs
-# on the runner host — each recipe wraps cargo in `docker compose run` itself,
-# so this avoids Docker-in-Docker. Every `uses:` here is commit-pinned, and
-# `zizmor.yml` is what enforces that (not this sentence); Dependabot bumps the
-# pins weekly.
-#
-# WHAT RUNS HERE IS NOT WRITTEN HERE. `[group('gate')]` in the Justfile is the
-# only declaration of what a gate is; the `gates` job below reads it and the
-# `gate` matrix expands it, so adding a gate is one attribute on one recipe and
-# never an edit to this file. `just ci` asserts its own lanes against the same
-# `just gates` output, which is what makes "a green `just ci` means a green PR"
-# a checked property instead of a hopeful sentence — it was false for months
-# (msrv and commitlint ran only here, prop only there).
-
 name: ci
 
 on:
@@ -27,210 +12,108 @@ concurrency:
 
 permissions:
   contents: read
-  packages: read
 
 env:
-  DOCKER_BUILDKIT: "1"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
 jobs:
-  # NOTHING HERE CLASSIFIES THE DIFF, AND THAT IS THE DECISION (issue #210).
-  # A `changes` job used to run dorny/paths-filter and publish one boolean the
-  # whole compile/test/lint matrix hung off, so a diff the filter did not
-  # recognise skipped every gate in the repository. It is gone. Neither trigger
-  # above carries `paths:`, which is the same skip spelled a second way, so the
-  # matrix runs on every pull request and every push to main.
-  #
-  # Why the saving was the wrong thing to keep. Three gates read every tracked
-  # file with no pathspec at all — the prose linter, the typo scan, and the
-  # comment scan that also walks the tree for retired repo paths — and two more
-  # own whole trees: the conformance run reads `spec/`, and the packaged-asset
-  # diff reads `dist/`. A gate shaped like that has exactly one correct filter,
-  # which is no filter. By the end the filter watched almost everything
-  # anybody sends anyway, so what it still skipped was the wrong half — only
-  # the files it must not have skipped. The cost of deleting it is therefore
-  # runner time on those diffs and on no others.
-  #
-  # Which files those were is measured, not written down:
-  # `no_tracked_file_can_hide_a_diff_from_the_gate_matrix` in
-  # `crates/xtask/tests/gate_wiring.rs` reads them off the tree, and the same
-  # file is what fails when a classifier or a `paths:` trigger comes back.
-
-  # The gate manifest, read straight out of the Justfile. `[group('gate')]` is
-  # the declaration; this job is only the reader, and the matrix below is its
-  # expansion. Nothing in this file names a gate.
-  gates:
-    runs-on: ubuntu-latest
-    outputs:
-      containerized: ${{ steps.manifest.outputs.containerized }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2.85.2
-        with:
-          tool: just
-      - name: Read the gate manifest
-        id: manifest
-        run: |
-          set -euo pipefail
-          # A `native` gate answers something the dev image cannot — an
-          # independently installed rustc, the PR's own commit range — so it
-          # gets a hand-written job below instead of a matrix leg, running the
-          # same recipe. Pin the set: tagging a recipe `native` must not become
-          # a way to drop it out of CI altogether, which is the one edit this
-          # file cannot notice on its own.
-          native=$(just gates native)
-          if [[ "$native" != "$(printf 'commitlint\nmsrv')" ]]; then
-            printf '::error::group(native) is now [%s] — add or remove the matching job in ci.yml\n' \
-              "$(echo "$native" | tr '\n' ' ')"
-            exit 1
-          fi
-          containerized=$(comm -23 <(just gates) <(just gates native) \
-            | jq -Rsc 'split("\n") | map(select(length > 0))')
-          printf 'containerized=%s\n' "$containerized" >> "$GITHUB_OUTPUT"
-          printf 'gate matrix: `%s`\n' "$containerized" >> "$GITHUB_STEP_SUMMARY"
-
-  # A fast precondition, NOT a gate — which is why it carries no
-  # `[group('gate')]` and why `just ci` does not run it. `build` and `clippy`
-  # both compile `--all-targets`, so `cargo check` proves nothing they don't;
-  # what it buys is scheduling. One cheap job the whole matrix waits on means a
-  # compile error costs one runner instead of every leg.
-  check:
+  rust:
+    name: rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-dev-image
-      - run: just check
-
-  # Every gate, one job. The legs are `[group('gate')]` minus
-  # `[group('native')]`, and each runs the recipe of its own name inside the
-  # dev image. Adding a gate is an attribute on a recipe; there is nothing to
-  # add here, which is the whole point — the hand-written job list this
-  # replaced had drifted from `just ci` in both directions at once.
-  gate:
-    name: gate (${{ matrix.gate }})
-    runs-on: ubuntu-latest
-    needs: [gates, check]
-    strategy:
-      fail-fast: false
-      matrix:
-        gate: ${{ fromJSON(needs.gates.outputs.containerized) }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
         with:
-          # History and tags, not the default depth-1 tip. One leg compares
-          # this workspace's public API against the last release tag and
-          # resolves that tag out of THIS checkout, so a shallow clone fails
-          # it on a missing revision rather than on an API change — the worst
-          # shape a gate can take, since the fix looks like "the check is
-          # broken". The legs are generated from the Justfile, so the option
-          # cannot be scoped to the one that needs it; a full clone of a repo
-          # this size is a second, and every other leg simply ignores it.
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-dev-image
-      # Through the environment rather than spliced into the script: the leg
-      # name is computed by another job now, so it reaches `run:` as data.
-      - name: Run the gate
-        env:
-          GATE: ${{ matrix.gate }}
-        run: just "$GATE"
-
-  # --- native gates ---------------------------------------------------------
-  # The two `[group('native')]` recipes. Both run the SAME recipe `just ci`
-  # runs; `AOZORA_MD_IN_CONTAINER=1` is what lets them. The Justfile's `_in`
-  # switch then resolves the tool directly instead of nesting it in `docker
-  # compose run`, so each recipe uses what the job installed natively — which
-  # is the entire reason these two are not matrix legs. (ADR-0002 scope
-  # exception, for the same reason release builds are one: the claim under
-  # test is about a toolchain the dev image does not have.)
-
-  msrv:
-    name: msrv (rust 1.96.0)
-    runs-on: ubuntu-latest
-    env:
-      AOZORA_MD_IN_CONTAINER: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust 1.96.0 (MSRV)
-        # NB: dtolnay/rust-toolchain reads the toolchain off the ref when no
-        # `toolchain:` input is given, so a ref pin is a version pin there.
-        # The commit below is the tip of its `stable` branch; `toolchain:` is
-        # passed explicitly so what gets installed is stated here rather than
-        # inferred from whichever branch the commit was cut from
-        # (see .github/dependabot.yml ignore entry).
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4  # stable
-        with:
-          toolchain: 1.96.0
+          version: 2026.7.13
+          cache: true
+          install_args: >-
+            rust@1.96.0 just cargo:cargo-nextest cargo:cargo-llvm-cov
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          key: msrv
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2.85.2
-        with:
-          tool: just
-      # The recipe carries `--locked`, for the reason every recipe does and
-      # doubly here: this one resolves on a bare runner, outside the dev image,
-      # so without it a newer-than-Cargo.lock dependency could be what actually
-      # proves the MSRV.
-      - run: just msrv
+          key: ci-rust
+      - run: just ci-rust
 
-  commitlint:
+  web:
+    name: web
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    env:
-      AOZORA_MD_IN_CONTAINER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2.85.2
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
         with:
-          tool: committed,just
-      # Dependabot's auto-generated subjects/bodies exceed committed's 50/72
-      # limits, so skip the lint for bot-authored PRs (squash-merged with a
-      # maintainer subject anyway). Guard on the PR *author*, not github.actor:
-      # a human re-trigger (e.g. `gh pr update-branch`) changes the actor but
-      # not the author, so an actor guard would wrongly lint the bot's commits.
-      # The recipe's `--no-merge-commit` ignores `update-branch` merge commits.
-      # The job still runs and succeeds, keeping the required "commitlint"
-      # check green.
-      - name: Check Conventional Commits (committed)
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
-        env:
-          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
-        run: just commitlint "$RANGE"
+          version: 2026.7.13
+          cache: true
+          install_args: >-
+            rust@1.96.0 bun node just cargo:wasm-pack
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: ci-web
+      - run: just ci-web
 
-  # Aggregate gate. Branch protection requires only this job (plus the CodeQL
-  # contexts), so adding / removing / renaming a job above never needs a branch
-  # protection settings change — and now that the gates are one matrix, adding
-  # a gate does not even add a job. Fails iff a job that actually RAN failed or
-  # was cancelled; a job that did not run reports "skipped" and is fine, which
-  # since the diff classifier went is `commitlint` on a push to main and
-  # nothing else. A matrix result aggregates its legs, so `gate` covers all of
-  # them.
+  repo:
+    name: repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
+        with:
+          version: 2026.7.13
+          cache: true
+          install_args: >-
+            rust@1.96.0 just cargo:cargo-deny actionlint zizmor
+            github:crate-ci/typos
+      - run: just ci-repo
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
+        with:
+          version: 2026.7.13
+          cache: true
+          install_args: >-
+            rust@1.96.0 just cargo:cargo-dist cargo:cargo-release
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: ci-release
+      - run: just ci-release
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
+        with:
+          version: 2026.7.13
+          cache: true
+          install_args: rust just cargo:cargo-fuzz
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: ci-fuzz
+      - run: just ci-fuzz
+
   ci-success:
     name: ci-success
     if: always()
-    needs:
-      - gates
-      - check
-      - gate
-      - msrv
-      - commitlint
+    needs: [rust, web, repo, release, fuzz]
     runs-on: ubuntu-latest
     steps:
-      - name: Gate on CI job results
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - name: Require every fixed CI job
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
         run: |
-          echo "::error::a required CI job failed or was cancelled — see the job list above"
+          echo "::error::a required CI job failed, was cancelled, or was skipped"
           exit 1
-      - name: All CI jobs passed or were skipped
-        run: echo "ci-success ✔"
+      - run: echo "ci-success"

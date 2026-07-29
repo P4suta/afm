@@ -15,9 +15,8 @@ bindings to LLVM's libFuzzer. Two facts put the choice up for review
   original authors moved to Centipede. Important bugs still get fixed; new
   features do not land.
 - It is the reason for a licence exemption. `libfuzzer-sys` declares
-  `(MIT OR Apache-2.0) AND NCSA`, which required a per-package entry in
-  `.github/workflows/dependency-review.yml` (#195) and a matching row in the
-  `licences` watch in `.github/workflows/audit.yml`.
+  `(MIT OR Apache-2.0) AND NCSA`, which requires a per-package entry in
+  `.github/workflows/dependency-review.yml` (#195) and NCSA in `deny.toml`.
 
 `libafl_libfuzzer` from the LibAFL project is documented as a drop-in
 replacement for `libfuzzer-sys` under `cargo-fuzz`, and declares
@@ -26,7 +25,7 @@ switching would retire the exemption as a side effect.
 
 That sentence was wrong, and so was the premise it rested on. What follows is
 measured against `libafl_libfuzzer` 0.15.4 (published 2025-11-12, the current
-release) and against this repo's own images and recipes.
+release) and against this repo's own toolchain and recipes.
 
 ## Decision
 
@@ -64,10 +63,9 @@ so is `max_len`. Its fallthrough arm pushes an unrecognised flag onto an
 `unknown` list and carries on, so a run is handed the flag, discards it, and
 searches until something else stops it.
 
-Everything this repo runs a target with is built from `_fuzz-timed`, which ends
-in `-- -max_total_time={{SECONDS}}`: `fuzz-quick`, `fuzz-deep`,
-`fuzz-marathon`, and through them `fuzz-all-quick`, `fuzz-all-deep` and the
-`sweep` job in `.github/workflows/fuzz.yml`. Under the new engine each of those
+Every timed recipe passes `-- -max_total_time={{SECONDS}}`: `fuzz-quick`,
+`fuzz-deep`, and through them `fuzz-all-quick`, `fuzz-all-deep` and the
+scheduled run in `.github/workflows/fuzz.yml`. Under the new engine each of those
 would run past its budget into the `timeout --kill-after=10s` backstop, exit
 124, fail the recipe under `set -e`, and take the sweep red on every pull
 request — which is #224 exactly, fixed by #251 the day before this was written,
@@ -86,22 +84,17 @@ shells out to a nested `cargo build` against it. That graph is `libafl`,
 `env_logger` and their transitive closure, resolved fresh, bound by no
 lockfile that can live in this repo.
 
-DEV-293 is the work that made the fuzz workspace's resolution reviewable:
-`fuzz/Cargo.lock` is committed because `cargo fuzz` has no `--locked`,
-`just fuzz-build` fails when a build rewrote it, and
-`crates/xtask/tests/lock_binding.rs` holds it to the graph the workspace ships.
-A second resolution inside `OUT_DIR` is invisible to all three. The gate would
-keep passing and would have stopped covering the thing it was built for.
+The fuzz workspace's `Cargo.lock` is committed because `cargo fuzz` has no
+`--locked`, and both workspaces are checked directly by cargo-deny. A second
+resolution inside `OUT_DIR` would remain outside both lockfiles and both
+official-tool scans.
 
-### 4. It costs an image rebuild before it compiles once
+### 4. It needs a larger nightly installation before it compiles once
 
 The build script shells out to `llvm-nm` and `llvm-objcopy` out of the nightly
-sysroot. This repo installs that toolchain as
-`rustup toolchain install nightly --component rust-src --profile minimal`, and
-the sysroot's `bin` holds `gcc-ld`, `rust-lld`, `rust-objcopy` and
-`wasm-component-ld` — the `llvm-tools` component is absent. Adopting the engine
-starts with a Dockerfile edit and a rebuild and republish of the 4.4 GB `fuzz`
-and `ci` images. The runtime then builds at `lto = true`,
+sysroot. This repo installs a date-pinned nightly with `rust-src` through mise;
+the `llvm-tools` component is absent. Adopting the engine starts by adding that
+component to the pinned toolchain. The runtime then builds at `lto = true`,
 `codegen-units = 1`, `opt-level = 3` on top of the cold AddressSanitizer build
 #251 measured at 64 s.
 
@@ -110,18 +103,15 @@ and `ci` images. The runtime then builds at `lto = true`,
 Stated here because it is the tempting wrong reason to revisit this: the
 toolchain requirement is unaffected either way. It comes from `cargo-fuzz`
 passing `-Zsanitizer`, so the fuzz crate would still sit outside the cargo
-workspace, still be unreachable from `[lints] workspace = true`, still be
-absent from `cargo deny`'s graph, and still go uncompiled by
-`cargo check --workspace`.
+workspace, still be unreachable from `[lints] workspace = true`, and still go
+uncompiled by `cargo check --workspace`. `just deny` and `just fuzz-build`
+cover those two properties directly.
 
 ## Consequences
 
 - The two licence entries stay: `pkg:cargo/libfuzzer-sys` in
-  `dependency-review.yml` and its `(MIT OR Apache-2.0) AND NCSA` row in
-  `audit.yml`'s `licences` job. They are correct, they are watched nightly
-  against what crates.io declares, and the `Drop this entry if…` sentence beside
-  the first one now names this ADR instead of promising a swap that would leave
-  the dependency in place.
+  `dependency-review.yml` and NCSA in `deny.toml`. Cargo-deny checks the fuzz
+  workspace directly.
 - Maintenance-only mode remains the standing risk, and it is a small one here:
   five harnesses, a committed seed corpus `just fuzz-seed` regenerates from the
   playground examples and the spec sources, and a search whose findings are
@@ -164,10 +154,9 @@ else in the suite reaches over arbitrary bytes.
   ADR corrects.
 - #224 / #251 — the sweep's time budget, broken and fixed. Section 2 is the
   measurement that says a swap would undo #251.
-- DEV-293 — the committed `fuzz/Cargo.lock` and the gates over it that
-  section 3 is about.
-- ADR-0002 — every operation runs inside Docker, which is what makes section 4
-  an image rebuild rather than a local install.
+- The committed `fuzz/Cargo.lock` and the direct cargo-deny/fuzz-build checks
+  described in section 3.
+- ADR-0026 — the native mise environment used for the pinned nightly.
 - ADR-0024 — the vendoring decision the third alternative would reverse.
 - `libafl_libfuzzer` 0.15.4 on crates.io; measurements taken from the published
   `.crate` contents.

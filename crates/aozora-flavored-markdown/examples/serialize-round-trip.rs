@@ -1,3 +1,9 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "this command-line example prints serialized output and input errors"
+)]
+
 //! Parse an aozora-flavored-markdown source and confirm `canonicalize ∘ parse ≡ id` on
 //! the lexer-normalised input, demonstrated on a single file.
 //!

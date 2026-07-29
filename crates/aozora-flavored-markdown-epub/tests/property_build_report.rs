@@ -1,4 +1,9 @@
 //! The pipeline is diagnostic-preserving, for any manuscript.
+
+#![allow(
+    clippy::expect_used,
+    reason = "integration-test setup helpers stop immediately when a temporary fixture cannot be created"
+)]
 //!
 //! `build_epub.rs` states the same thing over a hand-written pool of chapters,
 //! which is enough to catch a `render_all` that drops the vector outright and

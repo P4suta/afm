@@ -1,4 +1,9 @@
 //! Native (non-wasm) smoke tests for the aozora-flavored-markdown-wasm crate.
+
+#![allow(
+    clippy::expect_used,
+    reason = "test-only serialization fixtures are constants and failures should abort the assertion path"
+)]
 //!
 //! `cargo test -p aozora-flavored-markdown-wasm` builds the crate as a regular `rlib`
 //! (the `[lib].crate-type` includes `rlib` for exactly this reason)

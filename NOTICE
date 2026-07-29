@@ -42,25 +42,24 @@ text of each of these notices.
 The conformance test fixtures under spec/ are derived from:
 
   - CommonMark Spec 0.31.2
-      spec/commonmark-0.31.2.json
+      crates/aozora-flavored-markdown/spec/commonmark-0.31.2.json
       spec/sources/commonmark-0.31.2.txt
     Copyright (c) 2014-2022 John MacFarlane.
     Licensed under Creative Commons Attribution-ShareAlike 4.0 International
     (https://creativecommons.org/licenses/by-sa/4.0/).
 
   - GitHub Flavored Markdown Spec 0.29-gfm
-      spec/gfm-0.29-gfm.json
+      crates/aozora-flavored-markdown/spec/gfm-0.29-gfm.json
       spec/sources/gfm-0.29-gfm.txt
     Copyright (c) GitHub, Inc.
     Licensed under Creative Commons Attribution-ShareAlike 4.0 International
     (https://creativecommons.org/licenses/by-sa/4.0/).
 
-These fixtures are used for test-time conformance validation only. They
-are not part of the compiled aozora-flavored-markdown binary or library distribution, but they
-are shipped in the source repository as evidence that aozora-flavored-markdown respects the
-upstream specifications. The JSON files are generated from the adjacent
-.txt sources via `just spec-refresh`; both sources and generated fixtures
-are committed verbatim.
+These fixtures are used for test-time conformance validation only. The
+generated JSON is shipped in the core source package so its library unit tests
+also run from the normalized crates.io manifest. The authoritative `.txt`
+sources remain at repository root and `just spec-refresh` regenerates the
+committed JSON.
 
 The same two .txt sources are also the origin of the fuzz seed corpus
 under crates/aozora-flavored-markdown/fuzz/corpus/*/seed-*, which `just

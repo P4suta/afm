@@ -1,3 +1,9 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "this command-line example prints rendered output and input errors"
+)]
+
 //! Render a UTF-8 aozora-flavored-markdown source file to HTML on stdout.
 //!
 //! Run it (from the workspace root, inside the dev container):
