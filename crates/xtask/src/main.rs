@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Fail if any line names a repo path that no longer exists, or if doc
+    /// Fail if any line names a repo path that no longer exists, or if
     /// comments outgrow their pinned line budget.
     CommentDiscipline,
     /// Create a new Architecture Decision Record under `docs/adr/`.
@@ -299,7 +299,7 @@ fn collect_scannable_files(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> R
 }
 
 /// Fail when a line under `root` names a repo path that no longer exists, or
-/// when doc comments have outgrown [`MAX_DOC_LINES`].
+/// when comments have outgrown [`MAX_COMMENT_LINES`].
 fn comment_discipline(root: &Path) -> Result<()> {
     if !root.is_dir() {
         bail!(
@@ -355,20 +355,20 @@ fn comment_discipline(root: &Path) -> Result<()> {
         RETIRED_REPO_PATHS.len()
     );
 
-    doc_volume_ratchet(root)
+    comment_volume_ratchet(root)
 }
 
 // ---------------------------------------------------------------------------
-// doc-comment volume ratchet
+// comment volume ratchet
 // ---------------------------------------------------------------------------
 
-/// Ceiling on doc-comment lines, pinned to today's count.
+/// Ceiling on comment lines, pinned to today's count.
 ///
 /// The gate is an absolute count and not a share of source, because a share
-/// has a denominator. Pinned to today, `doc / all` fails any commit that nets
-/// even one fewer *non-doc* line — a plain `refactor:` — and the only way out
-/// of that failure is to raise the ceiling. A ratchet that ordinary work can
-/// force upward is not a ratchet. An absolute count moves only when prose
+/// has a denominator. Pinned to today, `comments / all` fails any commit that
+/// nets even one fewer *code* line — a plain `refactor:` — and the only way
+/// out of that failure is to raise the ceiling. A ratchet that ordinary work
+/// can force upward is not a ratchet. An absolute count moves only when prose
 /// moves, which is the thing being held.
 ///
 /// **It only ever moves down.** Nothing computes or rewrites it: lowering it
@@ -378,202 +378,108 @@ fn comment_discipline(root: &Path) -> Result<()> {
 /// The failure is never "delete a comment". It is: say *why*, once, in the
 /// place a reader will meet the constraint — and stop restating what the
 /// types and the code already say.
-// Lowered by 38 when the vendored-comrak machinery left this file
-// (ADR-0024): `upstream_diff`, `upstream_sync` and `copy_dir_recursive`, plus
-// their sub-command docs, took their prose with them. Bookkeeping after a cut,
-// not a decision.
+// Every past move of this number, and the reason it moved, is in
+// `git log -S"const MAX_COMMENT_LINES" -p -- crates/xtask/src/main.rs`. Two of
+// the jumps there are the POPULATION growing, not the budget — once when the
+// walk began reading every directory `COMMENT_RATCHET_DIRECTORIES` names
+// instead of only `src`, once when it began counting plain `//` notes as well
+// as rustdoc ones — and neither bought a line of slack.
 //
-// Raised by 6 for six new public items, one line each, none of them a
-// restatement of a signature: `Span::new` / `Span::len` / `Span::is_empty`,
-// `From<Span> for Range<usize>`, `Position::new` and `Range::new`. Each line
-// says the one thing the type does not — that the pair is unordered, that
-// `len` saturates on a reversed span, that the empty span is the shape a
-// document-scoped diagnostic carries, that the `From` is for slicing the
-// source, and that the coordinates are 1-based.
-//
-// Lowered by 22 when comrak left the public surface: the `Options` escape
-// hatches and their security warnings, the two getters and the raw-HTML
-// constructors' prose all went, and the typed `with_*` builders that replaced
-// them each say their one thing in a line. Bookkeeping after a cut.
-//
-// Raised by 13 for the crate's first public error type. Nine are `Error`
-// itself: which of the two failures a caller can provoke, and — the
-// load-bearing line — that the rendering entry points deliberately do *not*
-// gain a `Result`, because CommonMark is a total grammar and a diagnostic has
-// a warning's standing. Four are `canonicalize`'s `# Errors` section, which
-// `clippy::missing_errors_doc` requires of a public `Result`, and the `?` its
-// doctest now needs. None of it restates the signature: the signature says
-// `Result<String, Error>` and stops there.
-//
-// Lowered by 4 when the `html` module was flattened into the root. Its 17
-// lines went; 13 came back, and none of them restate a signature: 10 for
-// `to_html`, which has to say what it drops and where to go instead; 3 for
-// `RenderedBlocks`, two of them the line saying why diagnostics are
-// document-scoped — moved off `render_blocks`, which is 2 shorter for it —
-// and 2 in `classes`, where `is_known` now owns the numeric-family rule and
-// has to state it. Bookkeeping after a cut, not a decision.
-//
-// Raised by 151 — the largest single raise this constant will take, and a
-// decision, not bookkeeping. `missing_docs` is now `warn` in
-// `[workspace.lints.rust]`, which `just clippy`'s `-D warnings` makes a gate,
-// and it found 145 public items carrying no doc comment at all: every
-// `ir::Block` / `ir::Inline` variant and field, `Document` / `ListItem` /
-// `TableRow` / `TableAlign`, the `Range` + `Position` leaves, `RenderedIr` /
-// `RenderedBlock` / `RenderedBlocks` and `Error::SourceTooLarge`'s `len`, the
-// whole epub `Error` tree, test-support's `Violation` / `WellFormedError`, and
-// the two wasm envelopes. 151 lines for 145 items: six needed a second line.
-//
-// None of it is restatement, because there was nothing there to restate. Each
-// line says what the type cannot: that `source_line` is `None` below top
-// level, that `range` is `None` when the parser reported the position
-// inverted, that `TableAlign::Default` is a value and not a missing marker,
-// that `Image`'s `alt` is still inlines. The alternative — paying for a
-// mandatory-prose lint by cutting explanation somewhere else — would trade
-// documentation a reader asked for against documentation a reader needed, so
-// the raise is the honest move and it is recorded here as one.
-//
-// Lowered by 2 in the same change: the test module's `SOURCE_LINES` — a
-// hand-written snapshot of the workspace size, 2 677 lines stale — became a
-// live measurement, and its doc comment went with it. Bookkeeping after a cut.
-// It is written down because it now has to be: the ceiling is asserted equal
-// to the measured count (`the_pinned_ceiling_is_the_count_it_is_pinned_to`),
-// so silent headroom is no longer somewhere prose can accumulate.
-//
-// Raised by 11 for one new public item, `diagnose`. It is the entry point the
-// `check` sub-command needed and the crate did not have: `check` documented
-// itself as parsing "without rendering" and called `render` anyway, because
-// nothing else could answer what the lexer saw. Five lines are the contract a
-// reader needs — that these are `render`'s diagnostics exactly, so the two can
-// never disagree about a source, and that what is skipped is the comrak parse,
-// the splice and the formatting. Six are the doctest, which is what holds the
-// first half of that claim. None of it restates the signature, which says
-// `Vec<Diagnostic>` and stops there. The two CLIs moved out of their `main.rs`
-// files in the same change and carry their prose with them, so the split
-// itself costs nothing here.
-//
-// Lowered by 40 when the retired-upstream-path scan left this file for Vale
-// (DEV-221). Thirty-seven are the prose that went with the machinery —
-// `RETIRED_UPSTREAM_PATHS` and its rationale, `fold_separators`,
-// `SCANNED_FILES` and `scan_comments` — and three are the two test helpers
-// that read the banned list. None of it was deleted: the same explanations
-// are in `styles/Aozora/RetiredPaths.yml` and `.vale.ini`, beside the rule
-// they now describe. Bookkeeping after a cut, not a decision.
-//
-// Re-pinned from 1 699 to 5 191 because the POPULATION grew, not the budget.
-// `collect_crate_sources` now walks every directory `DOC_RATCHET_DIRECTORIES`
-// names, where it walked only `src`. This is not a raise and buys no slack:
-// it is the same zero headroom over a set that is 3 492 doc lines larger, all
-// of which were already written and none of which any gate could see.
-//
-// The ratchet existed to stop rustdoc restatement accumulating, and its walk
-// did not contain the place it accumulated. `crates/*/tests` carried 3 424 doc
-// lines against the 1 699 governed here — twice the budget, ungoverned — and
-// `gate_wiring.rs` alone carried 1 201 of them, a single file within 500 lines
-// of the entire watched surface. So one `///` under `src/` was refused
-// outright while several hundred added to a test file cost nothing, which is
-// the gradient that built the machinery this change is cutting back.
-//
-// What it still does not measure, beyond the directories left out below:
-// plain `//` notes anywhere. That is the live hole — `gate_wiring.rs` carries
-// 1 634 plain-comment lines against its 1 201 rustdoc ones, so prose demoted
-// from `///` to `//` is free, and this comment is itself spending it.
-//
-// Lowered by 1 in the same change: `DOC_RATCHET_ROOT`'s own doc comment lost
-// the sentence carving `tests/` out, there being nothing left to carve.
-// Lowered by 34 more: the `REPOSITORY_SETTINGS` family deleted from
-// `gate_wiring.rs` took its prose with it — the first deletion this ceiling
-// has ever been able to charge for, and the reason to widen it here rather
-// than file it.
-// Lowered by 4 more: `gate_wiring.rs`'s `PUBLICATION_ADR` block lost the two
-// `///` pairs that restated a constant's own value and a function's own name.
-// Lowered by 2 more: `vale_or_the_bridge_that_installs_it` lost the half of
-// its doc that described the Dockerfile assertion deleted from its body, the
-// version pin now being compiled rather than asserted to contain a substring.
-// Re-measured, not estimated — the slack a deletion buys is spent by lowering
-// this, or it gets spent by the next `///` nobody argued for.
-const MAX_DOC_LINES: u64 = 5_185;
+// Re-measured after every cut, never estimated — the slack a deletion buys is
+// spent by lowering this, or it gets spent by the next comment nobody argued
+// for.
+const MAX_COMMENT_LINES: u64 = 10_233;
 
-/// Backstop on doc lines as a share of source, in parts per 100 000, held at
-/// the sibling `aozora` crate's own ~16.5% rather than at today's measured
-/// share. Slack is the point: it catches the one case [`MAX_DOC_LINES`]
-/// cannot — source shrinking out from under a doc budget that was
-/// proportionate at the old size — without firing on a refactor that merely
-/// deletes some code.
-const MAX_DOC_RATIO_PER_100K: u64 = 16_500;
+/// Backstop on comment lines as a share of source, in parts per 100 000. It
+/// catches the one case [`MAX_COMMENT_LINES`] cannot — source shrinking out
+/// from under a budget that was proportionate at the old size — and must not
+/// fire on a refactor that merely deletes code, so it is pinned well above
+/// today's share. Set to leave the same absolute room to shrink that the
+/// earlier rustdoc-only pin left, which
+/// `deleting_source_lines_does_not_trip_the_ratchet` measures.
+const MAX_COMMENT_RATIO_PER_100K: u64 = 33_000;
 
 /// Where the ratchet measures: every crate under this directory, read in the
-/// target directories `DOC_RATCHET_DIRECTORIES` names. Nothing carves test
+/// target directories `COMMENT_RATCHET_DIRECTORIES` names. Nothing carves test
 /// code out of the count, so the share reported below is of all source, not
 /// of production source alone.
-const DOC_RATCHET_ROOT: &str = "crates";
+// The live gap, and it is a real one: prose outside `crates/` is still free.
+// A `#` comment in a workflow or in the Justfile can restate whatever it
+// likes at no cost, which is exactly where two of this ceiling's most recent
+// reclamations were found. Closing it needs a second population with its own
+// pin — what counts as a source line in YAML is not this walk's question.
+const COMMENT_RATCHET_ROOT: &str = "crates";
 
 // Cargo's own target directories for hand-written code, less `examples/` (an
 // example is documentation by nature) and the nested `fuzz/` workspace, which
 // is not a target of any crate here. Named once because the walk and all four
-// failure messages below need the same list: spelled out separately in each,
-// they said `src/` and `tests/` for as long as the walk had already been
-// reading `benches/` too — the drift this file's own gate exists to refuse.
-const DOC_RATCHET_DIRECTORIES: [&str; 3] = ["src", "tests", "benches"];
+// failure messages below need the same list, and spelling it in each is the
+// drift this file's own gate exists to refuse.
+const COMMENT_RATCHET_DIRECTORIES: [&str; 3] = ["src", "tests", "benches"];
 
-/// A doc line is one whose first non-space token opens a rustdoc comment.
-/// Plain `//` notes are not counted — they cost a reader nothing until they
-/// go stale, which the retired-path gate above already covers.
-fn count_doc_lines(src: &str) -> (u64, u64) {
-    let mut doc = 0u64;
+/// A comment line is one whose first non-space token opens a comment, rustdoc
+/// or plain.
+// It counted only `///` and `//!` until this walk was widened, excusing plain
+// notes as harmless "until they go stale, which the retired-path gate above
+// already covers". That gate covers a name no repo path answers to any more,
+// and nothing else — least of all a comment restating a config file, which is
+// the shape prose here actually takes. So that is where prose went, half of
+// the workspace's. The gradient was worse than free: a `///` was refused
+// outright while the same sentence demoted to `//` cost nothing.
+fn count_comment_lines(src: &str) -> (u64, u64) {
+    let mut comments = 0u64;
     let mut all = 0u64;
     for line in src.lines() {
         all += 1;
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("///") || trimmed.starts_with("//!") {
-            doc += 1;
+        if line.trim_start().starts_with("//") {
+            comments += 1;
         }
     }
-    (doc, all)
+    (comments, all)
 }
 
-/// Why a measured `(doc, all)` fails, or `None` when it clears both gates.
+/// Why a measured `(comments, all)` fails, or `None` when it clears both
+/// gates.
 ///
 /// Factored out of the walk so the tests can pin the asymmetry the gates
 /// exist for: prose growing must fail, code shrinking must not. The ratio is
 /// compared by cross-multiplication, so the verdict cannot drift with float
 /// rounding.
-fn doc_budget_failure(doc: u64, all: u64) -> Option<String> {
-    if doc > MAX_DOC_LINES {
+fn comment_budget_failure(comments: u64, all: u64) -> Option<String> {
+    if comments > MAX_COMMENT_LINES {
         return Some(format!(
-            "comment-discipline: {doc} doc-comment lines under {DOC_RATCHET_ROOT}/*/{{{}}}, over \
-             the pinned ceiling of {MAX_DOC_LINES}. Cut restatements of what the code already \
-             says, keep the \"why\". Raising MAX_DOC_LINES is a deliberate hand edit, not a fix.",
-            DOC_RATCHET_DIRECTORIES.join(",")
+            "comment-discipline: {comments} comment lines under {COMMENT_RATCHET_ROOT}/*/{{{}}}, \
+             over the pinned ceiling of {MAX_COMMENT_LINES}. Cut restatements of what the code \
+             already says, keep the \"why\". Demoting a `///` to a `//` is not a cut — both are \
+             counted here. Raising MAX_COMMENT_LINES is a deliberate hand edit, not a fix.",
+            COMMENT_RATCHET_DIRECTORIES.join(",")
         ));
     }
-    if doc * 100_000 > all * MAX_DOC_RATIO_PER_100K {
-        let measured = doc * 100_000 / all;
+    if comments * 100_000 > all * MAX_COMMENT_RATIO_PER_100K {
+        let measured = comments * 100_000 / all;
         return Some(format!(
-            "comment-discipline: doc comments are {}.{:03}% of source ({doc}/{all}), over the \
+            "comment-discipline: comments are {}.{:03}% of source ({comments}/{all}), over the \
              {}.{:03}% backstop. The source shrank far enough that the surviving prose is now out \
              of proportion to it; cut prose to match.",
             measured / 1000,
             measured % 1000,
-            MAX_DOC_RATIO_PER_100K / 1000,
-            MAX_DOC_RATIO_PER_100K % 1000,
+            MAX_COMMENT_RATIO_PER_100K / 1000,
+            MAX_COMMENT_RATIO_PER_100K % 1000,
         ));
     }
     None
 }
 
-/// Every `.rs` file a crate keeps in a `DOC_RATCHET_DIRECTORIES` directory.
+/// Every `.rs` file a crate keeps in a `COMMENT_RATCHET_DIRECTORIES` directory.
 fn collect_crate_sources(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let crates = root.join(DOC_RATCHET_ROOT);
+    let crates = root.join(COMMENT_RATCHET_ROOT);
     let entries = fs::read_dir(&crates).with_context(|| format!("reading {}", crates.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading an entry of {}", crates.display()))?;
-        // A budget that stopped at `src/` was one the prose walked around: the
-        // integration tests carried twice the rustdoc the ceiling governed, so
-        // a `///` cost nothing there and was refused outright one directory
-        // over. Walking Cargo's whole set rather than the two directories that
-        // happen to be heavy today is what keeps `benches/` from being the
-        // next place it accumulates.
-        for directory in DOC_RATCHET_DIRECTORIES {
+        // Cargo's whole set, not the two directories that happen to be heavy
+        // today: a budget that stops anywhere is one the prose walks around,
+        // which is the same lesson `count_comment_lines` above records.
+        for directory in COMMENT_RATCHET_DIRECTORIES {
             let measured = entry.path().join(directory);
             if measured.is_dir() {
                 collect_rust_sources(&measured, out)?;
@@ -598,45 +504,45 @@ fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Fail when doc comments have outgrown [`MAX_DOC_LINES`], or the source has
-/// shrunk far enough past them to breach [`MAX_DOC_RATIO_PER_100K`].
-fn doc_volume_ratchet(root: &Path) -> Result<()> {
+/// Fail when comments have outgrown [`MAX_COMMENT_LINES`], or the source has
+/// shrunk far enough past them to breach [`MAX_COMMENT_RATIO_PER_100K`].
+fn comment_volume_ratchet(root: &Path) -> Result<()> {
     let mut files = Vec::new();
     collect_crate_sources(root, &mut files)?;
 
-    let mut doc = 0u64;
+    let mut comments = 0u64;
     let mut all = 0u64;
     let mut worst: Vec<(u64, u64, PathBuf)> = Vec::new();
     for path in files {
         let src =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let (file_doc, file_all) = count_doc_lines(&src);
-        doc += file_doc;
+        let (file_comments, file_all) = count_comment_lines(&src);
+        comments += file_comments;
         all += file_all;
-        worst.push((file_doc, file_all, path));
+        worst.push((file_comments, file_all, path));
     }
 
     if all == 0 {
-        bail!("comment-discipline: no crate source found under {DOC_RATCHET_ROOT}/");
+        bail!("comment-discipline: no crate source found under {COMMENT_RATCHET_ROOT}/");
     }
 
-    if let Some(reason) = doc_budget_failure(doc, all) {
-        worst.sort_by_key(|&(file_doc, _, _)| cmp::Reverse(file_doc));
-        println!("comment-discipline: heaviest files (doc lines / total):");
-        for (file_doc, file_all, path) in worst.iter().take(5) {
-            println!("  {file_doc:>5} / {file_all:<5}  {}", path.display());
+    if let Some(reason) = comment_budget_failure(comments, all) {
+        worst.sort_by_key(|&(file_comments, _, _)| cmp::Reverse(file_comments));
+        println!("comment-discipline: heaviest files (comment lines / total):");
+        for (file_comments, file_all, path) in worst.iter().take(5) {
+            println!("  {file_comments:>5} / {file_all:<5}  {}", path.display());
         }
         bail!(reason);
     }
 
-    let measured = doc * 100_000 / all;
+    let measured = comments * 100_000 / all;
     println!(
-        "comment-discipline: {doc}/{MAX_DOC_LINES} doc lines, {}.{:03}% of {all} source lines \
-         (backstop {}.{:03}%)",
+        "comment-discipline: {comments}/{MAX_COMMENT_LINES} comment lines, {}.{:03}% of {all} \
+         source lines (backstop {}.{:03}%)",
         measured / 1000,
         measured % 1000,
-        MAX_DOC_RATIO_PER_100K / 1000,
-        MAX_DOC_RATIO_PER_100K % 1000,
+        MAX_COMMENT_RATIO_PER_100K / 1000,
+        MAX_COMMENT_RATIO_PER_100K % 1000,
     );
     Ok(())
 }
@@ -1004,91 +910,86 @@ mod tests {
         workspace_member_names,
     };
     use super::{
-        DOC_RATCHET_DIRECTORIES, DOC_RATCHET_ROOT, MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path,
-        PathBuf, RETIRED_PATH_LIST_FILE, RETIRED_REPO_PATHS, aozora_pin_pattern,
-        collect_crate_sources, count_doc_lines, doc_budget_failure, fs, is_semver_triple,
-        scan_repo_paths,
+        COMMENT_RATCHET_DIRECTORIES, COMMENT_RATCHET_ROOT, MAX_COMMENT_LINES,
+        MAX_COMMENT_RATIO_PER_100K, Path, PathBuf, RETIRED_PATH_LIST_FILE, RETIRED_REPO_PATHS,
+        aozora_pin_pattern, collect_crate_sources, comment_budget_failure, count_comment_lines, fs,
+        is_semver_triple, scan_repo_paths,
     };
 
-    // The `(doc, all)` the gate itself would measure — the same walk over the
-    // same files, run here instead of read off a constant.
+    // The `(comments, all)` the gate itself would measure — the same walk over
+    // the same files, run here instead of read off a constant.
     //
-    // It was a constant, `SOURCE_LINES`, whose own doc comment licensed it to
-    // drift ("only its distance from the backstop's floor matters"). By the
-    // time this was written it stood at 10 398 against a real 13 075: a number
-    // nothing recomputed, standing in for the workspace in every assertion
-    // below. The licence holds only while the distance stays positive, and it
-    // is a `u64` subtraction — so past a high enough ceiling a stale snapshot
-    // does not report a thin margin, it panics inside the test that exists to
-    // show the gate has slack. Measuring costs one directory walk and cannot
-    // go stale at all.
+    // It was a hand-written snapshot, and a snapshot licensed to drift is a
+    // `u64` subtraction away from panicking inside the very test that exists
+    // to show the gate has slack. Measuring costs one directory walk.
     fn measured_source() -> (u64, u64) {
         let mut files = Vec::new();
         collect_crate_sources(&repo_root(), &mut files).expect("walking the crate source trees");
-        let mut doc = 0;
+        let mut comments = 0;
         let mut all = 0;
         for path in &files {
             let src = fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-            let (file_doc, file_all) = count_doc_lines(&src);
-            doc += file_doc;
+            let (file_comments, file_all) = count_comment_lines(&src);
+            comments += file_comments;
             all += file_all;
         }
         assert!(
             all > 1_000,
-            "only {all} source line(s) found under {DOC_RATCHET_ROOT}/*/{{{}}}; the walk is \
+            "only {all} source line(s) found under {COMMENT_RATCHET_ROOT}/*/{{{}}}; the walk is \
              reading nothing",
-            DOC_RATCHET_DIRECTORIES.join(",")
+            COMMENT_RATCHET_DIRECTORIES.join(",")
         );
-        (doc, all)
+        (comments, all)
     }
 
+    // The one shape the ceiling cannot see for itself: a count that fell
+    // because the reader stopped recognising a marker looks exactly like one
+    // that fell because prose was deleted, and the ceiling is lowered to match
+    // either way. The demoted `//` is the marker that matters — it is where
+    // the prose went for as long as only `///` was counted.
     #[test]
-    fn doc_line_count_sees_both_rustdoc_markers_and_ignores_plain_notes() {
-        let (doc, all) =
-            count_doc_lines("//! module\n/// item\n    /// indented\n// plain note\nfn f() {}\n\n");
-        assert_eq!((doc, all), (3, 6));
+    fn the_count_sees_every_comment_marker_including_the_demoted_one() {
+        let (comments, all) = count_comment_lines(
+            "//! module\n/// item\n    /// indented\n// plain note\n    // indented note\n\
+             fn f() {} // trailing\n\n",
+        );
+        assert_eq!(
+            (comments, all),
+            (5, 7),
+            "a marker the walk stopped recognising is prose that stopped costing anything"
+        );
     }
 
-    // The ceiling is the count, not a budget the count sits under.
-    //
-    // The gate fails on `doc > MAX_DOC_LINES`, so every doc line deleted
-    // without the matching edit here leaves headroom — and headroom is prose
-    // that can be added later without the hand edit that is this constant's
-    // entire reason to exist. It is not hypothetical: the ceiling stood at
-    // 1 580 against a measured 1 579, so one `///` line could have gone in
-    // free, and nothing in the repo could have said so. `just
-    // comment-discipline` cannot: a count under its ceiling is exactly what it
-    // is built to pass.
-    //
-    // Failing here reads as "do the bookkeeping the constant's own doc comment
-    // describes": below, lower it and say what was cut; above, this is the
-    // deliberate raise, so raise it and say what grew.
+    // The ceiling is the count, not a budget the count sits under. The gate
+    // fails on `comments > MAX_COMMENT_LINES`, so a line deleted without the
+    // matching edit here leaves headroom, and `just comment-discipline` cannot
+    // say so: a count under its ceiling is what it is built to pass.
     #[test]
     fn the_pinned_ceiling_is_the_count_it_is_pinned_to() {
-        let (doc, _) = measured_source();
+        let (comments, _) = measured_source();
         assert_eq!(
-            doc,
-            MAX_DOC_LINES,
-            "MAX_DOC_LINES is {MAX_DOC_LINES} and {DOC_RATCHET_ROOT}/*/{{{}}} carries {doc} doc \
-             line(s). The ceiling is pinned to today's count — a gap either way is a hand edit \
-             that was not made.",
-            DOC_RATCHET_DIRECTORIES.join(",")
+            comments,
+            MAX_COMMENT_LINES,
+            "MAX_COMMENT_LINES is {MAX_COMMENT_LINES} and {COMMENT_RATCHET_ROOT}/*/{{{}}} carries \
+             {comments} comment line(s). The ceiling is pinned to today's count — a gap either \
+             way is a hand edit that was not made.",
+            COMMENT_RATCHET_DIRECTORIES.join(",")
         );
     }
 
-    /// The ratchet's whole point: one doc line more than the pinned count
+    /// The ratchet's whole point: one comment line more than the pinned count
     /// fails, however the surrounding source moved.
     #[test]
-    fn one_extra_doc_line_breaks_the_pinned_ceiling() {
+    fn one_extra_comment_line_breaks_the_pinned_ceiling() {
         let (_, all) = measured_source();
         assert!(
-            doc_budget_failure(MAX_DOC_LINES + 1, all + 1).is_some(),
-            "a doc line added along with its file must not fit"
+            comment_budget_failure(MAX_COMMENT_LINES + 1, all + 1).is_some(),
+            "a comment added along with its file must not fit"
         );
         assert!(
-            doc_budget_failure(MAX_DOC_LINES + 1, all).is_some(),
-            "a plain note promoted to a doc comment must not fit either"
+            comment_budget_failure(MAX_COMMENT_LINES + 1, all).is_some(),
+            "a line of code rewritten as a comment must not fit either"
         );
     }
 
@@ -1099,23 +1000,25 @@ mod tests {
     /// force upward.
     #[test]
     fn deleting_source_lines_does_not_trip_the_ratchet() {
-        // How far the source may shrink at the pinned doc count before the
-        // backstop fires. A ratio pinned to today's measurement left none.
+        // How far the source may shrink at the pinned comment count before the
+        // backstop fires. A ratio pinned to today's measurement left none, and
+        // widening the population is not allowed to spend what is left: this
+        // is where MAX_COMMENT_RATIO_PER_100K's pin is checked to have kept it.
         let (_, all) = measured_source();
-        let floor = MAX_DOC_LINES * 100_000 / MAX_DOC_RATIO_PER_100K;
+        let floor = MAX_COMMENT_LINES * 100_000 / MAX_COMMENT_RATIO_PER_100K;
         let slack = all.saturating_sub(floor);
         assert!(
             slack >= 500,
-            "only {slack} non-doc line(s) of slack: {all} source lines against a backstop floor \
-             of {floor} at a ceiling of {MAX_DOC_LINES}. Raising the ceiling raises that floor, \
+            "only {slack} code line(s) of slack: {all} source lines against a backstop floor \
+             of {floor} at a ceiling of {MAX_COMMENT_LINES}. Raising the ceiling raises that floor, \
              so the backstop is now close enough to fire on a plain deletion."
         );
 
-        assert!(doc_budget_failure(MAX_DOC_LINES, all).is_none());
+        assert!(comment_budget_failure(MAX_COMMENT_LINES, all).is_none());
         for shrunk_by in [1, 100, 500] {
             assert!(
-                doc_budget_failure(MAX_DOC_LINES, all - shrunk_by).is_none(),
-                "removing {shrunk_by} non-doc line(s) must not fail a doc-comment gate"
+                comment_budget_failure(MAX_COMMENT_LINES, all - shrunk_by).is_none(),
+                "removing {shrunk_by} code line(s) must not fail a comment-volume gate"
             );
         }
     }
@@ -1123,17 +1026,17 @@ mod tests {
     /// Deleting prose always passes, so the gate never blocks the fix it asks
     /// for.
     #[test]
-    fn removing_a_doc_line_stays_within_budget() {
+    fn removing_a_comment_line_stays_within_budget() {
         let (_, all) = measured_source();
-        assert!(doc_budget_failure(MAX_DOC_LINES - 1, all).is_none());
-        assert!(doc_budget_failure(0, 1).is_none());
+        assert!(comment_budget_failure(MAX_COMMENT_LINES - 1, all).is_none());
+        assert!(comment_budget_failure(0, 1).is_none());
     }
 
     /// What the backstop is for: source shrinking far enough that the prose
     /// that survived is out of proportion to it.
     #[test]
     fn the_ratio_backstop_catches_source_collapsing_under_the_prose() {
-        assert!(doc_budget_failure(MAX_DOC_LINES, 1_000).is_some());
+        assert!(comment_budget_failure(MAX_COMMENT_LINES, 1_000).is_some());
     }
 
     #[test]

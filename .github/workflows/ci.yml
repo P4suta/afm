@@ -47,27 +47,15 @@ jobs:
   # comment scan that also walks the tree for retired repo paths — and two more
   # own whole trees: the conformance run reads `spec/`, and the packaged-asset
   # diff reads `dist/`. A gate shaped like that has exactly one correct filter,
-  # which is no filter.
+  # which is no filter. By the end the filter watched almost everything
+  # anybody sends anyway, so what it still skipped was the wrong half — only
+  # the files it must not have skipped. The cost of deleting it is therefore
+  # runner time on those diffs and on no others.
   #
-  # And by the end the filter was not buying what it was written to buy. It
-  # already watched `crates/**`, `.github/**`, `Justfile`, the manifests, the
-  # playground, and every `.md`, which between them cover every diff anybody
-  # sends. What it still skipped was 27 tracked files and nothing else
-  # (#210 says 26; the set is measured now, and it was 27 on the day it was
-  # written):
-  # `spec/**`, `dist/**`, the per-gate configuration at the root,
-  # `lefthook.yml`, `.config/**`, `bin/**`, `.devcontainer/**`, `.editorconfig`,
-  # `.gitattributes`, `.gitignore`, the two licences and `NOTICE` — each one a
-  # file some gate reads. So the behaviour left in it was the wrong half: it
-  # skipped only where it must not. The sharpest was `.gitattributes`, since
-  # the repo-path scan exists BECAUSE a retired path once survived in that
-  # file, and a change to it skipped the matrix that runs the scan.
-  #
-  # The cost, therefore, is runner time on the diffs that were being skipped
-  # wrongly and on no others: everything else already ran the full matrix. The
-  # direction is held in `crates/xtask/tests/gate_wiring.rs` — reintroducing a
-  # classifier, or a `paths:` on a trigger, fails a test rather than passing
-  # quietly.
+  # Which files those were is measured, not written down:
+  # `no_tracked_file_can_hide_a_diff_from_the_gate_matrix` in
+  # `crates/xtask/tests/gate_wiring.rs` reads them off the tree, and the same
+  # file is what fails when a classifier or a `paths:` trigger comes back.
 
   # The gate manifest, read straight out of the Justfile. `[group('gate')]` is
   # the declaration; this job is only the reader, and the matrix below is its
