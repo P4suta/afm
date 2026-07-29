@@ -3,13 +3,15 @@ set -euo pipefail
 
 requested=${1-}
 metadata=$(cargo metadata --locked --no-deps --format-version 1)
+publishable_file=$(mktemp)
+trap 'rm -f "$publishable_file"' EXIT
+jq -r '.packages[] | select(.publish != []) | .name' \
+  <<<"$metadata" >"$publishable_file"
 
 declare -A publishable=()
 while IFS= read -r name; do
   publishable["$name"]=1
-done < <(
-  jq -r '.packages[] | select(.publish != []) | .name' <<<"$metadata"
-)
+done <"$publishable_file"
 
 declare -A seen=()
 IFS=',' read -ra entries <<<"$requested"

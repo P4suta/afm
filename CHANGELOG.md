@@ -171,10 +171,16 @@ the browser globals `Document` and `Range`.
   author-supplied U+0001–U+0003 are tracked out of band instead of borrowing
   control characters as placeholders.
 - **Release gates validate the artifacts, not configuration text.** Cargo
-  metadata validates retry exclusions, every cargo-dist phase is bracketed by
-  `cargo metadata --locked` plus a byte-for-byte `Cargo.lock` guard, release
-  write permission is scoped to the host job, and ShellCheck 0.11.0 is pinned
-  in mise. Dependabot cooldown is 30/7/3 days for major/minor/patch updates.
+  metadata drives the same retry exclusions in package dry-runs and live
+  publishes. Package smoke suppresses only Cargo's exact test/benchmark
+  package-exclusion warnings and preserves every other stderr line and failure
+  status. Every cargo-dist phase is bracketed by `cargo metadata --locked` plus
+  a byte-for-byte `Cargo.lock` guard, and its release workflow is deliberately
+  hand-maintained; the real plan rejects reintroduced dynamic container or
+  package-install matrix fields. Release write permission is scoped to the host
+  job, and ShellCheck 0.11.0 is pinned in mise. Dependabot version-update
+  cooldown is 30/7/3 days for major/minor/patch updates, with a seven-day
+  fallback; security updates are not subject to cooldown.
 - **Native, locked mise is the supported development and CI environment.**
   The repository now has one `mise.toml` plus `mise.lock`, with Rust, Bun,
   Node and every directly invoked tool fixed. CI has five static jobs that
@@ -283,9 +289,11 @@ the browser globals `Document` and `Range`.
   code info strings are masked, nested/orphan closing directives are consumed
   once, and block source-line coordinates stay anchored to the caller's text.
 - **EPUB validation rejects packages that cannot be conforming.** Explicitly
-  empty spines, rooted/parent/symlink escapes and XML 1.0-forbidden characters
-  fail with phase-specific diagnostic codes. TAB/LF/CR in XML attributes are
-  emitted as numeric character references.
+  empty spines fail as `NoSources` while an omitted spine still discovers
+  chapters; rooted/parent/symlink escapes and XML 1.0-forbidden characters fail
+  with path-, field- and phase-specific diagnostics. XML character validation
+  precedes metadata semantics. TAB/LF/CR in metadata and chapter-name XML are
+  emitted as numeric character references and read back losslessly.
 - **An unclaimed `［＃…］` run could publish a PUA sentinel.** A bracket run
   no notation claimed is hidden behind the directive wrapper and read as the
   author's own bytes — but a run may still *contain* a notation, as

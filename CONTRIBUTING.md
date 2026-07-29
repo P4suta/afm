@@ -89,7 +89,21 @@ git push --follow-tags
 `publish-crates.yml` publishes the four public crates in workspace dependency
 order. A live publish is protected by the `release` environment and uses a
 short-lived crates.io OIDC credential. Its preflight checks the changelog,
-package tarballs and public semver baseline. Cargo-dist builds the tagged CLI
+package tarballs and public semver baseline. To resume a partial upload, pass
+the comma-separated names already published as the workflow's `skip_crates`
+input. The preflight applies that exact selection to `just package-smoke`, so a
+retry cannot validate a different crate set from the live command. Locally the
+same contract can be checked with, for example:
+
+```sh
+just package-smoke "aozora-flavored-markdown"
+```
+
+`.github/workflows/release.yml` is hand-maintained around cargo-dist because
+the generated workflow does not reproduce this repository's locked mise
+environment. `just dist-plan` still executes the real cargo-dist plan, rejects
+unsupported dynamic `container` / `packages_install` matrix fields, and
+requires pull requests to remain plan-only. Cargo-dist builds tagged CLI
 binaries on native platform runners.
 
 The release commit and tag remain explicit, signed developer actions.

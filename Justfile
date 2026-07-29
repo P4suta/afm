@@ -175,7 +175,7 @@ actionlint:
 
 [group('repo')]
 zizmor:
-    zizmor --offline --no-progress .
+    zizmor --offline --no-progress --no-ignores .
 
 # --- Fuzzing -----------------------------------------------------------------
 
@@ -322,7 +322,7 @@ dist-assets-check:
 
 [group('release')]
 dist-plan:
-    dist plan --output-format=json
+    scripts/dist-plan-check.sh
 
 [group('release')]
 changelog-check:
@@ -342,19 +342,8 @@ semver:
         --baseline-rev v0.4.1
 
 [group('release')]
-package-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    id=$(cargo pkgid --locked --package aozora-flavored-markdown)
-    version=${id##*[#@]}
-    cargo publish --workspace --dry-run --locked
-    crate="target/package/tmp-crate/aozora-flavored-markdown-${version}.crate"
-    test -f "$crate"
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
-    tar -xf "$crate" -C "$tmp"
-    cd "$tmp/aozora-flavored-markdown-${version}"
-    cargo test --lib --all-features --locked
+package-smoke SKIP_CRATES="":
+    scripts/package-smoke.sh {{quote(SKIP_CRATES)}}
 
 [group('release')]
 release-smoke:

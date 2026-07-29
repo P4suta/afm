@@ -47,16 +47,21 @@ shell function that probed crates.io per version over `curl`, slept and retried
 on HTTP 429, and walked a two-name `for` loop — all of which restated what
 cargo already does, and all of which took its version from the first `version`
 in the root `Cargo.toml`, a single workspace version that the 0.1.x EPUB line
-makes wrong. The `release.yml` cargo-dist pipeline (binaries) is untouched and
-runs off the same `v<semver>` tag; the crates.io upload stays separate and
-manually triggered, because it is the one operation nobody can take back.
+makes wrong. The hand-maintained `release.yml` cargo-dist pipeline (binaries)
+remains separate and runs off the same `v<semver>` tag; the crates.io upload
+stays manually triggered, because it is the one operation nobody can take back.
 
 **Packaging is a per-PR gate (amended).** `just package-smoke` runs
 `cargo publish --workspace --dry-run --locked`, then extracts the core
 `.crate` and runs its all-feature library unit tests from Cargo's normalized
 manifest. Generated CommonMark/GFM JSON fixtures live under the core crate so
 those tests exercise exactly the files a consumer receives. The
-`publish-crates.yml` preflight calls the same recipe.
+`publish-crates.yml` preflight calls the same recipe. On a partial-publish
+retry, its `skip_crates` input is passed to both that dry run and the live
+command through `scripts/publish-excludes.sh`; both log the selected package
+set. Cargo's exact warnings for intentionally excluded test and benchmark
+targets are filtered, while near matches, unrelated stderr and Cargo's exit
+status remain observable.
 
 **Semver policy (pre-1.0).** Under `0.y.z`, the **minor** position is the
 breaking-change axis (cargo treats `0.y`→`0.(y+1)` as breaking). Breaking =
@@ -87,11 +92,11 @@ that is not bound to a lockfile, and there is no in-repo substitute (#215).
   `aozora-flavored-markdown` could be dry-run before anything was on the
   registry and that its CLI could only be verified live afterwards. That was a
   property of publishing one crate per command, not of cargo.
-- Resumability is cargo's now, and it is weaker. The deleted loop skipped a
-  version already on crates.io, so a re-dispatch continued a partial publish;
-  cargo instead errors on the first member already there. Accepted because the
-  loop bought that resumability with a version read that the second version
-  line makes wrong. `publish-crates.yml` carries the manual recovery.
+- Resumability is explicit. Cargo errors on the first member already present
+  after a partial upload, so a re-dispatch lists those package names in
+  `skip_crates`. Cargo metadata validates the names, and the preflight dry-run
+  uses the same exclusion flags as the live publish. This preserves recovery
+  without reviving the deleted loop's incorrect single-version assumption.
 - The EPUB pair is not on crates.io, so neither crate can be given a Trusted
   Publishing configuration yet — crates.io has nothing to attach one to until
   the crate exists. One `cargo publish --workspace` carries one token, which

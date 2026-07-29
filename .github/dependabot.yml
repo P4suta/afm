@@ -8,7 +8,10 @@ updates:
       time: "02:00"
       timezone: "Asia/Tokyo"
     open-pull-requests-limit: 20
+    # Cooldown applies only to version updates. Security updates are driven by
+    # alerts and are intentionally not delayed by this configuration.
     cooldown:
+      default-days: 7
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
@@ -23,15 +26,14 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # Keep the same 30/7/3 SemVer policy in both ecosystems; default-days is
+    # the fallback for updates for which Dependabot cannot classify the bump.
+    # Dependabot cooldown does not apply to security updates.
     cooldown:
+      default-days: 7
       semver-major-days: 30
       semver-minor-days: 7
       semver-patch-days: 3
-    # release.yml is hand-maintained around cargo-dist. Keep its immutable
-    # action refs paired with dist-workspace.toml instead of accepting an
-    # automated edit to only one copy.
-    exclude-paths:
-      - ".github/workflows/release.yml"
     # Keep SHA pins fresh; human-readable tag comments are updated automatically.
     groups:
       actions-sha-bumps:

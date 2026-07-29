@@ -1,0 +1,5 @@
+warning: ignoring test `ir_coverage` as `tests/ir_coverage.rs` is not included in the published package.
+warning: ignoring example `render` as `benches/render.rs` is not included in the published package
+    Updating crates.io index
+warning: aborting upload due to dry run
+ordinary cargo stderr
