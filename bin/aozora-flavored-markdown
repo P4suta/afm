@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# aozora-flavored-markdown CLI — thin Docker wrapper.
-# This is the only supported way to run the aozora-flavored-markdown binary during development.
-# Never invoke `cargo run -p aozora-flavored-markdown-cli` on the host.
+# aozora-flavored-markdown CLI — native development wrapper.
 
 set -euo pipefail
 
@@ -10,5 +8,4 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
-exec docker compose run --rm --no-TTY dev \
-    cargo run --quiet --package aozora-flavored-markdown-cli -- "$@"
+exec cargo run --locked --quiet --package aozora-flavored-markdown-cli -- "$@"

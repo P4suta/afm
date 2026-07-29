@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xtask — project automation. `bin/xtask --help` lists the sub-commands; the
 # clap `enum Command` in crates/xtask/src/main.rs is where they are declared.
-# Always runs inside the dev container.
+# Uses the repository's native mise/Rust environment.
 
 set -euo pipefail
 
@@ -10,5 +10,4 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
-exec docker compose run --rm dev \
-    cargo run --quiet --package xtask -- "$@"
+exec cargo run --locked --quiet --package xtask -- "$@"

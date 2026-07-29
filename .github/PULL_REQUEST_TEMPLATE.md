@@ -13,12 +13,11 @@
 
 ## Checklist
 
-- [ ] `just ci` passes locally (lint + build + test + spec-* + coverage
-      + playground-build).
+- [ ] `mise install --locked` and `just ci` pass locally.
 - [ ] Added or updated tests that exercise the change.
 - [ ] Updated `CHANGELOG.md` under `[Unreleased]` (or stated why it
       doesn't need a changelog entry).
-- [ ] Commit messages follow Conventional Commits (lefthook enforces).
+- [ ] Commit messages follow Conventional Commits.
 - [ ] If this adds a new 青空文庫 notation: filed it in the sibling
       [`P4suta/aozora`](https://github.com/P4suta/aozora) repo first
       (ADR-0010); aozora-md-side follow-up is usually a one-line mapping in
