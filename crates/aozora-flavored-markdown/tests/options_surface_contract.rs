@@ -371,11 +371,14 @@ fn the_default_dialect_is_the_one_every_knob_row_assumes() {
 }
 
 #[test]
-fn commonmark_is_the_dialect_the_spec_runners_measure_against() {
-    // `Options::commonmark()` is the crate's own claim to be a CommonMark
-    // superset, so every extension — the four GFM ones, the notation pass and
-    // the CJK emphasis relaxation, all of which are *not* CommonMark — must
-    // be off in it, and `gfm()` must differ from it in exactly the four.
+fn commonmark_and_gfm_presets_differ_by_exactly_four_extensions() {
+    // This test owns the public preset relationship. The conformance module's
+    // `spec_runners_directly_wrap_the_named_public_presets` separately reads
+    // the runner constructors themselves; do not imply that inspecting these
+    // option values alone proves which configuration a runner actually used.
+    //
+    // Every non-CommonMark extension must be off in `commonmark()`, and
+    // `gfm()` must differ from it in exactly the four GFM extensions.
     for knob in KNOBS {
         let html = render(knob.probe, &Options::commonmark()).html;
         assert!(

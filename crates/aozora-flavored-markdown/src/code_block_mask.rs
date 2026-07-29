@@ -1,512 +1,415 @@
 //! Hides 青空文庫 trigger characters inside CommonMark fenced code blocks.
 //!
-//! The sibling parser rewrites every candidate trigger into a sentinel
-//! before comrak sees the source — right for prose, wrong inside a fence
-//! where every byte must reach `<pre><code>` literally. The parser is
-//! CommonMark-blind by design (ADR-0010), so teaching it about code-block
-//! context lives here: mask each trigger inside a fence with [`MASK_CHAR`],
-//! record the original in source order, restore once the mask is back out —
-//! `comrak::format_html` never disturbs it. One character for one, for the
-//! reason `crate::verbatim_regions` states about the other half.
+//! The sibling parser is CommonMark-blind and rewrites every candidate
+//! trigger into an internal sentinel. A fenced code block is literal
+//! CommonMark, so this module asks the same comrak configuration as the
+//! render pass which byte ranges are fenced, masks triggers only inside
+//! those ranges, and snapshots the fields comrak normalised from the
+//! original source.
 //!
-//! **Indented code blocks (CommonMark §4.4) are deliberately not masked**:
-//! their boundaries depend on paragraph context. A notation inside one
-//! becomes a sentinel that `crate::ast_splice` writes back as it does for an
-//! inline code span, so both spellings read the same.
+//! Restoration is structural rather than textual: after source positions
+//! have been rebound to the caller's source, a final fenced `CodeBlock`
+//! receives the snapshot with the exact same byte range. There is no shared
+//! cursor, so a missing or reshaped block cannot consume the values of a
+//! later one. An unmatched block is fail-closed: an introduced mask becomes
+//! U+FFFD rather than reaching HTML or IR as a private-use codepoint.
 //!
-//! **A source that already contains [`MASK_CHAR`] skips masking entirely**,
-//! returning a borrowed `Cow` and no originals: `crate::sentinels` says why
-//! that one of the five reaches the output as the author's own byte.
+//! **Indented code blocks are deliberately not masked.** Their boundaries
+//! depend on paragraph context. A notation inside one becomes a construct
+//! sentinel that the existing literal-context recovery in the AST and IR
+//! walkers writes back as source.
+//!
+//! **A source that already contains [`MASK_CHAR`] still stands that
+//! codepoint down.** No additional U+E000 is introduced. Fenced triggers are
+//! hidden with same-width U+FFFD instead, then a matching snapshot restores
+//! the author's fields. The author's U+E000 therefore comes back as written
+//! without letting fenced constructs shift the shared construct cursor.
 
-use core::cmp::min;
+use core::ops::Range;
 use std::borrow::Cow;
 
+use comrak::nodes::{AstNode, NodeValue};
+
+use crate::constructs::is_sentinel_char;
+use crate::verbatim_regions;
+
 /// Distinct from the four construct sentinels (U+E001..U+E004), so masking
-/// cannot collide with them.
+/// cannot collide with them on a source that does not already contain it.
 pub(crate) const MASK_CHAR: char = '\u{E000}';
 
-/// Mirrors the sibling tokeniser; if the upstream list grows, so must this.
-const AOZORA_TRIGGERS: &[char] = &['｜', '《', '》', '［', '］', '※', '〔', '〕', '「', '」'];
+const REPLACEMENT_CHAR: char = '\u{FFFD}';
 
-/// Returns the replaced characters in source order, for [`unmask`]. Borrows
-/// without allocating when the source has no fence at all.
+/// Mirrors the sibling tokeniser; if its trigger list grows, so must this.
+const AOZORA_TRIGGERS: &[char] = &[
+    '｜', '《', '》', '≪', '≫', '［', '］', '＃', '※', '〔', '〕', '「', '」',
+];
+
+#[derive(Debug, Default)]
+pub(crate) struct FencedCodeBlocks {
+    snapshots: Vec<FencedCodeBlock>,
+    /// True only when this call introduced at least one [`MASK_CHAR`].
+    introduced_masks: bool,
+}
+
+#[derive(Debug)]
+struct FencedCodeBlock {
+    range: Range<usize>,
+    info: String,
+    literal: String,
+}
+
+/// Parse `source` with the render's actual comrak options, snapshot every
+/// fenced block, and mask 青空文庫 triggers only inside those exact ranges.
+///
+/// Every trigger, [`MASK_CHAR`] and U+FFFD is three UTF-8 bytes, so
+/// substitution preserves the byte ranges and source positions used by the
+/// later parse.
 #[must_use]
-pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>) {
-    if source.contains(MASK_CHAR) || !source.contains(['`', '~']) {
-        return (Cow::Borrowed(source), Vec::new());
+pub(crate) fn mask_code_block_triggers<'a>(
+    source: &'a str,
+    options: &comrak::Options<'_>,
+) -> (Cow<'a, str>, FencedCodeBlocks) {
+    if !source.contains(['`', '~']) {
+        return (Cow::Borrowed(source), FencedCodeBlocks::default());
+    }
+
+    let snapshots = snapshots(source, options);
+    if snapshots.is_empty() {
+        return (
+            Cow::Borrowed(source),
+            FencedCodeBlocks {
+                snapshots,
+                introduced_masks: false,
+            },
+        );
     }
 
     let mut out = String::with_capacity(source.len());
-    let mut originals: Vec<char> = Vec::new();
-    let mut phase = Phase::Outside;
-    let mut masked_anything = false;
-
-    for line in source.split_inclusive('\n') {
-        match phase {
-            Phase::Outside => {
-                if let Some(fence) = parse_fence_open(line) {
-                    // The info string is as literal as the body: comrak
-                    // carries its first word into `class="language-…"`.
-                    // Mask it on the opening line before the sibling lexer
-                    // can replace notation there with an inline sentinel.
-                    out.push_str(&line[..fence.info_start]);
-                    mask_triggers(
-                        &line[fence.info_start..],
-                        &mut out,
-                        &mut originals,
-                        &mut masked_anything,
-                    );
-                    phase = Phase::InFence(fence);
-                } else {
-                    out.push_str(line);
-                }
-            }
-            Phase::InFence(open) => {
-                if is_fence_close(line, open) {
-                    out.push_str(line);
-                    phase = Phase::Outside;
-                } else {
-                    mask_triggers(line, &mut out, &mut originals, &mut masked_anything);
-                }
-            }
-        }
-    }
-
-    if masked_anything {
-        (Cow::Owned(out), originals)
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let replacement = if source.contains(MASK_CHAR) {
+        REPLACEMENT_CHAR
     } else {
-        (Cow::Borrowed(source), Vec::new())
+        MASK_CHAR
+    };
+    for snapshot in &snapshots {
+        out.push_str(&source[cursor..snapshot.range.start]);
+        changed |= mask_triggers(&source[snapshot.range.clone()], &mut out, replacement);
+        cursor = snapshot.range.end;
+    }
+    out.push_str(&source[cursor..]);
+    let introduced_masks = changed && replacement == MASK_CHAR;
+
+    if changed {
+        (
+            Cow::Owned(out),
+            FencedCodeBlocks {
+                snapshots,
+                introduced_masks,
+            },
+        )
+    } else {
+        (
+            Cow::Borrowed(source),
+            FencedCodeBlocks {
+                snapshots,
+                introduced_masks,
+            },
+        )
     }
 }
 
-fn mask_triggers(
-    text: &str,
-    out: &mut String,
-    originals: &mut Vec<char>,
-    masked_anything: &mut bool,
-) {
+fn snapshots(source: &str, options: &comrak::Options<'_>) -> Vec<FencedCodeBlock> {
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, source, options);
+    let line_starts = verbatim_regions::line_starts(source);
+    let mut snapshots: Vec<FencedCodeBlock> = root
+        .descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            let NodeValue::CodeBlock(code) = &data.value else {
+                return None;
+            };
+            if !code.fenced {
+                return None;
+            }
+            Some(FencedCodeBlock {
+                range: verbatim_regions::byte_range(source, &line_starts, data.sourcepos)?,
+                // comrak has already trimmed/unescaped the info string and
+                // normalised the literal's line endings. Preserve that
+                // compiler-owned representation, except for author-written
+                // construct sentinels whose public contract is U+FFFD.
+                info: neutralize_construct_sentinels(&code.info),
+                literal: neutralize_construct_sentinels(&code.literal),
+            })
+        })
+        .collect();
+    snapshots.sort_unstable_by_key(|snapshot| snapshot.range.start);
+    snapshots
+}
+
+fn neutralize_construct_sentinels(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if is_sentinel_char(ch) {
+                REPLACEMENT_CHAR
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn mask_triggers(text: &str, out: &mut String, replacement: char) -> bool {
+    let mut changed = false;
     for ch in text.chars() {
         if AOZORA_TRIGGERS.contains(&ch) {
-            originals.push(ch);
-            out.push(MASK_CHAR);
-            *masked_anything = true;
+            out.push(replacement);
+            changed = true;
         } else {
             out.push(ch);
         }
     }
+    changed
 }
 
-#[must_use]
-pub(crate) fn unmask<'a>(text: &'a str, originals: &[char]) -> Cow<'a, str> {
-    let mut cursor = originals;
-    unmask_from(text, &mut cursor)
-}
-
-/// Restores in source-scan order — the order the masks appear in `text` —
-/// advancing `originals` past what it consumed, so a caller formatting one
-/// block at a time resumes instead of replaying. Extra masks flow through.
-#[must_use]
-pub(crate) fn unmask_from<'a>(text: &'a str, originals: &mut &[char]) -> Cow<'a, str> {
-    if originals.is_empty() || !text.contains(MASK_CHAR) {
-        return Cow::Borrowed(text);
+/// Restore fenced fields by exact source range.
+///
+/// `root` must already have had its source positions rebound to `source`.
+/// Exact lookup makes restoration independent of traversal depth and output
+/// shape. In particular, an IR walker that truncates an over-deep container
+/// cannot shift a later code block's values.
+pub(crate) fn restore_ast<'a>(root: &'a AstNode<'a>, source: &str, fenced: &FencedCodeBlocks) {
+    if fenced.snapshots.is_empty() {
+        return;
     }
-    let mut out = String::with_capacity(text.len());
-    let mut idx = 0;
-    for ch in text.chars() {
-        if ch == MASK_CHAR && idx < originals.len() {
-            out.push(originals[idx]);
-            idx += 1;
-        } else {
-            out.push(ch);
+    let line_starts = verbatim_regions::line_starts(source);
+    for node in root.descendants() {
+        let mut data = node.data.borrow_mut();
+        let sourcepos = data.sourcepos;
+        let NodeValue::CodeBlock(code) = &mut data.value else {
+            continue;
+        };
+        if !code.fenced {
+            continue;
         }
+        let snapshot = verbatim_regions::byte_range(source, &line_starts, sourcepos)
+            .and_then(|range| find_snapshot(&fenced.snapshots, &range));
+        if let Some(snapshot) = snapshot {
+            code.info.clone_from(&snapshot.info);
+            code.literal.clone_from(&snapshot.literal);
+            continue;
+        }
+
+        // Do not borrow a different snapshot merely because it is next in
+        // document order. Author-written construct sentinels are always
+        // reserved; U+E000 is replaced only when this call introduced it,
+        // so the raw-U+E000 stand-down contract remains intact.
+        code.info = neutralize_unmatched_fence(&code.info, fenced.introduced_masks);
+        code.literal = neutralize_unmatched_fence(&code.literal, fenced.introduced_masks);
     }
-    *originals = &originals[idx..];
-    Cow::Owned(out)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Phase {
-    Outside,
-    InFence(FenceOpen),
+fn find_snapshot<'a>(
+    snapshots: &'a [FencedCodeBlock],
+    range: &Range<usize>,
+) -> Option<&'a FencedCodeBlock> {
+    snapshots
+        .binary_search_by(|snapshot| {
+            snapshot
+                .range
+                .start
+                .cmp(&range.start)
+                .then(snapshot.range.end.cmp(&range.end))
+        })
+        .ok()
+        .map(|idx| &snapshots[idx])
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FenceOpen {
-    /// Backtick or tilde, as chosen on the open line.
-    marker: u8,
-    width: usize,
-    /// Byte just past the opening run; everything after it is the info
-    /// string and is masked like the fence body.
-    info_start: usize,
-}
-
-/// CommonMark allows up to 3 leading spaces before the fence run.
-fn parse_fence_open(line: &str) -> Option<FenceOpen> {
-    let stripped = trim_leading_indent(line, 3);
-    let indent = line.len() - stripped.len();
-    let bytes = stripped.as_bytes();
-    let &first = bytes.first()?;
-    if first != b'`' && first != b'~' {
-        return None;
-    }
-    let width = bytes.iter().take_while(|&&b| b == first).count();
-    (width >= 3).then_some(FenceOpen {
-        marker: first,
-        width,
-        info_start: indent + width,
-    })
-}
-
-/// Same marker as `open`, at least as wide, and nothing but whitespace after.
-fn is_fence_close(line: &str, open: FenceOpen) -> bool {
-    let stripped = trim_leading_indent(line, 3);
-    let bytes = stripped.as_bytes();
-    let run = bytes.iter().take_while(|&&b| b == open.marker).count();
-    if run < open.width {
-        return false;
-    }
-    bytes[run..]
-        .iter()
-        .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-}
-
-/// Tabs are deliberately not expanded. CommonMark counts them in the indent
-/// budget, but this is a pre-pass rather than a conformance check, so a
-/// tab-led line simply fails fence detection — a strict subset, enough here.
-fn trim_leading_indent(line: &str, max: usize) -> &str {
-    let bytes = line.as_bytes();
-    let cap = min(bytes.len(), max);
-    let consumed = bytes.iter().take(cap).take_while(|&&b| b == b' ').count();
-    &line[consumed..]
+fn neutralize_unmatched_fence(text: &str, introduced_masks: bool) -> String {
+    text.chars()
+        .map(|ch| {
+            if is_sentinel_char(ch) || (introduced_masks && ch == MASK_CHAR) {
+                REPLACEMENT_CHAR
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comrak::nodes::Sourcepos;
 
-    fn mask_owned(src: &str) -> (String, Vec<char>) {
-        let (cow, originals) = mask_code_block_triggers(src);
-        (cow.into_owned(), originals)
+    fn options() -> comrak::Options<'static> {
+        crate::Options::default().comrak()
+    }
+
+    fn mask_owned(src: &str) -> (String, FencedCodeBlocks) {
+        let (masked, fenced) = mask_code_block_triggers(src, &options());
+        (masked.into_owned(), fenced)
+    }
+
+    fn code_fields<'a>(root: &'a AstNode<'a>) -> Vec<(String, String)> {
+        root.descendants()
+            .filter_map(|node| {
+                let data = node.data.borrow();
+                match &data.value {
+                    NodeValue::CodeBlock(code) if code.fenced => {
+                        Some((code.info.clone(), code.literal.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     #[test]
-    fn no_code_block_no_mask() {
-        let (cow, originals) = mask_code_block_triggers("｜青梅《おうめ》");
-        // No fence open chars in source: borrowed fast path.
-        assert!(matches!(cow, Cow::Borrowed(_)));
-        assert_eq!(cow.as_ref(), "｜青梅《おうめ》");
-        assert!(originals.is_empty());
+    fn no_fence_is_a_borrowed_fast_path() {
+        let src = "｜青梅《おうめ》";
+        let (masked, fenced) = mask_code_block_triggers(src, &options());
+        assert!(matches!(masked, Cow::Borrowed(_)));
+        assert!(fenced.snapshots.is_empty());
     }
 
     #[test]
-    fn fenced_code_triggers_get_masked() {
-        let src = "before\n```\n｜青梅《おうめ》\n```\nafter";
-        let (out, originals) = mask_owned(src);
-        assert!(!out.contains('｜'), "trigger leaked: {out:?}");
-        assert!(!out.contains('《'), "trigger leaked: {out:?}");
-        assert!(!out.contains('》'), "trigger leaked: {out:?}");
-        // before / after stay untouched
-        assert!(out.starts_with("before\n```\n"));
-        assert!(out.ends_with("\n```\nafter"));
-        assert_eq!(originals, vec!['｜', '《', '》']);
+    fn compiler_ranges_mask_container_fences_and_restore_their_fields() {
+        for src in [
+            "> ```漢字《かんじ》\n> ｜body《literal》\n> ```\n",
+            "- item\n\n  ~~~漢字《かんじ》 extra《ignored》\n  ｜body《literal》\n  ~~~\n",
+        ] {
+            let (masked, fenced) = mask_owned(src);
+            assert_eq!(masked.len(), src.len());
+            assert!(
+                !masked.contains(['｜', '《', '》']),
+                "a fenced trigger reached the lexer: {masked:?}"
+            );
+            let arena = comrak::Arena::new();
+            let opts = options();
+            let root = comrak::parse_document(&arena, &masked, &opts);
+            restore_ast(root, src, &fenced);
+            let fields = code_fields(root);
+            assert_eq!(fields.len(), 1, "{src:?}");
+            assert!(fields[0].0.contains("漢字《かんじ》"));
+            assert!(fields[0].1.contains("｜body《literal》"));
+        }
     }
 
     #[test]
-    fn tilde_fence_works_too() {
-        let src = "~~~\n［＃改ページ］\n~~~";
-        let (out, originals) = mask_owned(src);
-        assert!(!out.contains('［'));
-        assert_eq!(originals, vec!['［', '］']);
-    }
-
-    #[test]
-    fn backtick_fence_info_string_is_masked() {
-        let src = "```漢字《かんじ》\nx\n```\n";
-        let (out, originals) = mask_owned(src);
-        assert_eq!(originals, vec!['《', '》']);
-        assert_eq!(unmask(&out, &originals), src);
+    fn every_parser_trigger_is_hidden_and_structurally_restored() {
+        let triggers: String = AOZORA_TRIGGERS.iter().collect();
+        let src = format!("```{triggers}\n{triggers}\n```\n");
+        let (masked, fenced) = mask_owned(&src);
+        assert_eq!(masked.len(), src.len());
         assert!(
-            !out[..out.find('\n').unwrap_or(out.len())].contains(['《', '》']),
-            "an info-string trigger reached the lexer: {out:?}"
+            AOZORA_TRIGGERS
+                .iter()
+                .all(|trigger| !masked.contains(*trigger)),
+            "a parser trigger reached the lexer: {masked:?}"
+        );
+
+        let arena = comrak::Arena::new();
+        let opts = options();
+        let root = comrak::parse_document(&arena, &masked, &opts);
+        restore_ast(root, &src, &fenced);
+        assert_eq!(
+            code_fields(root),
+            vec![(triggers.clone(), format!("{triggers}\n"))]
         );
     }
 
     #[test]
-    fn tilde_fence_info_string_is_masked() {
-        let src = "  ~~~｜漢字《かんじ》\nx\n  ~~~\n";
-        let (out, originals) = mask_owned(src);
-        assert_eq!(originals, vec!['｜', '《', '》']);
-        assert_eq!(unmask(&out, &originals), src);
-    }
-
-    #[test]
-    fn close_fence_must_match_marker() {
-        // Opened with ``` but closed with ~~~ → still inside the
-        // fence; everything to EOF stays masked.
-        let src = "```\n｜inside\n~~~\n｜still\n";
-        let (_, originals) = mask_owned(src);
-        assert_eq!(originals, vec!['｜', '｜']);
-    }
-
-    #[test]
-    fn close_fence_must_be_at_least_as_wide() {
-        // Opened with ````, closed with only ``` → not closed.
-        let src = "````\n｜inside\n```\n｜still\n";
-        let (_, originals) = mask_owned(src);
-        assert_eq!(originals, vec!['｜', '｜']);
-    }
-
-    #[test]
-    fn outside_text_is_left_alone() {
-        let src = "｜prose《outside》\n```\n｜inside\n```\n｜after《tail》";
-        let (out, originals) = mask_owned(src);
-        assert!(out.contains("｜prose《outside》"), "out: {out}");
-        assert!(out.contains("｜after《tail》"), "out: {out}");
-        assert_eq!(originals, vec!['｜']);
-    }
-
-    #[test]
-    fn pre_existing_mask_char_disables_masking() {
-        // If the source already contains MASK_CHAR, we cannot
-        // distinguish a masked trigger from a literal PUA char on the
-        // unmask side, so we bail out and leave the sibling parser's
-        // own PUA-collision diagnostic in charge.
-        let src = "\u{E000}\n```\n｜trigger\n```";
-        let (cow, originals) = mask_code_block_triggers(src);
-        assert!(matches!(cow, Cow::Borrowed(_)));
-        assert_eq!(cow.as_ref(), src);
-        assert!(originals.is_empty());
-    }
-
-    #[test]
-    fn unmask_round_trips_fenced_triggers() {
-        let src = "```\n｜青梅《おうめ》\n```";
-        let (masked, originals) = mask_owned(src);
-        // Pretend comrak emitted the masked content verbatim inside a
-        // <pre><code> block (which is exactly what it does).
-        let pseudo_html = format!(
-            "<pre><code>{}\n</code></pre>\n",
-            &masked[4..masked.len() - 4]
+    fn multiple_and_unclosed_fences_restore_by_range() {
+        let src = "```\n｜first\n```\n\n~~~lang《x》\n［second］\n";
+        let (masked, fenced) = mask_owned(src);
+        let arena = comrak::Arena::new();
+        let opts = options();
+        let root = comrak::parse_document(&arena, &masked, &opts);
+        restore_ast(root, src, &fenced);
+        assert_eq!(
+            code_fields(root),
+            vec![
+                (String::new(), "｜first\n".to_owned()),
+                ("lang《x》".to_owned(), "［second］\n".to_owned()),
+            ]
         );
-        let restored = unmask(&pseudo_html, &originals);
-        assert!(restored.contains('｜'), "got: {restored}");
-        assert!(restored.contains('《'));
-        assert!(restored.contains('》'));
     }
 
     #[test]
-    fn unmask_with_empty_originals_is_a_noop() {
-        assert_eq!(unmask("hello", &[]).as_ref(), "hello");
-    }
-
-    #[test]
-    fn unmask_handles_more_mask_chars_than_originals_gracefully() {
-        // Edge case: comrak somehow emitted more mask chars than we
-        // recorded. The extras flow through verbatim — benign.
-        let originals = vec!['｜'];
-        let masked = format!("{MASK_CHAR}{MASK_CHAR}");
-        let restored = unmask(&masked, &originals);
-        assert_eq!(restored.chars().filter(|&c| c == '｜').count(), 1);
-        assert_eq!(restored.chars().filter(|&c| c == MASK_CHAR).count(), 1);
-    }
-
-    #[test]
-    fn indent_up_to_three_spaces_does_not_break_fence_detection() {
-        let src = "   ```\n｜inside\n   ```\nafter";
-        let (_, originals) = mask_owned(src);
-        assert_eq!(originals, vec!['｜']);
-    }
-
-    #[test]
-    fn indent_of_four_spaces_disables_the_fence() {
-        // Four leading spaces: the line is not a fence open per
-        // CommonMark (it would be an indented code block instead, but
-        // we don't mask indented code blocks). The trigger remains.
-        let src = "    ```\n｜prose\n    ```";
-        let (out, originals) = mask_owned(src);
-        assert!(out.contains('｜'), "out: {out}");
-        assert!(originals.is_empty());
-    }
-
-    #[test]
-    fn crlf_line_endings_are_preserved_through_the_fence() {
-        // Carriage-return + line-feed should not derail fence-open or
-        // close detection. The split_inclusive('\n') loop hands each
-        // line with its trailing `\r\n` intact; trim_leading_indent
-        // operates on leading bytes only, and is_fence_close treats
-        // `\r` as trailing whitespace.
-        let src = "```\r\n｜inside\r\n```\r\nafter";
-        let (out, originals) = mask_owned(src);
-        assert!(!out.contains('｜'), "trigger leaked: {out:?}");
-        assert_eq!(originals, vec!['｜']);
-        assert!(out.contains("\r\nafter"));
-    }
-}
-
-#[cfg(test)]
-mod proptests {
-    //! The unit tests above pin hand-curated shapes; these close the gap
-    //! with arbitrary Aozora-shaped and CommonMark-adversarial input.
-
-    use super::*;
-    use proptest::prelude::*;
-    use proptest::test_runner::FileFailurePersistence;
-    use std::env;
-
-    const AOZORA_ATOMS: &[&str] = &[
-        "｜",
-        "《",
-        "》",
-        "［＃",
-        "］",
-        "※",
-        "［＃２字下げ］",
-        "［＃地から３字上げ］",
-        "改ページ",
-        "改丁",
-        "漢字",
-        "かんじ",
-        "ABC",
-        "1234",
-        "\n",
-        "\n\n",
-        "\r\n",
-        "\r\n\r\n",
-        "、",
-        "。",
-        " ",
-        "------------",
-        "===================================",
-    ];
-
-    const COMMONMARK_ATOMS: &[&str] = &[
-        "# heading\n\n- item\n  > quote in list\n    1. nested",
-        "> outer\n> > inner\n> > > deepest\n",
-        "- loose\n\n- items\n\n- here\n",
-        "\\*escaped\\* and \\[not a link\\]\n",
-        "```rust\nlet x = 1;\n```\n",
-        "~~~\n｜青梅《おうめ》\n［＃改ページ］\n~~~\n",
-        "| h1 | h2 |\n| -- | -- |\n| a  | b  |\n",
-        "[link](url) and ![img](src)\n",
-        "***\n\nthematic\n\n***\n",
-        "`｜青梅《おうめ》` in code, ｜青梅《おうめ》 outside\n",
-        "[｜青梅《おうめ》](https://example.com/#［＃)\n",
-    ];
-
-    fn joined_atoms(pool: &[&str], max_atoms: usize) -> impl Strategy<Value = String> {
-        let owned: Vec<String> = pool.iter().map(|atom| (*atom).to_owned()).collect();
-        prop::collection::vec(prop::sample::select(owned), 0..=max_atoms)
-            .prop_map(|pieces| pieces.concat())
-    }
-
-    fn aozora_fragment(max_atoms: usize) -> impl Strategy<Value = String> {
-        joined_atoms(AOZORA_ATOMS, max_atoms)
-    }
-
-    fn commonmark_adversarial() -> impl Strategy<Value = String> {
-        let owned: Vec<String> = COMMONMARK_ATOMS
-            .iter()
-            .map(|atom| (*atom).to_owned())
-            .collect();
-        prop::sample::select(owned)
-    }
-
-    fn property_config() -> ProptestConfig {
-        let cases = env::var("AOZORA_PROPTEST_CASES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|cases| *cases > 0)
-            .unwrap_or(128);
-        ProptestConfig {
-            cases,
-            max_shrink_iters: 10_000,
-            failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
-                "proptest-regressions",
-            ))),
-            ..ProptestConfig::default()
-        }
-    }
-
-    /// Aozora fragments mixed with CommonMark-adversarial constructs.
-    fn aozora_or_commonmark() -> impl Strategy<Value = String> {
-        prop_oneof![aozora_fragment(40), commonmark_adversarial()]
-    }
-
-    /// Mirrors the fence-state machine in [`mask_code_block_triggers`], so
-    /// the count covers exactly the characters masking leaves alone.
-    fn outside_fences(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut phase = Phase::Outside;
-        for line in s.split_inclusive('\n') {
-            match phase {
-                Phase::Outside => {
-                    out.push_str(line);
-                    if let Some(fence) = parse_fence_open(line) {
-                        phase = Phase::InFence(fence);
-                    }
-                }
-                Phase::InFence(open) => {
-                    if is_fence_close(line, open) {
-                        phase = Phase::Outside;
-                    }
-                    // body of a fenced code block is dropped here on
-                    // purpose — we only want the prose context.
-                }
-            }
-        }
-        out
-    }
-
-    fn count_triggers(s: &str) -> usize {
-        s.chars().filter(|c| AOZORA_TRIGGERS.contains(c)).count()
-    }
-
-    proptest! {
-        #![proptest_config(property_config())]
-
-        /// Sources without `` ` `` or `~` round-trip untouched.
-        #[test]
-        fn no_fence_input_is_borrowed_with_no_originals(s in aozora_fragment(40)) {
-            let scrubbed: String = s.chars().filter(|c| *c != '`' && *c != '~').collect();
-            let (masked, originals) = mask_code_block_triggers(&scrubbed);
-            prop_assert!(matches!(masked, Cow::Borrowed(_)));
-            prop_assert!(originals.is_empty());
-            prop_assert_eq!(&*masked, &scrubbed);
-        }
-
-        /// A source already carrying [`MASK_CHAR`] short-circuits, so the
-        /// parser's `SourceContainsPua` diagnostic stays meaningful.
-        #[test]
-        fn pre_existing_mask_char_short_circuits(s in aozora_fragment(40)) {
-            let mut with_mask = String::with_capacity(s.len() + 1);
-            with_mask.push(MASK_CHAR);
-            with_mask.push_str(&s);
-            let (masked, originals) = mask_code_block_triggers(&with_mask);
-            prop_assert!(matches!(masked, Cow::Borrowed(_)));
-            prop_assert!(originals.is_empty());
-            prop_assert_eq!(&*masked, &with_mask);
-        }
-
-        /// The round-trip the whole pass exists to provide.
-        #[test]
-        fn mask_then_unmask_is_identity(src in aozora_or_commonmark()) {
-            let (masked, originals) = mask_code_block_triggers(&src);
-            let restored = unmask(&masked, &originals);
-            prop_assert_eq!(&*restored, &src);
-        }
-
-        /// Only the fence interior is substituted, so the masked output
-        /// keeps at least as many triggers as the exterior projection has.
-        #[test]
-        fn outside_fence_triggers_are_preserved(src in aozora_or_commonmark()) {
-            let outside_count = count_triggers(&outside_fences(&src));
-            let (masked, _) = mask_code_block_triggers(&src);
-            let masked_count = count_triggers(&masked);
-            prop_assert!(
-                masked_count >= outside_count,
-                "outside-fence triggers were not preserved: outside={outside_count} masked={masked_count}\n\
-                 source: {src:?}\nmasked: {masked:?}"
+    fn every_commonmark_line_ending_is_restored_from_the_original_snapshot() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let src = format!("```lang《x》{ending}｜body{ending}```{ending}");
+            let (masked, fenced) = mask_owned(&src);
+            let arena = comrak::Arena::new();
+            let opts = options();
+            let root = comrak::parse_document(&arena, &masked, &opts);
+            restore_ast(root, &src, &fenced);
+            assert_eq!(
+                code_fields(root),
+                vec![("lang《x》".to_owned(), format!("｜body{ending}"))],
+                "{ending:?}"
             );
         }
+    }
+
+    #[test]
+    fn raw_construct_sentinels_and_info_entities_are_neutralized() {
+        for sentinel in ['\u{E001}', '\u{E002}', '\u{E003}', '\u{E004}'] {
+            let src = format!("```lang&#x{:X};\nraw{sentinel}\n```\n", sentinel as u32);
+            let (masked, fenced) = mask_owned(&src);
+            let arena = comrak::Arena::new();
+            let opts = options();
+            let root = comrak::parse_document(&arena, &masked, &opts);
+            restore_ast(root, &src, &fenced);
+            let fields = code_fields(root);
+            assert_eq!(fields, vec![("lang�".to_owned(), "raw�\n".to_owned())]);
+        }
+    }
+
+    #[test]
+    fn pre_existing_mask_uses_replacement_mask_and_comes_back_as_written() {
+        let src = "\u{E000}\n```\n｜trigger\u{E000}\n```\n";
+        let (masked, fenced) = mask_code_block_triggers(src, &options());
+        assert!(matches!(masked, Cow::Owned(_)));
+        assert!(masked.contains("�trigger\u{E000}"));
+        assert!(!fenced.introduced_masks);
+        let arena = comrak::Arena::new();
+        let opts = options();
+        let root = comrak::parse_document(&arena, &masked, &opts);
+        restore_ast(root, src, &fenced);
+        assert_eq!(
+            code_fields(root),
+            vec![(String::new(), "｜trigger\u{E000}\n".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_mismatch_fails_closed_without_consuming_the_later_snapshot() {
+        let src = "```\n｜first\n```\n\n```\n［second］\n```\n";
+        let (masked, fenced) = mask_owned(src);
+        let arena = comrak::Arena::new();
+        let opts = options();
+        let root = comrak::parse_document(&arena, &masked, &opts);
+        let first = root
+            .descendants()
+            .find(|node| {
+                matches!(
+                    &node.data.borrow().value,
+                    NodeValue::CodeBlock(code) if code.fenced
+                )
+            })
+            .expect("first fenced block");
+        first.data.borrow_mut().sourcepos = Sourcepos::from((99, 1, 99, 1));
+
+        restore_ast(root, src, &fenced);
+        assert_eq!(
+            code_fields(root),
+            vec![
+                (String::new(), "�first\n".to_owned()),
+                (String::new(), "［second］\n".to_owned()),
+            ]
+        );
     }
 }

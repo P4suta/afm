@@ -46,7 +46,7 @@ use core::mem;
 
 use aozora::NodeKind;
 use comrak::nodes::{
-    AstNode, ListType, NodeHeading, NodeList, NodeValue, Sourcepos, TableAlignment,
+    AstNode, ListType, NodeCodeBlock, NodeHeading, NodeList, NodeValue, Sourcepos, TableAlignment,
 };
 
 use crate::constructs::{
@@ -364,17 +364,7 @@ impl<'t> IrWalker<'t> {
                     range,
                 })
             }
-            NodeValue::CodeBlock(code) => {
-                let lang = (!code.info.is_empty()).then(|| code.info.clone());
-                let literal = code.literal.clone();
-                drop(data);
-                Some(Block::Code {
-                    lang,
-                    value: self.code_block_value(literal),
-                    source_line,
-                    range,
-                })
-            }
+            NodeValue::CodeBlock(code) => Some(self.project_code_block(code, source_line, range)),
             NodeValue::ThematicBreak => {
                 drop(data);
                 Some(Block::ThematicBreak { source_line, range })
@@ -397,6 +387,29 @@ impl<'t> IrWalker<'t> {
             // list, footnote refs, etc.) drop from the IR — the HTML
             // still has them.
             _ => None,
+        }
+    }
+
+    fn project_code_block(
+        &mut self,
+        code: &NodeCodeBlock,
+        source_line: Option<u32>,
+        range: Option<SourceRange>,
+    ) -> Block {
+        let lang = (!code.info.is_empty()).then(|| code.info.clone());
+        let literal = code.literal.clone();
+        Block::Code {
+            lang,
+            // Fenced fields were restored from their range-keyed snapshots
+            // before this walk. Indented blocks keep the existing
+            // construct-sentinel recovery.
+            value: if code.fenced {
+                literal
+            } else {
+                self.code_block_value(literal)
+            },
+            source_line,
+            range,
         }
     }
 
@@ -488,8 +501,7 @@ impl<'t> IrWalker<'t> {
         out
     }
 
-    /// Only an *indented* block reaches this — a fenced one is masked
-    /// before the lexer runs (ADR-0010).
+    /// Restores construct sentinels in an indented code body.
     fn code_block_value(&mut self, literal: String) -> String {
         if literal.chars().any(is_sentinel_char) {
             return self.rewrite_literal_context(&literal);

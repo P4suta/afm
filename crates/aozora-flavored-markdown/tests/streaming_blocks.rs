@@ -113,14 +113,14 @@ fn heading_blocks_carry_their_kind_in_ir() {
 }
 
 // ---------------------------------------------------------------------------
-// fenced code blocks — the mask is restored per block, not per document
+// fenced code blocks — masks are restored in each AST/IR code field
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fenced_aozora_triggers_are_restored_in_per_block_html() {
     // Triggers inside a fence are masked with `sentinels::MASK` before the
-    // lexer runs (ADR-0010). The document path restores them on its way out;
-    // this path has to do the same or the reader gets the PUA glyph.
+    // lexer runs (ADR-0010), then restored in the parsed code fields before
+    // formatting. The streaming path must do the same for HTML and IR.
     let src = "```\n｜青梅《おうめ》\n```\n";
     let (blocks, _) = render_blocks_checked(src, &Options::default());
     assert_eq!(blocks.len(), 1);

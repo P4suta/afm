@@ -21,9 +21,11 @@ use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 /// source it reads.
 fn render_checked(src: &str) -> String {
     let html = to_html(src);
-    if let Err(e) = check_no_sentinel_leak(src, &html) {
-        panic!("sentinel leaked: {e:?}\n  html = {html:?}");
-    }
+    let checked = check_no_sentinel_leak(src, &html);
+    assert!(
+        checked.is_ok(),
+        "sentinel leaked: {checked:?}\n  html = {html:?}"
+    );
     html
 }
 
@@ -203,10 +205,9 @@ fn notation_in_link_url_does_not_desync_link_text() {
 #[test]
 fn ruby_inside_an_indented_code_block_renders_literally() {
     // A code block is literal markdown for the same reason a code span is.
-    // A fenced block never reaches the splice carrying a sentinel — the
-    // mask hides the triggers inside a fence before the lexer runs
-    // (ADR-0010) — but an indented block is context that mask deliberately
-    // does not reproduce, and comrak reads one out of any four-space line.
+    // Compiler-derived ranges hide fenced triggers before the lexer runs
+    // (ADR-0010), while an indented block is context that mask deliberately
+    // does not reproduce and comrak reads one out of any four-space line.
     let html = render_checked("本文\n\n    ｜青梅《おうめ》\n");
     assert!(
         html.contains("<pre><code>｜青梅《おうめ》\n</code></pre>"),
@@ -216,8 +217,8 @@ fn ruby_inside_an_indented_code_block_renders_literally() {
 
 #[test]
 fn a_code_block_reads_the_same_fenced_or_indented() {
-    // Two spellings of the same block, one masked and one spliced. They
-    // reach the reader by different routes and must arrive the same.
+    // Two spellings of the same block, one restored from a fence mask and
+    // one restored from a construct sentinel, must arrive the same.
     let fenced = to_html("```\n｜青梅《おうめ》\n```\n");
     let indented = to_html("本文\n\n    ｜青梅《おうめ》\n");
     assert!(

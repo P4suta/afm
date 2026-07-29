@@ -7,7 +7,9 @@
 //! coverage gate without leaning on inline-test scaffolding.
 
 use aozora_flavored_markdown::ir::{Block, Inline, TableAlign};
-use aozora_flavored_markdown::{Options, RenderedBlocks, render_blocks, render_to_ir};
+use aozora_flavored_markdown::{
+    Options, RenderedBlocks, diagnose, render, render_blocks, render_to_ir, sentinels,
+};
 
 fn ir_for(src: &str) -> Vec<Block> {
     render_to_ir(src, &Options::commonmark()).ir.blocks
@@ -104,6 +106,206 @@ fn fenced_code_block_without_language_omits_lang() {
         panic!("expected a code block, got {:?}", blocks[0]);
     };
     assert!(lang.is_none());
+}
+
+#[test]
+fn container_fence_restores_info_and_body_in_html_ir_and_streaming() {
+    let src = "> ```lang《ignored》 extra《not-rendered》\n> ｜body《literal》\n> ```\n";
+    let rendered = render_to_ir(src, &Options::default());
+    let [Block::Blockquote { children, .. }] = rendered.ir.blocks.as_slice() else {
+        panic!("expected one blockquote, got {:?}", rendered.ir.blocks);
+    };
+    let [Block::Code { lang, value, .. }] = children.as_slice() else {
+        panic!("expected one nested code block, got {children:?}");
+    };
+    assert_eq!(
+        lang.as_deref(),
+        Some("lang《ignored》 extra《not-rendered》")
+    );
+    assert_eq!(value, "｜body《literal》\n");
+    assert!(
+        rendered.html.contains("language-lang《ignored》"),
+        "first info word was not restored: {:?}",
+        rendered.html
+    );
+    assert!(
+        rendered.html.contains("｜body《literal》"),
+        "code body was not restored: {:?}",
+        rendered.html
+    );
+    assert!(
+        !rendered.html.contains('\u{E000}'),
+        "mask leaked from HTML: {:?}",
+        rendered.html
+    );
+
+    let streamed = render_blocks(src, &Options::default());
+    let [block] = streamed.blocks.as_slice() else {
+        panic!("expected one streamed block, got {:?}", streamed.blocks);
+    };
+    assert_eq!(block.ir, rendered.ir.blocks);
+    assert_eq!(block.html, rendered.html);
+}
+
+fn assert_fenced_front_doors_agree(src: &str) -> Vec<Block> {
+    let options = Options::default();
+    let rendered = render(src, &options);
+    let projected = render_to_ir(src, &options);
+    let streamed = render_blocks(src, &options);
+    let joined_html: String = streamed
+        .blocks
+        .iter()
+        .map(|block| block.html.as_str())
+        .collect();
+    let joined_ir: Vec<Block> = streamed
+        .blocks
+        .iter()
+        .flat_map(|block| block.ir.iter().cloned())
+        .collect();
+    let diagnosed = diagnose(src, &options);
+
+    assert_eq!(rendered.html, projected.html, "{src:?}");
+    assert_eq!(rendered.html, joined_html, "{src:?}");
+    assert_eq!(projected.ir.blocks, joined_ir, "{src:?}");
+    assert_eq!(rendered.diagnostics, diagnosed, "{src:?}");
+    assert_eq!(projected.diagnostics, diagnosed, "{src:?}");
+    assert_eq!(streamed.diagnostics, diagnosed, "{src:?}");
+    assert!(
+        !rendered.html.contains([
+            sentinels::INLINE,
+            sentinels::BLOCK_LEAF,
+            sentinels::BLOCK_OPEN,
+            sentinels::BLOCK_CLOSE,
+        ]),
+        "a construct sentinel leaked from {src:?}: {:?}",
+        rendered.html
+    );
+    projected.ir.blocks
+}
+
+#[test]
+fn fence_shapes_and_line_endings_agree_across_every_front_door() {
+    let mut sources = vec![
+        "> ```lang《quote》\n> ｜body《literal》\n> ```\n".to_owned(),
+        "- item\n\n  ~~~lang《list》\n  ［＃literal］\n  ~~~\n".to_owned(),
+        "```\n｜first\n```\n\n~~~lang《unclosed》\n［second］\n".to_owned(),
+    ];
+    for ending in ["\n", "\r\n", "\r"] {
+        sources.push(format!(
+            "```lang《{ending:?}》{ending}｜body《literal》{ending}```{ending}"
+        ));
+    }
+    for src in sources {
+        assert_fenced_front_doors_agree(&src);
+    }
+}
+
+#[test]
+fn unclosed_cr_fence_restores_double_angle_info_without_a_reserved_leak() {
+    let src = "~~~≪\u{12}≫\u{80}\r";
+    let blocks = assert_fenced_front_doors_agree(src);
+    let [Block::Code { lang, value, .. }] = blocks.as_slice() else {
+        panic!("expected the unclosed source to stay one code block: {blocks:?}");
+    };
+    assert_eq!(lang.as_deref(), Some("≪\u{12}≫\u{80}"));
+    assert!(value.is_empty());
+}
+
+#[test]
+fn info_entities_and_raw_reserved_codepoints_follow_the_public_contract() {
+    for sentinel in [
+        sentinels::INLINE,
+        sentinels::BLOCK_LEAF,
+        sentinels::BLOCK_OPEN,
+        sentinels::BLOCK_CLOSE,
+    ] {
+        let src = format!(
+            "```lang&#x{:X};\nraw{sentinel} ｜body《literal》\n```\n",
+            sentinel as u32
+        );
+        let blocks = assert_fenced_front_doors_agree(&src);
+        let [Block::Code { lang, value, .. }] = blocks.as_slice() else {
+            panic!("expected one code block, got {blocks:?}");
+        };
+        assert_eq!(lang.as_deref(), Some("lang�"));
+        assert_eq!(value, "raw� ｜body《literal》\n");
+    }
+
+    let src = format!(
+        "{}\n```\n｜body《literal》{}\n```\n",
+        sentinels::MASK,
+        sentinels::MASK
+    );
+    let blocks = assert_fenced_front_doors_agree(&src);
+    let Block::Code { value, .. } = &blocks[1] else {
+        panic!("expected the second block to be code, got {blocks:?}");
+    };
+    assert_eq!(value, &format!("｜body《literal》{}\n", sentinels::MASK));
+    assert!(
+        render(&src, &Options::default())
+            .html
+            .contains(sentinels::MASK)
+    );
+}
+
+#[test]
+fn raw_mask_stand_down_does_not_let_a_fenced_construct_shift_the_cursor() {
+    let src = format!(
+        "{}\n```\n｜内《うち》\n```\n\n｜外《そと》\n",
+        sentinels::MASK
+    );
+    let blocks = assert_fenced_front_doors_agree(&src);
+    let [
+        _,
+        Block::Code { value, .. },
+        Block::Paragraph { children, .. },
+    ] = blocks.as_slice()
+    else {
+        panic!("expected mask paragraph, code, and ruby paragraph: {blocks:?}");
+    };
+    assert_eq!(value, "｜内《うち》\n");
+    let [Inline::Aozora { kind, html, .. }] = children.as_slice() else {
+        panic!("the construct after the fence must project as one ruby: {children:?}");
+    };
+    assert_eq!(kind, "ruby");
+    assert!(
+        html.contains('外'),
+        "the later ruby lost its base: {html:?}"
+    );
+    assert!(
+        html.contains("そと"),
+        "the later ruby lost its reading: {html:?}"
+    );
+    assert!(
+        !html.contains('内'),
+        "the fenced ruby consumed the cursor: {html:?}"
+    );
+    let ruby_html = html.clone();
+
+    let document_html = render(&src, &Options::default()).html;
+    assert!(
+        document_html.contains("｜内《うち》"),
+        "fenced source changed: {document_html:?}"
+    );
+    assert!(
+        document_html.contains(&ruby_html),
+        "the projected later ruby differs from HTML: {document_html:?}"
+    );
+}
+
+#[test]
+fn an_ir_depth_cutoff_cannot_shift_a_later_fence_snapshot() {
+    let quoted = "> ".repeat(300);
+    let src = format!(
+        "{quoted}```deep《info》\n{quoted}｜deep《literal》\n{quoted}```\n\n\
+         ```later《info》\n［＃「later」に傍点］\n```\n"
+    );
+    let blocks = assert_fenced_front_doors_agree(&src);
+    let Some(Block::Code { lang, value, .. }) = blocks.last() else {
+        panic!("the later top-level fence must survive IR truncation: {blocks:?}");
+    };
+    assert_eq!(lang.as_deref(), Some("later《info》"));
+    assert_eq!(value, "［＃「later」に傍点］\n");
 }
 
 #[test]

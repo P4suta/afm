@@ -343,7 +343,11 @@ fn underline_row(pos: Sourcepos) -> Sourcepos {
 // off: a break the canonicaliser cannot see is one it re-inserts, and the
 // round trip would grow a blank line every pass. A pair that does not slice
 // the source is dropped rather than trusted.
-fn byte_range(source: &str, line_starts: &[usize], pos: Sourcepos) -> Option<Range<usize>> {
+pub(crate) fn byte_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: Sourcepos,
+) -> Option<Range<usize>> {
     let offset = |line: usize, column: usize| {
         line_starts
             .get(line.checked_sub(1)?)
@@ -368,7 +372,7 @@ fn byte_range(source: &str, line_starts: &[usize], pos: Sourcepos) -> Option<Ran
 //
 // `"\r\n"` is one terminator rather than two: the `'\n'` arm answers for the
 // pair, and the `'\r'` arm stands down when a `'\n'` follows it.
-fn line_starts(source: &str) -> Vec<usize> {
+pub(crate) fn line_starts(source: &str) -> Vec<usize> {
     let bytes = source.as_bytes();
     once(0)
         .chain(

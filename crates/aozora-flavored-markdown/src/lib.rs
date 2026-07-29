@@ -452,7 +452,8 @@ pub fn diagnose(input: &str, options: &Options) -> Vec<Diagnostic> {
     if !options.aozora {
         return Vec::new();
     }
-    let (masked_source, _) = code_block_mask::mask_code_block_triggers(input);
+    let comrak = options.comrak();
+    let (masked_source, _) = code_block_mask::mask_code_block_triggers(input, &comrak);
     aozora::prewarm();
     Constructs::build(&masked_source).diagnostics().to_vec()
 }
@@ -550,7 +551,7 @@ where
         // No lexer pass, so no constructs and no sentinels: the input goes
         // to comrak as the caller wrote it.
         let extra = project(root, &Constructs::none());
-        let html = format_root(root, comrak_options, options.source_line_anchors, None);
+        let html = format_root(root, comrak_options, options.source_line_anchors);
         return (html, Vec::new(), extra);
     }
 
@@ -558,7 +559,7 @@ where
     // CommonMark fenced code block from the lexer, which is
     // CommonMark-blind by design (ADR-0010), so this lives here. See
     // `code_block_mask` module docs for the masking scheme.
-    let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
+    let (masked_source, fenced) = code_block_mask::mask_code_block_triggers(input, comrak_options);
 
     // A render parses the document once and then each of its constructs
     // again, on its own, to learn what that construct renders to. Building
@@ -575,19 +576,15 @@ where
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, constructs.text(), comrak_options);
     constructs.remap_source_positions(root);
+    code_block_mask::restore_ast(root, input, &fenced);
 
-    // Both walkers cursor over the same construct table, each with its own
-    // cursor, so they stay in lockstep without serial coupling.
+    // The IR walker sees fenced fields after range-keyed restoration and
+    // construct sentinels before the HTML splicer consumes them.
     let extra = project(root, &constructs);
 
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
-    let html = format_root(
-        root,
-        comrak_options,
-        options.source_line_anchors,
-        Some(mask_originals.as_slice()),
-    );
+    let html = format_root(root, comrak_options, options.source_line_anchors);
     (html, constructs.diagnostics().to_vec(), extra)
 }
 
@@ -615,18 +612,12 @@ fn format_root<'a>(
     root: &'a AstNode<'a>,
     comrak: &comrak::Options<'static>,
     anchors: bool,
-    mask_originals: Option<&[char]>,
 ) -> String {
-    let html = if anchors {
+    if anchors {
         source_line_anchors::format_root_with_anchors(root, comrak)
     } else {
         let mut html = String::new();
         comrak::format_html(root, comrak, &mut html).expect("formatting to a String never fails");
-        html
-    };
-    if let Some(originals) = mask_originals {
-        code_block_mask::unmask(&html, originals).into_owned()
-    } else {
         html
     }
 }
@@ -690,23 +681,21 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
         let comrak_arena = comrak::Arena::new();
         let root = comrak::parse_document(&comrak_arena, input, &options.comrak());
         return RenderedBlocks {
-            blocks: collect_rendered_blocks(root, options, Vec::new(), &[]),
+            blocks: collect_rendered_blocks(root, options, Vec::new()),
             diagnostics: Vec::new(),
         };
     }
 
-    let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
+    let comrak_options = options.comrak();
+    let (masked_source, fenced) = code_block_mask::mask_code_block_triggers(input, &comrak_options);
     aozora::prewarm();
     // The builder owns the construct table; the splice below borrows the
     // same one, so both outputs of this call describe the same document.
     let mut builder = ir::StreamingIrBuilder::new(&masked_source);
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(
-        &comrak_arena,
-        builder.constructs().text(),
-        &options.comrak(),
-    );
+    let root = comrak::parse_document(&comrak_arena, builder.constructs().text(), &comrak_options);
     builder.constructs().remap_source_positions(root);
+    code_block_mask::restore_ast(root, input, &fenced);
     // IR projection runs before AST mutation so it walks the
     // sentinel-bearing Text nodes; AST splicing afterwards rewrites
     // the same nodes for `comrak::format_html` consumption. A single
@@ -727,7 +716,7 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
     RenderedBlocks {
-        blocks: collect_rendered_blocks(root, options, blocks_ir, &mask_originals),
+        blocks: collect_rendered_blocks(root, options, blocks_ir),
         diagnostics,
     }
 }
@@ -740,7 +729,6 @@ fn collect_rendered_blocks<'a>(
     root: &'a AstNode<'a>,
     options: &Options,
     mut blocks_ir: Vec<Vec<ir::Block>>,
-    mask_originals: &[char],
 ) -> Vec<RenderedBlock> {
     // The AST has already been spliced at the document level by the
     // caller (so `format_html` sees no sentinels here), and the IR
@@ -751,13 +739,8 @@ fn collect_rendered_blocks<'a>(
     // us an empty IR vector; we emit `Vec::new()` per block in that
     // case so the per-block IR field stays consistent with the IR
     // builder's no-op behaviour.
-    //
-    // Masks are restored with a cursor rather than the one pass the
-    // document path makes: handing every block the whole slice would replay
-    // block 1's originals into block 2.
     let comrak_options = options.comrak();
     let mut blocks = Vec::new();
-    let mut mask_cursor = mask_originals;
     for (idx, child) in root.children().enumerate() {
         let data = child.data.borrow();
         let line = constructs::saturating_u32(data.sourcepos.start.line).max(1);
@@ -770,11 +753,6 @@ fn collect_rendered_blocks<'a>(
                 .expect("formatting a String never fails");
             buf
         };
-        let block_html = if mask_cursor.is_empty() {
-            rendered
-        } else {
-            code_block_mask::unmask_from(&rendered, &mut mask_cursor).into_owned()
-        };
         let ir_blocks = if idx < blocks_ir.len() {
             mem::take(&mut blocks_ir[idx])
         } else {
@@ -782,7 +760,7 @@ fn collect_rendered_blocks<'a>(
         };
         blocks.push(RenderedBlock {
             ir: ir_blocks,
-            html: block_html,
+            html: rendered,
             source_line: line,
         });
     }
