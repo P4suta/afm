@@ -8297,11 +8297,28 @@ fn every_rolling_report_is_keyed_on_a_title_that_cannot_change_between_runs() {
             }
         }
     }
+    // The floor on what was found, derived rather than written down. The walk
+    // above reads the calls job by job; the same texts hold the same `uses:`
+    // lines whether or not the job reader finds the jobs around them, so the
+    // two readings disagree exactly when the walk has stopped seeing part of
+    // the tree — which is how every assertion below starts passing vacuously.
+    let called: usize = workflows
+        .iter()
+        .flat_map(|(_, text)| text.lines())
+        .filter(|line| step_uses(line) == Some(LOCAL_REPORTER))
+        .count();
     assert!(
-        keys.len() >= 3,
-        "only {} scheduled step(s) call `{LOCAL_REPORTER}`. Three jobs have no reporter of their \
-         own and reach a human through it; fewer than that and either one has lost its channel or \
-         this reader has stopped finding the calls, and every assertion below passes vacuously.",
+        called > 0,
+        "no step in {} workflow(s) calls `{LOCAL_REPORTER}` any more, so this rule is about \
+         nothing",
+        workflows.len()
+    );
+    assert_eq!(
+        keys.len(),
+        called,
+        "{called} step(s) call `{LOCAL_REPORTER}` and the walk over jobs found {}; the job or step \
+         reader has stopped seeing part of the tree, and what it missed is what this rule would \
+         otherwise have judged.",
         keys.len()
     );
 
@@ -8386,276 +8403,18 @@ fn a_trigger_is_read_off_the_on_block_and_a_job_named_alike_is_not() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// a control that is a SETTING rather than a file
-// ---------------------------------------------------------------------------
-//
-// The sixth way a check checks nothing, and the one every rule above is blind
-// to by construction: each of them reads a file, and a repository setting is
-// not in one.
-//
-// `SECURITY.md` asserted that Dependabot alerts and Dependabot security
-// updates were both enabled. It was true when written and verified by hand
-// once, in a pull request comment. Both are toggles in a menu that anyone with
-// admin rights can flip, that arrive in no diff, and that GitHub itself pauses
-// after a long quiet spell — so the sentence could stop being true with every
-// gate in this repository green, and the only assertion the tree could make
-// about it was that the sentence was there. That is a claim about the claim.
-//
-// The rule below is the other direction of the prose rule above it,
-//   `no_document_denies_a_scheduled_run_this_repo_makes`
-// which catches a document DENYING a control that exists. This one catches a
-// document ASSERTING a control that nothing evaluates: the same defect with
-// the sign flipped, and the one this repository actually shipped.
-
-/// A GitHub repository setting this repo's prose rests on: a control flipped
-/// in a menu rather than committed, and the endpoint that answers what it is
-/// set to.
-///
-/// Listed by hand because the endpoint for a setting is GitHub's vocabulary
-/// rather than this repository's. Every field is held against the tree below,
-/// though, so a row cannot quietly stop naming a claim somebody reads or a
-/// check something runs — it fails in both directions rather than rotting.
-struct RepositorySetting {
-    /// What the documents call it. Matched against unwrapped prose, so a
-    /// phrase broken over a line wrap still reads as one phrase.
-    claimed: &'static str,
-    /// The path under `repos/<this repository>/` that answers for it.
-    endpoint: &'static str,
-    /// What silently stops happening while nobody asks.
-    at_stake: &'static str,
-}
-
-const REPOSITORY_SETTINGS: &[RepositorySetting] = &[
-    RepositorySetting {
-        claimed: "Dependabot alerts",
-        endpoint: "vulnerability-alerts",
-        at_stake: "GitHub stops reading this repository's graph against the advisory database on \
-                   its own, and two independent readings of it become one",
-    },
-    RepositorySetting {
-        claimed: "Dependabot security updates",
-        endpoint: "automated-security-fixes",
-        at_stake: "no version-bump pull request is opened for an advisory any more, and the \
-                   nightly issue is the whole of the response to one",
-    },
-];
-
-/// The ways a `gh api` path can name THIS repository: the expression itself,
-/// and any shell variable a workflow binds to it.
-///
-/// Both, because the second is the one that appears. An expression
-/// interpolated straight into a `run:` is a template injection and zizmor says
-/// so, so a job that queries its own repository passes the value in `env:` and
-/// writes `$GH_REPO` — and a reader that knew only `${{ github.repository }}`
-/// would find no query at all in the one job doing the querying.
-fn this_repository_names(workflow: &str) -> BTreeSet<String> {
-    const EXPRESSION: &str = "${{ github.repository }}";
-    let mut names = BTreeSet::from([EXPRESSION.to_owned()]);
-    for line in workflow.lines() {
-        let Some((key, value)) = strip_comment(line).trim().split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        if value.trim() != EXPRESSION || key.is_empty() || key.contains(char::is_whitespace) {
-            continue;
-        }
-        names.insert(format!("${key}"));
-        names.insert(format!("${{{key}}}"));
-    }
-    names
-}
-
-/// Every setting of THIS repository a workflow asks GitHub for: the first path
-/// segment under each `gh api repos/<this repository>/…`.
-///
-/// The call has to be on the line, which is the difference between reading
-/// what a workflow RUNS and reading what it says. `report-failure`'s issue
-/// bodies name endpoints in prose, and prose counting as enforcement is the
-/// defect this whole file exists to reject.
-fn settings_read_by(workflow: &str) -> BTreeSet<String> {
-    let names = this_repository_names(workflow);
-    let mut out = BTreeSet::new();
-    for line in workflow.lines() {
-        let body = strip_comment(line);
-        if !body.contains("gh api") {
-            continue;
-        }
-        for name in &names {
-            let opens = format!("repos/{name}/");
-            for (at, _) in body.match_indices(&opens) {
-                let path: String = body[at + opens.len()..]
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-                    .collect();
-                if !path.is_empty() {
-                    out.insert(path);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The job of `workflow` that asks for `endpoint`, if one does.
-fn job_reading_setting(workflow: &str, endpoint: &str) -> Option<String> {
-    job_keys(workflow).into_iter().find(|job| {
-        job_lines(workflow, job)
-            .is_some_and(|lines| settings_read_by(&lines.join("\n")).contains(endpoint))
-    })
-}
-
-/// Settings this repo's prose rests on that nothing scheduled asks GitHub
-/// about, and rows that have outlived the claim they watch. One sentence each.
-///
-/// Split out from the rule so the rule can be asked about a tree other than
-/// this one: a rule only ever run against the tree it passes on is a rule
-/// nobody has watched say no.
-fn settings_nothing_reads(
-    documents: &[(String, String)],
-    workflows: &[(String, String)],
-) -> Vec<String> {
-    let mut unread = Vec::new();
-    for setting in REPOSITORY_SETTINGS {
-        let RepositorySetting {
-            claimed,
-            endpoint,
-            at_stake,
-        } = *setting;
-        let claiming: Vec<&str> = documents
-            .iter()
-            .filter(|(_, text)| unwrapped_prose(text).contains(claimed))
-            .map(|(label, _)| label.as_str())
-            .collect();
-        if claiming.is_empty() {
-            unread.push(format!(
-                "  `{claimed}` is watched here and no document in force names it any more. Either \
-                 the claim was rewritten and this row and the job behind it go with it, or the \
-                 reader has stopped finding the documents and everything below passes vacuously."
-            ));
-            continue;
-        }
-        let read_on_a_clock = workflows
-            .iter()
-            .filter(|(_, text)| runs_on_a_cron(text))
-            .any(|(_, text)| job_reading_setting(text, endpoint).is_some());
-        if !read_on_a_clock {
-            unread.push(format!(
-                "  `{claimed}` is asserted by {claiming:?} and no job on a clock asks \
-                 `repos/<this repository>/{endpoint}` for it. It is a repository setting: \
-                 switched off in a menu, carried in no diff, and once it is off {at_stake} — \
-                 with every gate here green and that sentence still on the page."
-            ));
-        }
-    }
-    unread
-}
-
-#[test]
-fn every_repository_setting_this_repos_prose_rests_on_is_one_a_scheduled_job_reads() {
-    let documents = ci_prose_files();
-    assert!(
-        !REPOSITORY_SETTINGS.is_empty(),
-        "the settings this repo's prose rests on are the whole net of this rule, and there are \
-         none listed — the rule cannot fail"
-    );
-
-    // Whether the failure of such a job reaches a human is not asked again
-    // here: the job is on a clock and blocks no merge, so
-    // `a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes` is
-    // already the rule that answers it, per job and per reporter.
-    let unread = settings_nothing_reads(&documents, &read_workflows());
-    assert!(
-        unread.is_empty(),
-        "repository settings this repo's documents rest on and nothing evaluates:\n{}\n\
-         Every other rule in this file compares two files. A setting is in neither, so a claim \
-         about one is worth exactly what the last person to look at the menu remembers.",
-        unread.join("\n")
-    );
-}
-
-#[test]
-fn a_setting_the_prose_rests_on_and_no_scheduled_job_reads_is_named() {
-    // Four ways the check can die while the claim stays on the page, each run
-    // rather than reasoned about.
-    let documents = ci_prose_files();
-    let text = read(LICENCE_WATCH);
-    let alerts = "Dependabot alerts";
-    let updates = "Dependabot security updates";
-    assert!(
-        settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, text.clone())).is_empty(),
-        "the workflow this test mutates does not answer for these settings to begin with"
-    );
-
-    // 1. The query is aimed somewhere else. Nothing about the job's shape
-    //    changes: it still calls `gh api`, still fails on a bad answer, and
-    //    answers for a repository that is not this one.
-    let elsewhere = text.replace(
-        "GH_REPO: ${{ github.repository }}",
-        "GH_REPO: P4suta/somewhere-else",
-    );
-    assert_ne!(
-        elsewhere, text,
-        "no `GH_REPO: ${{{{ github.repository }}}}` binding was found to redirect"
-    );
-    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, elsewhere));
-    assert!(
-        named(&unread, alerts) && named(&unread, updates),
-        "a posture check pointed at another repository was read as checking this one:\n{unread:?}"
-    );
-
-    // 2. One endpoint of the two stops being asked for. The rule has to name
-    //    that one and leave the other alone, or it is answering "somebody
-    //    queried something" rather than "this claim is checked".
-    let partial = text.replace(
-        "repos/$GH_REPO/vulnerability-alerts",
-        "repos/$GH_REPO/topics",
-    );
-    assert_ne!(
-        partial, text,
-        "the alerts endpoint was not found to redirect"
-    );
-    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, partial));
-    assert!(
-        named(&unread, alerts),
-        "the setting nothing asks about went unnamed:\n{unread:?}"
-    );
-    assert!(
-        !named(&unread, updates),
-        "the setting that IS still asked about was named too, so the rule is not reading per \
-         setting:\n{unread:?}"
-    );
-
-    // 3. The check survives on a push and stops being scheduled. A setting
-    //    moves without a commit, so a check that only runs on a diff answers
-    //    only about the diffs somebody pushes.
-    let unscheduled = text.replace("    - cron:", "    # - cron:");
-    assert!(
-        !runs_on_a_cron(&unscheduled) && runs_on_a_cron(&text),
-        "the mutation did not stop the workflow reading as scheduled, so it proves nothing"
-    );
-    let unread = settings_nothing_reads(&documents, &one_workflow(LICENCE_WATCH, unscheduled));
-    assert!(
-        named(&unread, alerts) && named(&unread, updates),
-        "a posture check that no clock runs was read as a scheduled one:\n{unread:?}"
-    );
-
-    // 4. The claim goes and the row stays. A watch over a sentence nobody
-    //    makes any more is the licence table's failure mode, one file over.
-    let rewritten: Vec<(String, String)> = documents
-        .iter()
-        .map(|(label, body)| (label.clone(), body.replace("Dependabot alerts and ", "")))
-        .collect();
-    assert_ne!(
-        rewritten, documents,
-        "no document was changed, so the row has not outlived anything"
-    );
-    let unread = settings_nothing_reads(&rewritten, &one_workflow(LICENCE_WATCH, text));
-    assert!(
-        named(&unread, alerts),
-        "a row watching a claim no document makes any more went unreported:\n{unread:?}"
-    );
-}
+// The rule that used to sit here held two repository settings — Dependabot
+// alerts and Dependabot security updates — against a sentence in SECURITY.md
+// and against some scheduled job running `gh api repos/<this repo>/<endpoint>`
+// for each. Its subject was that sentence and the spelling of a shell command,
+// never the settings themselves: `gh api … || true` satisfied it in full. The
+// control is audit.yml's `dependabot` job, which asks GitHub what the settings
+// actually ARE and reports two ways on the answer; a test asserting that the
+// job is written the way it is written was a second copy of the job. Its list
+// of endpoints could not be derived either — the mapping from the phrase
+// "Dependabot security updates" to `automated-security-fixes` is GitHub's
+// vocabulary and appears in no file here — so it could only ever have been
+// topped up by hand, which is what a hand-written net is for.
 
 // ---------------------------------------------------------------------------
 // the wire between a step and the condition that reads it
