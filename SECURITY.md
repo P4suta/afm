@@ -47,13 +47,7 @@ That nightly run also **files a GitHub issue per newly disclosed
 advisory** (`rustsec/audit-check`), rather than only turning a workflow
 red where nobody is looking. Dependabot alerts and Dependabot security
 updates are both enabled, so GitHub raises the same finding independently
-and opens the version-bump pull request for it. Both of those are
-repository settings rather than files, so the same workflow asks GitHub
-for them on every run and fails when either is switched off or paused:
-the sentence before this one is checked rather than asserted.
-
-Every other leg of that nightly files a rolling issue of its own on the
-same reasoning.
+and opens the version-bump pull request for it.
 
 An `unmaintained`, `unsound` or `yanked` crate fails these gates too, not
 only a live vulnerability: an advisory that has not been written yet is

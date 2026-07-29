@@ -7,20 +7,10 @@
 # Between two quiet weeks the newest scan of this repo's graph would be two
 # weeks old, and `SECURITY.md` said so out loud ("there is no cron workflow").
 #
-# Four jobs, deliberately independent (no `needs:` between them) so a red gate
-# never suppresses the notification that explains it:
-#
-#   * `advisories` — the authoritative run. Same two recipes, same dev image,
-#     same result as a PR. A red run here is the durable record.
-#   * `report`     — `rustsec/audit-check`, which on a `schedule` event opens a
-#     GitHub issue per newly disclosed advisory. This is the half that makes
-#     the schedule a control at all: a cron that only reddens a workflow
-#     nobody is watching notifies nobody.
-#   * `licences`   — a staleness watch over dependency-review.yml's per-package
-#     licence exemptions, which are blanket waivers with nothing checking them.
-#   * `dependabot` — the same treatment for the one claim in SECURITY.md that
-#     is a repository SETTING rather than a file: that Dependabot alerts and
-#     Dependabot security updates are both on.
+# The jobs below are deliberately independent (no `needs:` between them) so a
+# red gate never suppresses the notification that explains it. What each is for
+# is written above it rather than enumerated here, where a list would only be a
+# second copy of the jobs it names.
 #
 # Scope note: `cargo audit` reads the lockfile it is pointed at, so this covers
 # the workspace `Cargo.lock`. The fuzz crate is its own workspace with its own
@@ -30,9 +20,7 @@ name: audit
 
 on:
   schedule:
-    # Daily, 15:40 UTC = 00:40 Asia/Tokyo. Off the hour and clear of the other
-    # three crons in this repo: fuzz (daily 16:20), codeql (Mon 04:23) and
-    # release-pins (Sun 17:00).
+    # Daily, 15:40 UTC = 00:40 Asia/Tokyo, off the hour.
     - cron: "40 15 * * *"
   push:
     branches: [main]
@@ -56,7 +44,7 @@ concurrency:
 
 jobs:
   # The gate, run exactly as a pull request runs it (ADR-0002: both recipes
-  # reach cargo through the dev image).
+  # reach cargo through the dev image). A red run here is the durable record.
   advisories:
     name: advisories (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
@@ -255,10 +243,10 @@ jobs:
             licence it rests on in both files, then close this issue — the next
             failing run files it again.
 
-  # SECURITY.md: "Dependabot alerts and Dependabot security updates are both
-  # enabled, so GitHub raises the same finding independently and opens the
-  # version-bump pull request for it." True when written, and the one sentence
-  # in that file resting on nothing in this tree: both are repository SETTINGS,
+  # The Advisory tracking section of SECURITY.md tells a reporter that
+  # Dependabot alerts and Dependabot security updates are both on, so GitHub
+  # raises an advisory independently of this workflow. That is the one claim in
+  # that file resting on nothing in this tree: both are repository SETTINGS,
   # flipped in a menu by anyone with admin rights and carried in no diff, and
   # GitHub pauses security updates on its own after ~90 days of inactivity. So
   # the claim can stop being true with every gate here green — the same defect
