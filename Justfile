@@ -823,12 +823,8 @@ coverage-branch:
 lint: fmt-check clippy typos strict-code comment-discipline vale zizmor actionlint
 
 # Retired-path gate for the half of the question no prose linter can answer,
-# plus the doc-comment volume ratchet. Fails when any line of any file names a
-# repo path that is gone (the vendored comrak tree, ADR-0024) — a
-# `linguist-vendored` glob, a CODEOWNERS owner, a CI paths-filter are all
-# lines with no comment marker in them — and when doc comments outgrow their
-# pinned budget. Both lists live in `crates/xtask/src/main.rs`
-# (RETIRED_REPO_PATHS, MAX_DOC_LINES).
+# plus the comment volume ratchet. Both lists, and the reason each exists,
+# are in `crates/xtask/src/main.rs` (RETIRED_REPO_PATHS, MAX_COMMENT_LINES).
 #
 # The third thing this used to do — a retired *upstream* path named in a `.rs`
 # or `.toml` comment — is `just vale` now, which reads the `.md` files this

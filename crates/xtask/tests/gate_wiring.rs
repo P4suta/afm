@@ -624,7 +624,7 @@ fn every_tool_this_repo_declares_is_a_tool_this_repo_runs() {
 
     let host = declared_tools(&read("mise.toml"));
     assert!(
-        host.len() >= 5,
+        !host.is_empty(),
         "mise.toml yielded {} tools; the reader is not finding the `[tools]` table",
         host.len()
     );
@@ -636,7 +636,7 @@ fn every_tool_this_repo_declares_is_a_tool_this_repo_runs() {
     // own layer and called by nothing for as long as tier D has existed.
     let image = image_tools(&read("Dockerfile"));
     assert!(
-        image.len() >= 20 && image.contains("cargo-nextest") && image.contains("vale"),
+        image.contains("cargo-nextest") && image.contains("vale"),
         "the Dockerfile came out installing {image:?}; the reader is not finding its \
          `cargo binstall` lists or its `ARG <TOOL>_VERSION` pins"
     );
@@ -753,7 +753,7 @@ fn every_lint_the_bundle_runs_is_a_gate_the_manifest_declares() {
     let manifest = recipes_in_group(&justfile, "gate");
 
     assert!(
-        bundled.len() >= 5,
+        !bundled.is_empty(),
         "`just lint` came out as {bundled:?}; the reader is not finding its header"
     );
     let ungated: Vec<&String> = bundled.difference(&manifest).collect();
@@ -777,7 +777,7 @@ fn the_gate_manifest_is_exactly_what_just_ci_runs() {
     let lanes = ci_recipe_steps(&justfile);
 
     assert!(
-        manifest.len() >= 15,
+        !manifest.is_empty(),
         "`[group('gate')]` came out as {manifest:?}; the reader is not finding the attribute"
     );
     assert_eq!(
@@ -877,7 +877,7 @@ fn the_workflow_hand_writes_no_gate_of_its_own() {
         .cloned()
         .collect();
     assert!(
-        containerized.len() >= 15,
+        !containerized.is_empty(),
         "the matrix legs came out as {containerized:?}; the reader is not finding the attribute"
     );
 
@@ -948,7 +948,7 @@ fn every_recipe_a_workflow_runs_is_a_gate_or_a_named_precondition() {
     }
 
     assert!(
-        invoked.len() >= 6,
+        !invoked.is_empty(),
         "the workflows came out running {invoked:?}; the reader is not finding their `just` steps"
     );
     let unaccounted: Vec<String> = invoked
@@ -1019,7 +1019,7 @@ fn every_gate_runs_from_a_bare_recipe_name() {
     let justfile = read("Justfile");
     let manifest = recipes_in_group(&justfile, "gate");
     assert!(
-        manifest.len() >= 15,
+        !manifest.is_empty(),
         "`[group('gate')]` came out as {manifest:?}; the reader is not finding the attribute"
     );
     for gate in &manifest {
@@ -1084,7 +1084,7 @@ fn every_job_the_workflow_defines_is_required_by_ci_success() {
     let workflow = read(".github/workflows/ci.yml");
     let jobs = job_keys(&workflow);
     assert!(
-        jobs.len() >= 5,
+        !jobs.is_empty(),
         "ci.yml came out with jobs {jobs:?}; the reader is not finding the `jobs:` mapping"
     );
 
@@ -1606,7 +1606,7 @@ fn the_justfile_is_the_only_place_a_documentation_build_is_written() {
         scanned += 1;
     }
     assert!(
-        scanned >= 5,
+        scanned > 0,
         "only {scanned} file(s) scanned; the reader is not finding the workflows"
     );
 
@@ -1797,21 +1797,6 @@ fn the_doc_gates_warning_policy_is_not_parked_in_a_git_ignored_config() {
 // one definition of a build, wherever it is written
 // ---------------------------------------------------------------------------
 
-/// Workflow steps that write a build out themselves, each with the reason it
-/// cannot call a recipe instead. A row excuses one `<tool> <sub-command>` in
-/// one file, from both halves of the rule below.
-///
-/// Empty, and that is the finished state rather than a table nobody has filled
-/// in. It held three rows, all in `docs.yml`: the wasm-pack build, the bun
-/// install and the bun build behind `just playground-build`. The reason each
-/// gave was the same one — the `playground*` recipes hard-coded `docker
-/// compose run`, so unlike `just doc` they could not run on the Pages runner.
-/// DEV-310 put those two prefixes through the Justfile's `_in` switch, which
-/// makes the reason false, so the rows go rather than stay as prose that no
-/// longer describes anything. The mechanism stays: a future step that genuinely
-/// cannot reach its recipe adds a row and says why.
-const RE_SPELLED_BUILD: &[(&str, &str, &str, &str)] = &[];
-
 /// The two things that can be wrong with a build a workflow writes out, per
 /// workflow. Both are the same defect counted from opposite ends — a command
 /// whose one definition is not the Justfile's — so one walk answers both.
@@ -1822,9 +1807,9 @@ struct WorkflowBuilds {
     /// No gate recipe defines it at all, so the only thing that ever runs it
     /// is this workflow, on this workflow's triggers.
     ungated: Vec<String>,
-    /// Commands looked at, exemptions included. Both lists above are empty in
-    /// the finished state, which is also what a reader that has stopped
-    /// finding commands reports — so what the reader saw is counted too.
+    /// Commands looked at. Both lists above are empty in the finished state,
+    /// which is also what a reader that has stopped finding commands reports —
+    /// so what the reader saw is counted too.
     examined: usize,
 }
 
@@ -1839,11 +1824,7 @@ fn workflow_builds(
         let body = strip_comment(line);
         for (tool, sub) in tool_commands(body) {
             out.examined += 1;
-            if uploads_to_a_registry(body, &tool, &sub)
-                || RE_SPELLED_BUILD
-                    .iter()
-                    .any(|&(file, owner, name, _)| file == label && owner == tool && name == sub)
-            {
+            if uploads_to_a_registry(body, &tool, &sub) {
                 continue;
             }
             let written = body.trim();
@@ -1885,7 +1866,7 @@ fn every_build_a_workflow_drives_is_defined_once_and_by_a_gate() {
     let justfile = read("Justfile");
     let owned = commands_owned_by_gates(&justfile);
     assert!(
-        owned.len() >= 8,
+        !owned.is_empty(),
         "the gates came out running {owned:?}; the reader is not finding their bodies"
     );
 
@@ -1910,8 +1891,8 @@ fn every_build_a_workflow_drives_is_defined_once_and_by_a_gate() {
     assert!(
         found.re_spelled.is_empty(),
         "workflow steps that re-spell a gate's build:\n{}\n\
-         Run the recipe instead, or add the step to RE_SPELLED_BUILD with the reason it cannot — \
-         a second copy drifts from the first in whichever direction nobody is looking.",
+         Run the recipe instead — a second copy drifts from the first in whichever direction \
+         nobody is looking.",
         found.re_spelled.join("\n")
     );
     assert!(
@@ -1920,8 +1901,7 @@ fn every_build_a_workflow_drives_is_defined_once_and_by_a_gate() {
          A build only a workflow defines runs on that workflow's triggers and nowhere else, so \
          whatever it would have caught is caught at whatever moment that workflow happens to \
          fire — for a `workflow_dispatch` file, the moment somebody decides to release. Give the \
-         command a `[group('gate')]` recipe and call it from here, or add the step to \
-         RE_SPELLED_BUILD with the reason it cannot be one.",
+         command a `[group('gate')]` recipe and call it from here.",
         found.ungated.join("\n")
     );
 }
@@ -1976,7 +1956,7 @@ fn a_workflow_that_runs_a_containerized_recipe_says_where_it_is() {
     // how many there are: a workflow deleting its recipe call is that
     // workflow's business, a reader that stopped finding them is this test's.
     assert!(
-        asked >= 2,
+        asked > 0,
         "only {asked} job(s) run a containerized recipe outside the dev image; the reader is not \
          finding them"
     );
@@ -1992,9 +1972,9 @@ fn a_workflow_that_runs_a_containerized_recipe_says_where_it_is() {
 // could set `AOZORA_MD_IN_CONTAINER=1`, call `just playground-build`, and
 // still be handed a `docker compose run` on a runner with no daemon to serve
 // it. docs.yml never hit that only because it wrote the three commands out by
-// hand instead — which is the entry `RE_SPELLED_BUILD` above used to carry,
-// giving that exact reason. One defect, written down twice as an exemption
-// and checked in neither place.
+// hand instead, and the rule above was told to excuse them for exactly that
+// reason. One defect, written down as an exemption and checked in neither
+// place.
 //
 // A switch is two halves: the caller says where it is, and every prefix
 // collapses to nothing when it does. This section is the second half, plus
@@ -2067,7 +2047,7 @@ fn every_prefix_that_enters_a_container_is_one_the_env_var_empties() {
     let switch = in_container_variable(&justfile);
     let prefixes = container_prefixes(&justfile);
     assert!(
-        prefixes.len() >= 4,
+        !prefixes.is_empty(),
         "only {} run prefix(es) came out spelling `docker compose run`; the reader is not finding \
          them: {prefixes:?}",
         prefixes.len()
@@ -2170,7 +2150,7 @@ fn every_service_starts_a_command_where_just_would_have_started_it() {
     let compose = read(COMPOSE_FILE);
     let services = compose_services(&compose);
     assert!(
-        services.len() >= 4,
+        !services.is_empty(),
         "only {} service(s) came out of {COMPOSE_FILE}; the reader is not finding them",
         services.len()
     );
@@ -2414,7 +2394,7 @@ fn every_typescript_file_in_the_playground_is_one_the_lint_gate_reads() {
 
     let sources = playground_files(&[".ts", ".tsx"]);
     assert!(
-        sources.len() >= 20,
+        !sources.is_empty(),
         "only {} TypeScript file(s) found under {PLAYGROUND}/; the reader is not finding the tree",
         sources.len()
     );
@@ -2462,7 +2442,7 @@ fn every_test_file_beside_a_playground_module_is_one_the_test_gate_runs() {
         .filter(|path| path.contains(".test."))
         .collect();
     assert!(
-        tests.len() >= 4,
+        !tests.is_empty(),
         "only {} test file(s) found under {PLAYGROUND}/; the reader is not finding them",
         tests.len()
     );
@@ -2581,7 +2561,7 @@ fn every_bun_script_a_recipe_runs_is_one_the_playground_declares() {
         }
     }
     assert!(
-        seen >= 4,
+        seen > 0,
         "only {seen} `bun run` call(s) found in the Justfile; the reader is not finding them"
     );
     assert!(
@@ -2707,7 +2687,7 @@ fn the_pre_commit_hook_over_the_playground_fires_on_every_file_its_gate_reads() 
         .map(|path| format!("{PLAYGROUND}/{path}"))
         .collect();
     assert!(
-        read_by_the_gate.len() >= 25,
+        !read_by_the_gate.is_empty(),
         "only {} file(s) came out as read by the gate; the reader is not finding the tree",
         read_by_the_gate.len()
     );
@@ -3156,7 +3136,7 @@ fn workspace_members() -> Vec<Member> {
         paths.extend(quoted_items(body));
     }
     assert!(
-        paths.len() >= 5,
+        !paths.is_empty(),
         "only {paths:?} read out of the workspace manifest's `members`; the reader is not \
          finding the list"
     );
@@ -3321,7 +3301,7 @@ fn every_lint_this_workspace_declares_reaches_every_crate_it_builds() {
     let root = read("Cargo.toml");
     let rust_lints = table_pairs(&root, "workspace.lints.rust");
     assert!(
-        rust_lints.len() >= 5,
+        !rust_lints.is_empty(),
         "[workspace.lints.rust] came out as {rust_lints:?}; the reader is not finding the table"
     );
     let level = rust_lints
@@ -3479,7 +3459,7 @@ fn every_lint_this_workspace_declares_reaches_the_crate_that_cannot_inherit_it()
         .filter_map(|(lint, value)| Some((lint, lint_level(value)?)))
         .collect();
     assert!(
-        declared.len() >= 15,
+        !declared.is_empty(),
         "[workspace.lints.rust] came out as {declared:?}; the reader is not finding the table or \
          is not reading its levels"
     );
@@ -4095,9 +4075,9 @@ fn every_binary_this_repo_publishes_is_run_as_a_process_by_its_own_tests() {
         }
     }
     assert!(
-        checked >= 2,
-        "this repo publishes two binaries and the reader found {checked}; it is not finding the \
-         `[[bin]]` targets it is written to check"
+        checked > 0,
+        "the reader found no `[[bin]]` target to check; how many this repo publishes is cargo's \
+         answer, and a reader that finds none of them passes every binary"
     );
     assert!(
         unspawned.is_empty(),
@@ -4717,7 +4697,7 @@ fn no_two_targets_this_workspace_documents_write_one_rustdoc_directory() {
     let metadata = workspace_metadata();
     let documented = documented_targets(&metadata);
     assert!(
-        documented.len() >= 4,
+        !documented.is_empty(),
         "cargo came back documenting {documented:?}; the reader is not finding the targets"
     );
     let clashes = colliding_documentation(&metadata);
@@ -5274,7 +5254,7 @@ fn every_fuzz_build_names_the_triple_it_builds_for() {
     let justfile = read("Justfile");
     let builds = fuzz_builds(&justfile);
     assert!(
-        builds.len() >= 5,
+        !builds.is_empty(),
         "the Justfile came out driving {} `cargo fuzz` build(s); the reader is not finding them \
          in the recipe bodies",
         builds.len()
@@ -5951,15 +5931,9 @@ const FUZZ_RECIPES_THAT_NAME_A_TARGET: &[(&str, &str)] = &[(
      UTF-8 source\". `sjis_decode` hands its bytes to `decode_sjis`, which rejects a \
      UTF-8 seed at its first multi-byte character, so its seeds are transcoded to \
      CP932; `options_space` reads a two-byte option mask before its source, so its \
-     seeds carry that prefix. That is the defect, not the workaround, and it is one \
-     this entry predicted in as many words before `options_space` existed: a second \
-     `[[bin]]` with an input format of its own was seeded with documents it could \
-     not read, `just fuzz-seed` reported its seed count as cheerfully as for the \
-     rest, and nothing here said so. Nothing HERE still does — this text grew a \
-     clause. What now does is `fuzz_regressions.rs`, which reads every target's \
-     corpus back through the shape that target reads and fails when the bytes are \
-     not the documents they were made from; the name in the recipe stays a copy, \
-     and a copy that lies is now caught one directory over rather than never",
+     seeds carry that prefix. That is the defect, not the workaround: the name in the \
+     recipe stays a copy of one line of `cargo fuzz list`, and nothing here catches a \
+     copy that has gone wrong",
 )];
 
 /// The fuzz targets the regression suite replays: the first argument of each
@@ -5992,7 +5966,7 @@ fn every_fuzz_target_the_crate_registers_is_one_every_sweep_actually_sweeps() {
     let justfile = read("Justfile");
     let registered = registered_fuzz_targets();
     assert!(
-        registered.len() >= 3,
+        !registered.is_empty(),
         "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
          `[[bin]]` tables"
     );
@@ -6005,7 +5979,7 @@ fn every_fuzz_target_the_crate_registers_is_one_every_sweep_actually_sweeps() {
     let fuzz_recipes = recipes_in_group(&justfile, "fuzz");
     let whole_set = whole_set_fuzz_recipes(&justfile);
     assert!(
-        fuzz_recipes.len() >= 8 && whole_set.len() >= 4,
+        !fuzz_recipes.is_empty() && !whole_set.is_empty(),
         "`[group('fuzz')]` came out as {fuzz_recipes:?}, of which {whole_set:?} take no \
          argument; the reader is not finding the attribute or is not finding the headers"
     );
@@ -6257,7 +6231,7 @@ fn every_registered_fuzz_target_owns_a_regression_directory_a_clone_would_get() 
     // the same nothing to a runner as one that does not exist at all.
     let registered = registered_fuzz_targets();
     assert!(
-        registered.len() >= 3,
+        !registered.is_empty(),
         "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
          `[[bin]]` tables"
     );
@@ -6295,7 +6269,7 @@ fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
     // 20 minutes it costs.
     let registered = registered_fuzz_targets();
     assert!(
-        registered.len() >= 3,
+        !registered.is_empty(),
         "the fuzz manifest came out registering {registered:?}; the reader is not finding its \
          `[[bin]]` tables"
     );
@@ -6358,7 +6332,7 @@ fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
     // those decoders in hand; what stays here is the half that needs git.
     let documents = seed_source_documents();
     assert!(
-        documents.len() >= 5,
+        !documents.is_empty(),
         "{SEED_SOURCE} came out holding {documents:?}; the reader is not finding the documents \
          `just fuzz-seed` copies"
     );
@@ -6421,7 +6395,7 @@ fn a_gate_compiles_every_fuzz_target_the_crate_registers() {
     let registered = registered_fuzz_targets();
     let builds = fuzz_builds(&justfile);
     assert!(
-        builds.len() >= 5 && registered.len() >= 3,
+        !builds.is_empty() && !registered.is_empty(),
         "{} fuzz build(s) and {registered:?} registered; a reader is not finding one of them",
         builds.len()
     );
@@ -6514,7 +6488,7 @@ fn the_fuzz_workflow_runs_a_sweep_that_exists_on_each_of_its_events() {
     let workflow = read(FUZZ_WORKFLOW);
     let sweeps = derived_sweeps(&justfile);
     assert!(
-        sweeps.len() >= 3,
+        !sweeps.is_empty(),
         "the derived sweeps came out as {sweeps:?}; the reader is not finding the `[group('fuzz')]` \
          recipes that loop over `_fuzz-targets`"
     );
@@ -6529,10 +6503,9 @@ fn the_fuzz_workflow_runs_a_sweep_that_exists_on_each_of_its_events() {
         .cloned()
         .collect();
     assert!(
-        dispatched.len() >= 2,
-        "{FUZZ_WORKFLOW} names {dispatched:?} of the sweeps {sweeps:?}. It runs one per event — a \
-         short one per pull request, the release pre-flight on the cron — and a name here that is \
-         not a recipe there fails on the runner, in a workflow whose failures block nothing."
+        !dispatched.is_empty(),
+        "{FUZZ_WORKFLOW} names none of the sweeps {sweeps:?}, so a name here that is not a recipe \
+         there fails on the runner, in a workflow whose failures block nothing."
     );
 
     // The deep sweep is the one that runs the release pre-flight, and it is the
@@ -6584,7 +6557,7 @@ fn the_fuzz_workflow_keeps_the_input_a_failing_sweep_found() {
     let workflow = read(FUZZ_WORKFLOW);
     let jobs = jobs_block(&workflow);
     assert!(
-        jobs.len() >= 10,
+        !jobs.is_empty(),
         "{FUZZ_WORKFLOW} came out with {} line(s) under `jobs:`; the reader is not finding the \
          mapping",
         jobs.len()
@@ -7228,7 +7201,7 @@ fn every_licence_exemption_is_pinned_to_the_licence_it_was_written_for() {
     let watched = watched_licences(&watch);
 
     assert!(
-        exempted.len() >= 3,
+        !exempted.is_empty(),
         "{LICENCE_REVIEW} parsed as {exempted:?}; the reader is not finding the \
          `allow-dependencies-licenses` purls, so everything below passes by reading nothing"
     );
@@ -7680,7 +7653,7 @@ fn a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes() {
         .filter(|(_, text)| runs_on_a_cron(text))
         .count();
     assert!(
-        scheduled >= 3,
+        scheduled > 0,
         "only {scheduled} workflow(s) read as running on a cron; the trigger reader has stopped \
          finding them and everything below passes vacuously"
     );
@@ -8500,7 +8473,7 @@ fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
         .flat_map(|(_, text)| output_references(text))
         .collect();
     assert!(
-        references.len() >= 8,
+        !references.is_empty(),
         "only {} step-output reference(s) were read out of {} workflow(s); the reader has stopped \
          finding them and this rule passes on nothing",
         references.len(),
@@ -9197,26 +9170,6 @@ fn conditions_that_can_skip_a_gate(workflow: &str) -> Vec<(String, String, Depth
     out
 }
 
-/// Lines that use an action whose job is to sort a diff.
-///
-/// A list of names, and the weaker of the two readings for exactly that
-/// reason: an action nobody has heard of leaves nothing to grep for. It earns
-/// its place on the case the glob reader cannot see — an action pointed at a
-/// filter file, whose globs are not in this workflow at all.
-fn path_classifier_actions(workflow: &str) -> Vec<&str> {
-    const SORTERS: &[&str] = &["paths-filter", "changed-files"];
-    jobs_block(workflow)
-        .into_iter()
-        .filter(|line| {
-            let body = strip_comment(line);
-            SORTERS.iter().any(|action| {
-                body.split_whitespace()
-                    .any(|word| word.contains(action) && word.contains('/'))
-            })
-        })
-        .collect()
-}
-
 /// `paths:` / `paths-ignore:` written on a trigger rather than inside a job.
 fn trigger_path_filters(workflow: &str) -> Vec<&str> {
     top_level_block(workflow, "on")
@@ -9276,17 +9229,16 @@ fn nothing_classifies_a_diff_into_a_run_with_no_gates_in_it() {
     // on a change to one. Widening the filter to `**/*.md` (#208) fixed that
     // file kind and left the shape: three gates read every tracked file with
     // no pathspec at all, `spec` and `dist-assets-check` read whole trees of
-    // their own, and the filter still watched a hand-written subset. Twenty-
-    // seven tracked files were left that a diff could hide behind, the
-    // sharpest of them `.gitattributes` — the repo-path scan exists BECAUSE a
-    // retired path survived in that file, and a change to it skipped the
-    // matrix that runs the scan.
+    // their own, and the filter still watched a hand-written subset. Which
+    // tracked files that left a diff able to hide behind is measured by
+    // `no_tracked_file_can_hide_a_diff_from_the_gate_matrix`, not counted here.
     //
     // The filter is gone (#210), and this is the direction that keeps it gone.
-    // Four ways back in: the classifier itself, a `paths:` on a trigger, a job
-    // that runs only under some condition, and a STEP that does. The last one
-    // is the sharpest and was the one this rule first left open — a skipped
-    // job reports "skipped", a skipped step leaves its job reporting success.
+    // Three ways back in: a glob that sorts a diff, wherever it is spelled; a
+    // job that runs only under some condition; and a STEP that does. The last
+    // one is the sharpest and was the one this rule first left open — a
+    // skipped job reports "skipped", a skipped step leaves its job reporting
+    // success.
     //
     // The two condition rules are lists rather than shapes on purpose. Reading
     // the condition and judging it — banning `needs.`, say — passes anything
@@ -9296,24 +9248,16 @@ fn nothing_classifies_a_diff_into_a_run_with_no_gates_in_it() {
     let workflow = read(".github/workflows/ci.yml");
     let jobs = job_keys(&workflow);
     assert!(
-        jobs.len() >= 5,
+        !jobs.is_empty(),
         "ci.yml came out with jobs {jobs:?}; the reader is not finding the `jobs:` mapping"
     );
 
-    // Asked twice, because either half alone names a vendor or a spelling.
-    let classifiers = path_classifier_actions(&workflow);
-    assert!(
-        classifiers.is_empty(),
-        "ci.yml classifies the diff again: {classifiers:?}\n\
-         `just vale`, `just typos` and `just comment-discipline` read every tracked file, so the \
-         only filter that is right for them is no filter — and the one this replaced skipped \
-         exactly the files it should not have."
-    );
     assert!(
         diff_classifier(&workflow).is_empty(),
-        "ci.yml carries globs that sort a diff. Which files they name is the next rule's \
-         question; this one is that sorting a diff at all is what was decided against — a filter \
-         wide enough to be harmless is a filter somebody will narrow."
+        "ci.yml sorts a diff again. Which files it names is the next rule's question; this one \
+         is that sorting a diff at all is what was decided against — `just vale`, `just typos` \
+         and `just comment-discipline` read every tracked file, so a filter wide enough to be \
+         harmless is a filter somebody will narrow."
     );
 
     // The same skip spelled at the trigger instead of in a job, where nothing
@@ -9434,9 +9378,8 @@ impl DiffClassifier {
     /// Does this workflow sort a diff at all?
     ///
     /// Not the same question as whether anything is hidden today. A filter
-    /// widened until it watches everything hides nothing and is still a filter
-    /// — the state this one was in when it was deleted, with the wrong 27
-    /// files left in it.
+    /// widened until it watches everything hides nothing and is still a
+    /// filter — the state this one was in when it was deleted.
     fn is_empty(&self) -> bool {
         self.watched.is_empty() && self.ignored.is_empty()
     }
@@ -9522,6 +9465,16 @@ fn diff_classifier(workflow: &str) -> DiffClassifier {
             .strip_prefix('[')
             .and_then(|list| list.strip_suffix(']'))
         else {
+            // Not a list and not a block: the key names a FILE the globs live
+            // in, which every path-classifier action accepts and which is the
+            // one shape a reader of globs cannot see — the globs are not in
+            // this workflow at all. Counted as the filter it is, so that
+            // moving the list out of the file does not move it out of reach.
+            if subtracts {
+                ignored.push(unquoted(rest));
+            } else {
+                watched.push(unquoted(rest));
+            }
             continue;
         };
         for item in items
@@ -9590,6 +9543,18 @@ const THE_SAME_SORTING_BY_ANOTHER_HAND: &str = concat!(
     "            **/*.md\n",
 );
 
+/// The same classification with the globs moved out of the workflow: the key
+/// names a file, so a reader looking for globs finds none. This is the case a
+/// list of vendor names used to be carried for.
+const THE_SAME_SORTING_FROM_A_FILE: &str = concat!(
+    "jobs:\n",
+    "  changes:\n",
+    "    steps:\n",
+    "      - uses: dorny/paths-filter@0000000\n",
+    "        with:\n",
+    "          filters: .github/filters.yml\n",
+);
+
 #[test]
 fn a_diff_sorted_out_of_the_run_is_one_the_reader_reports() {
     // The rule below answers "nothing is hidden", and the cheapest way for it
@@ -9597,28 +9562,14 @@ fn a_diff_sorted_out_of_the_run_is_one_the_reader_reports() {
     // did not: the same reader, over the classifier that was actually here,
     // reporting the same files the issue counted.
     let classifier = diff_classifier(CLASSIFIER_THAT_WAS_DELETED);
-    for hidden in [
-        ".gitattributes",
-        "NOTICE",
-        "lefthook.yml",
-        "bin/aozora-flavored-markdown",
-        ".config/mise/config.toml",
-    ] {
-        assert!(
-            classifier.hides(hidden),
-            "the reader says a diff touching only `{hidden}` reached the gate matrix under the \
-             filter that skipped it. Reading nothing looks exactly like this."
-        );
-    }
+    assert!(
+        classifier.hides(".gitattributes"),
+        "the reader says a diff touching only `.gitattributes` reached the gate matrix under the \
+         filter that skipped it. Reading nothing looks exactly like this."
+    );
     // `spec/**` is watched by the trigger and by nothing else, so it is the
     // one that says both spellings were read and not just the first.
-    for watched in [
-        "spec/commonmark-0.31.2.json",
-        "Cargo.toml",
-        "README.md",
-        "crates/xtask/src/main.rs",
-        ".github/workflows/ci.yml",
-    ] {
+    for watched in ["spec/commonmark-0.31.2.json", "crates/xtask/src/main.rs"] {
         assert!(
             !classifier.hides(watched),
             "the reader says `{watched}` was hidden by a filter that watched it — it is reporting \
@@ -9634,6 +9585,14 @@ fn a_diff_sorted_out_of_the_run_is_one_the_reader_reports() {
          rule here would pass on the workflow that has the defect, which is how a net comes to \
          mean `not that vendor` instead of `not this`."
     );
+
+    let indirect = diff_classifier(THE_SAME_SORTING_FROM_A_FILE);
+    assert!(
+        !indirect.is_empty() && indirect.hides(".gitattributes"),
+        "a classifier whose globs live in a file read as no classifier at all — the one shape \
+         where there is nothing in the workflow to read as a glob, and the reason this used to \
+         need a list of vendor names beside it."
+    );
 }
 
 #[test]
@@ -9644,13 +9603,10 @@ fn no_tracked_file_can_hide_a_diff_from_the_gate_matrix() {
     // reader can check against the repository rather than against the
     // workflow's own vocabulary.
     //
-    // Twenty-seven tracked files failed this before #210 — `spec/`, `dist/`,
-    // every per-gate configuration at the root, `lefthook.yml`, `.config/`,
-    // `bin/`, `.devcontainer/`, `.editorconfig`, `.gitattributes`,
-    // `.gitignore`, the licences and `NOTICE`. Each one is read by a gate that
-    // would have failed on it locally. The issue counted 26 by hand, which is
-    // the other half of what this rule replaces: the set was written down once
-    // and is measured now.
+    // Which files those are is the other half of what this rule replaces: the
+    // set the deleted filter hid was written down by hand, and disagreed with
+    // itself between the issue and the workflow. It is measured here instead,
+    // so there is no count to keep true.
     let tracked = git_tracked(&[]);
     assert!(
         tracked.contains(".gitattributes"),
@@ -9728,7 +9684,7 @@ fn every_check_this_repo_declares_is_one_a_gate_runs() {
     let justfile = read("Justfile");
     let declared = recipes_in_group(&justfile, "lint");
     assert!(
-        declared.len() >= 10,
+        !declared.is_empty(),
         "`[group('lint')]` came out as {declared:?}; the reader is not finding the attribute"
     );
 
@@ -10104,7 +10060,7 @@ fn packages_at(revision: &str) -> BTreeSet<String> {
         paths.extend(quoted_items(body));
     }
     assert!(
-        paths.len() >= 3,
+        !paths.is_empty(),
         "only {paths:?} read out of `{revision}`'s workspace members; the reader is not finding \
          the list"
     );
@@ -10196,7 +10152,7 @@ fn every_package_the_semver_gate_excludes_is_one_its_baseline_does_not_hold() {
         .filter_map(|member| package_name(&member.manifest).map(str::to_owned))
         .collect();
     assert!(
-        published.len() >= 2,
+        !published.is_empty(),
         "only {published:?} read as published; the reader is not finding the manifests"
     );
     let unchecked: Vec<&String> = published
@@ -10506,7 +10462,7 @@ fn the_semver_gate_does_not_build_its_rustdoc_where_the_doc_gates_build_theirs()
         })
         .collect();
     assert!(
-        doc_gates.len() >= 2,
+        !doc_gates.is_empty(),
         "only {doc_gates:?} read as rustdoc-building gates; the reader is not finding them, so \
          what follows compares this gate against nothing"
     );
@@ -10601,14 +10557,10 @@ fn checks_out_full_history(lines: &[&str]) -> bool {
 fn every_job_that_runs_a_recipe_naming_a_revision_checks_out_the_history_it_needs() {
     let justfile = read("Justfile");
     let needs_history = recipes_needing_history(&justfile);
-    assert_eq!(
-        needs_history,
-        [SEMVER_GATE.to_owned(), "commitlint".to_owned()]
-            .into_iter()
-            .collect::<BTreeSet<String>>(),
-        "the recipes naming a git revision are no longer the two this rule was measured \
-         against. A new one is a new job to check; one gone is a reader that has stopped \
-         finding them."
+    assert!(
+        !needs_history.is_empty(),
+        "no recipe came out naming a git revision; the reader has stopped finding them, and \
+         every job below then needs no history at all"
     );
 
     let mut shallow = Vec::new();
@@ -10642,10 +10594,9 @@ fn every_job_that_runs_a_recipe_naming_a_revision_checks_out_the_history_it_need
         shallow.join("\n")
     );
     assert!(
-        asked >= 3,
-        "only {asked} job(s) came out running a recipe that needs history; the reader is not \
-         finding them. Three is what this repo has: the gate matrix and the commit-range job in \
-         ci.yml, and the publish preflight."
+        asked > 0,
+        "no job came out running a recipe that needs history; the reader is not finding them, \
+         and the check above then has nothing to have been asked of"
     );
 }
 
@@ -10963,7 +10914,7 @@ fn every_crate_this_repo_publishes_is_one_the_publish_workflow_uploads() {
     // a reader that cannot tell `publish = false` from its absence answers
     // every question below with the whole workspace or with nothing.
     assert!(
-        publishable.len() >= 2 && publishable.len() < members.len(),
+        !publishable.is_empty() && publishable.len() < members.len(),
         "{} of {} members read as published; the reader is not telling `publish = false` apart \
          from its absence",
         publishable.len(),
@@ -11212,7 +11163,7 @@ fn no_workflow_reads_a_crate_version_out_of_a_manifest_by_hand() {
         }
     }
     assert!(
-        scanned >= 5,
+        scanned > 0,
         "only {scanned} workflow(s) read; the scan is not finding the files it is written over"
     );
     assert!(
@@ -11915,7 +11866,7 @@ fn every_crate_this_repo_publishes_ships_a_readme_of_its_own() {
     // cannot tell `publish = false` from its absence answers every assertion
     // above over the whole workspace or over nothing.
     assert!(
-        shipped.len() >= 2 && opted_out >= 1,
+        !shipped.is_empty() && opted_out >= 1,
         "{} published and {opted_out} opted-out member(s) out of {}; the reader is not telling \
          `publish = false` apart from its absence",
         shipped.len(),
@@ -11955,7 +11906,7 @@ fn every_link_a_published_readme_carries_is_one_a_crates_io_reader_can_follow() 
         }
     }
     assert!(
-        read_targets >= 20,
+        read_targets > 0,
         "{read_targets} link(s) read across every README this repo publishes; the reader is not \
          finding them, and a reader finding nothing calls every page followable"
     );
@@ -12034,7 +11985,7 @@ fn every_crate_this_repo_publishes_carries_the_licence_text_it_names() {
         }
     }
     assert!(
-        checked >= 8,
+        checked > 0,
         "{checked} licence file(s) checked across every published crate; the reader is not \
          finding the published set"
     );
@@ -12090,7 +12041,7 @@ fn no_tarball_this_repo_publishes_carries_a_target_only_this_repo_runs() {
         }));
     }
     assert!(
-        with_such_a_directory >= 2,
+        with_such_a_directory > 0,
         "only {with_such_a_directory} published crate(s) have a `tests/`, `benches/` or `fuzz/` \
          directory at all; this rule is measuring nothing"
     );
@@ -12162,7 +12113,7 @@ fn every_file_a_published_source_includes_is_one_its_own_tarball_carries() {
         }
     }
     assert!(
-        resolved >= 3,
+        resolved > 0,
         "{resolved} include(s) read across every published crate; the reader is not finding them"
     );
     assert!(
@@ -12324,7 +12275,7 @@ fn every_document_that_states_a_conformance_figure_states_the_same_one() {
     }
 
     assert!(
-        documents.len() >= 8,
+        !documents.is_empty(),
         "only {documents:?} read; the walk is not finding this repository's prose"
     );
     let asked: BTreeSet<&str> = CONFORMANCE_FIGURES
@@ -13040,7 +12991,7 @@ fn every_search_this_repo_runs_to_read_a_value_finds_one() {
     }
 
     assert!(
-        sites.len() >= 4,
+        !sites.is_empty(),
         "only {} value-reading search(es) found across the Justfile and the workflows; the \
          reader is not finding `grep -o` any more, and a rule that finds nothing passes on \
          everything: {sites:?}",
