@@ -57,11 +57,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fmt;
 use std::fs;
+use std::iter;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde_json::Value;
@@ -392,6 +395,44 @@ fn top_level_block<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
         }
     }
     out
+}
+
+/// The lines nested under `key:` inside a block that is already indented —
+/// a job's `permissions:`, say, out of the lines of that job.
+///
+/// The indentation is what makes it that block and not a neighbouring one:
+/// `job_lines` hands back the whole job, steps included, and a reader that
+/// went looking for a permission anywhere inside it would answer for a `with:`
+/// value that happened to be spelled alike.
+fn nested_block<'a>(lines: &[&'a str], key: &str) -> Vec<&'a str> {
+    let header = format!("{key}:");
+    let mut out = Vec::new();
+    let mut opened_at = None;
+    for line in lines {
+        let body = strip_comment(line);
+        if body.trim().is_empty() {
+            continue;
+        }
+        let indent = body.len() - body.trim_start().len();
+        match opened_at {
+            Some(open) if indent > open => out.push(*line),
+            Some(_) => break,
+            None if body.trim() == header => opened_at = Some(indent),
+            None => {}
+        }
+    }
+    out
+}
+
+/// Is `key:` written in this block at all? Separate from what is under it,
+/// because a job that declares `permissions:` REPLACES the workflow's grant
+/// rather than adding to it — so an empty one is a statement, and the absence
+/// of one is a different statement.
+fn declares_key(lines: &[&str], key: &str) -> bool {
+    let header = format!("{key}:");
+    lines
+        .iter()
+        .any(|line| strip_comment(line).trim().starts_with(header.as_str()))
 }
 
 /// The lines under the workflow's `jobs:` mapping.
@@ -3367,7 +3408,7 @@ fn crate_directories() -> BTreeSet<String> {
 /// from here on lands on this list as an unanswered question rather than
 /// silently skipping the one crate that cannot inherit it.
 const LINTS_A_NON_MEMBER_CRATE_MAY_SKIP: &[(&str, &str)] = &[
-    // Surface policy for a published library. This crate is four `#![no_main]`
+    // Surface policy for a published library. This crate is `#![no_main]`
     // binaries whose whole body is one `fuzz_target!` invocation: it has no
     // API, no types a consumer names, and no lifetimes written by hand.
     ("missing_debug_implementations", SKIP_NO_SURFACE),
@@ -5324,6 +5365,505 @@ fn no_fuzz_build_compiles_for_a_statically_linked_libc() {
 }
 
 // ---------------------------------------------------------------------------
+// the fuzzing budget, and the backstop wrapped around it
+// ---------------------------------------------------------------------------
+//
+// The section above walked `fuzz-quick`'s single line on every run, and asked
+// it one question: does it name a triple. It did. The `timeout` at the front of
+// the same line was the reason that recipe had never fuzzed anything.
+//
+// `cargo fuzz run` is two things — it compiles the target, then executes it —
+// so a `timeout` around the whole of it is a wall clock over the build as well
+// as the search, and the number beside it had been chosen as the search budget
+// plus a little: `timeout 90s` around `-max_total_time=60`. An AddressSanitizer
+// build of this graph does not fit in the "little" on a cold runner, so
+// fuzz.yml's `sweep (quick)` exited 124 on all five runs it ever had and
+// libFuzzer never started once. `fuzz-deep` (360/300) and `fuzz-marathon`
+// (1000/900) carried the identical shape; CI happened to run only the first
+// (#224).
+//
+// Nothing in this repo could have said so. `just ci` runs `fuzz-build`, which
+// is the compile with no run at all, and every other reader of these recipes
+// asked about the text after `--target`. Locally the build is warm, so the
+// recipe fits its budget and looks right — the defect exists only on a machine
+// that has to compile, which is every machine except the author's.
+//
+// The three below are therefore about the `timeout` and not about cargo-fuzz's
+// flags: where it sits relative to the compile, where its number comes from,
+// and whether it still does the one job it is there for.
+
+/// The `Justfile`'s commands with `\` continuations folded, so one entry is one
+/// thing a shell runs rather than one line a reader sees.
+///
+/// [`expanded_recipe_lines`] is per physical line, which is the right grain for
+/// "what did this line hand its tool" and the wrong one for "what else is
+/// inside the command this `timeout` bounds": the timed fuzz recipe spreads a
+/// single `bash -c` over four lines, with the backstop on one of them and the
+/// compile it must not cover on another.
+fn logical_commands(justfile: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut pending: Option<(String, String)> = None;
+    for (recipe, line) in expanded_recipe_lines(justfile) {
+        // A continuation belongs to the recipe the command STARTED in.
+        let (owner, joined) = match pending.take() {
+            Some((owner, head)) => (owner, format!("{head} {}", line.trim())),
+            None => (recipe, line),
+        };
+        match joined.trim_end().strip_suffix('\\') {
+            Some(head) => pending = Some((owner, head.trim_end().to_owned())),
+            None => out.push((owner, joined)),
+        }
+    }
+    out.extend(pending);
+    out
+}
+
+/// Flags a `cargo fuzz` call takes a detached value after, so that the word
+/// behind one is not the target name. Short of parsing cargo-fuzz's clap
+/// definition this is a list, and it is the conservative direction: a flag
+/// missing from it makes its value read as a target name, which fails the
+/// assertion below rather than passing it quietly.
+const FUZZ_FLAGS_TAKING_A_VALUE: &[&str] = &[
+    "--target",
+    "--target-dir",
+    "--sanitizer",
+    "-s",
+    "--jobs",
+    "-j",
+    "--features",
+];
+
+/// The fuzz target a `cargo fuzz <sub>` call names, given tokens starting at
+/// the sub-command.
+///
+/// `None` is a call that names none. For `build` that is every registered
+/// target — the widest compile there is, so it answers "was this one built
+/// first" with yes rather than escaping the question.
+fn fuzz_target_argument(tokens: &[String]) -> Option<String> {
+    // Only cargo-fuzz's own side of a bare `--`; past it the words belong to
+    // libFuzzer, which has no target argument and plenty of bare ones.
+    let own = tokens.split(|token| token == "--").next().unwrap_or(&[]);
+    let mut at = 1;
+    while let Some(token) = own.get(at) {
+        if FUZZ_FLAGS_TAKING_A_VALUE.contains(&token.as_str()) {
+            at += 2;
+        } else if token.starts_with('-') {
+            at += 1;
+        } else {
+            return Some(token.clone());
+        }
+    }
+    None
+}
+
+/// Every `cargo fuzz` call in `tokens` that compiles, as (sub-command, target).
+/// [`fuzz_builds`] asks this of one line and keeps the first; a command holds
+/// several, and which side of the backstop each falls on is the whole question.
+fn fuzz_compiles(tokens: &[String]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = tokens;
+    while let Some(at) = fuzz_build_at(rest) {
+        out.push((rest[at].clone(), fuzz_target_argument(&rest[at..])));
+        rest = &rest[at + 1..];
+    }
+    out
+}
+
+/// The `timeout` invocation in a command, as written: from the word `timeout`
+/// up to the command whose wall clock it bounds.
+///
+/// Text rather than tokens, because the duration is an arithmetic expansion and
+/// [`shell_tokens`] takes `$((` and `))` out as punctuation — which is the
+/// right thing for reading a command and destroys the only part of this one
+/// that has to be evaluated rather than read.
+fn timeout_invocation(command: &str) -> Option<&str> {
+    // A word, the way the token readers see one: `--timeout 30` holds this
+    // text and is a different flag on a different program.
+    let (at, _) = command
+        .match_indices("timeout ")
+        .find(|&(at, _)| at == 0 || command[..at].ends_with(char::is_whitespace))?;
+    let bounded = command[at..].find("cargo")?;
+    Some(&command[at..at + bounded])
+}
+
+/// Every command in the `Justfile` that wraps a `cargo fuzz` compile in a
+/// `timeout`, as (recipe, whole command).
+///
+/// All of them and not the first. One recipe carries this shape today because
+/// this PR folded three copies into it; before that there were three, all three
+/// were wrong, and the one CI ran is the one anybody looked at. A reader that
+/// stopped at the first would be that arrangement again.
+fn timed_fuzz_commands(justfile: &str) -> Vec<(String, String)> {
+    logical_commands(justfile)
+        .into_iter()
+        .filter(|(_, command)| {
+            let tokens = shell_tokens(command);
+            tokens
+                .iter()
+                .position(|token| token == "timeout")
+                .is_some_and(|at| !fuzz_compiles(&tokens[at..]).is_empty())
+        })
+        .collect()
+}
+
+/// What `timeout` is actually handed when the recipe's `SECONDS` parameter is
+/// `seconds`: its flags and its duration, with the arithmetic evaluated.
+///
+/// Asked of a shell rather than parsed, because a shell is what evaluates it.
+/// `timeout` becomes `echo`, so the same text that runs in the recipe is the
+/// text that reports here — a second copy computed in Rust would agree with the
+/// recipe exactly until the day it mattered.
+fn timeout_arguments(invocation: &str, parameter: &str, seconds: i64) -> Vec<String> {
+    let script = invocation_for(invocation, parameter, seconds).replacen("timeout", "echo", 1);
+    let out = Command::new("bash")
+        .args(["-c", &script])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "running bash: {e}\n\
+                 This suite runs inside the dev image (ADR-0002), where bash is installed."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "the recipe's own `timeout` arguments are not something a shell can evaluate:\n  \
+         {script}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The name of a recipe parameter as a body spells it: `RANGE="a..b"` is
+/// `RANGE` where it is used, and `*ARGS` is `ARGS`.
+fn parameter_name(parameter: &str) -> &str {
+    let bare = parameter.trim_start_matches(['*', '+', '$']);
+    bare.split('=').next().unwrap_or(bare)
+}
+
+/// The seconds `timeout` will wait, read off the duration it was handed — its
+/// last argument, and the only one with no leading dash.
+fn timeout_budget(arguments: &[String]) -> i64 {
+    let duration = arguments
+        .last()
+        .unwrap_or_else(|| panic!("the recipe's `timeout` was handed no arguments at all"));
+    duration.trim_end_matches('s').parse().unwrap_or_else(|e| {
+        panic!(
+            "`timeout {duration}` is not a whole number of seconds ({e}). It may well be a \
+             duration `timeout` accepts — `2m`, `1h` — but then the arithmetic this reader \
+             compares against libFuzzer's own budget is in different units from it."
+        )
+    })
+}
+
+#[test]
+fn every_timed_fuzz_run_has_its_compile_paid_for_outside_the_backstop() {
+    // The defect itself, stated over every command in the file rather than over
+    // the three recipes that had it. Written that way for the reason the triple
+    // assertions above are: a fourth timed recipe is this hole reopened, and a
+    // list of today's three would not see it.
+    let justfile = read("Justfile");
+    let mut bounded = 0usize;
+    for (recipe, command) in logical_commands(&justfile) {
+        let tokens = shell_tokens(&command);
+        let Some(backstop) = tokens.iter().position(|token| token == "timeout") else {
+            continue;
+        };
+        let ahead = fuzz_compiles(&tokens[..backstop]);
+        for (sub, target) in fuzz_compiles(&tokens[backstop..]) {
+            bounded += 1;
+            let paid = ahead.iter().any(|(earlier, built)| {
+                earlier == "build" && (built.is_none() || built.as_deref() == target.as_deref())
+            });
+            assert!(
+                paid,
+                "`just {recipe}` runs `cargo fuzz {sub}` under a `timeout` and compiles nothing \
+                 before it. `cargo fuzz {sub}` builds the target and then executes it, so that \
+                 wall clock buys an AddressSanitizer build of the whole graph first and a search \
+                 with whatever is left over — on a cold runner, nothing, and an exit 124 that \
+                 reads like a hang. Run `cargo fuzz build` for the same target ahead of the \
+                 `timeout` and let the backstop bound the run alone (#224):\n      {}",
+                command.trim()
+            );
+        }
+    }
+    assert!(
+        bounded >= 1,
+        "no `cargo fuzz` call in the Justfile runs under a `timeout` any more, so this reader is \
+         holding nothing. The backstop is not decoration: `-max_total_time` promises an exit only \
+         to a libFuzzer that reaches the end of its loop, and a run wedged on one input reaches \
+         nothing — which is the failure the sweep's own job-level `timeout-minutes` would then be \
+         the first thing to notice, an hour later and with no artifact."
+    );
+}
+
+/// A `timeout` in the `Justfile` that bounds a fuzz run: the recipe it is in,
+/// the invocation as written, and the `-max_total_time` the run inside it hands
+/// libFuzzer.
+struct TimedFuzzRun {
+    recipe: String,
+    invocation: String,
+    budget: String,
+}
+
+/// Every one of them, in file order.
+fn timed_fuzz_runs(justfile: &str) -> Vec<TimedFuzzRun> {
+    let mut out = Vec::new();
+    for (recipe, command) in timed_fuzz_commands(justfile) {
+        let invocation = timeout_invocation(&command)
+            .unwrap_or_else(|| {
+                panic!(
+                    "`just {recipe}` has a `timeout` and nothing to read between it and the \
+                     command it bounds"
+                )
+            })
+            .to_owned();
+        let Some((_, after)) = command.split_once("-max_total_time=") else {
+            panic!(
+                "`just {recipe}` runs a fuzz target under a `timeout` and gives libFuzzer no \
+                 `-max_total_time`. Then the backstop is the only thing that ends the run, and \
+                 what ends it is a SIGTERM: no corpus written back, no final stats, exit 124 on a \
+                 run that found nothing wrong."
+            );
+        };
+        let budget = after
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('\'')
+            .to_owned();
+        out.push(TimedFuzzRun {
+            recipe,
+            invocation,
+            budget,
+        });
+    }
+    out
+}
+
+/// Every recipe that runs `just <recipe>`, with the words it passes after the
+/// name. Read off the folded commands, so a call spread over a continuation is
+/// still one call.
+fn callers_of(justfile: &str, recipe: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for (caller, command) in logical_commands(justfile) {
+        if caller == recipe || !line_runs_recipe(&command, recipe) {
+            continue;
+        }
+        let arguments: Vec<String> = dotted_words(strip_comment(&command))
+            .skip_while(|word| *word != recipe)
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+        out.push((caller, arguments));
+    }
+    out
+}
+
+/// The recipe parameter `run`'s duration is written in terms of, and every
+/// search that backstop is therefore asked to bound, as (who asked, seconds).
+///
+/// A literal duration bounds exactly one search, the one written beside it. A
+/// parameterised one bounds whatever its callers pass, and the callers are then
+/// the only place in the file those numbers appear at all — which is why this
+/// question is asked of them rather than of the recipe.
+fn searches_bounded_by(justfile: &str, run: &TimedFuzzRun) -> (String, Vec<(String, i64)>) {
+    let spelled: BTreeSet<&str> = words(&run.invocation).collect();
+    let parameters = recipe_parameters(recipe_header(justfile, &run.recipe));
+    let Some(at) = parameters
+        .iter()
+        .position(|p| spelled.contains(parameter_name(p)))
+    else {
+        let seconds: i64 = run.budget.trim_end_matches('s').parse().unwrap_or_else(|e| {
+            panic!(
+                "`just {}` gives libFuzzer `-max_total_time={}`, which is not a whole number of \
+                 seconds ({e})",
+                run.recipe, run.budget
+            )
+        });
+        return (String::new(), vec![(run.recipe.clone(), seconds)]);
+    };
+    let parameter = parameter_name(parameters[at]);
+    let callers = callers_of(justfile, &run.recipe);
+    assert!(
+        !callers.is_empty(),
+        "`just {}` takes a fuzzing budget as a parameter and nothing calls it, so no number in \
+         this file is the budget it computes its backstop from",
+        run.recipe
+    );
+    let mut out = Vec::new();
+    for (caller, arguments) in callers {
+        let passed = arguments.get(at).unwrap_or_else(|| {
+            panic!(
+                "`just {caller}` calls `{}` with {arguments:?} and gives it no `{parameter}`. Its \
+                 budget is then the empty string, its backstop is whatever `$(( + grace ))` comes \
+                 to, and neither is what the recipe's own doc comment promises.",
+                run.recipe
+            )
+        });
+        let seconds: i64 = passed.parse().unwrap_or_else(|e| {
+            panic!(
+                "`just {caller}` passes `{passed}` as `{}`'s `{parameter}` ({e}). The arguments \
+                 are positional and the other one is a target name, so the two swapped round is a \
+                 recipe that fuzzes a target called `{passed}` for as many seconds as the target \
+                 name comes to — which in shell arithmetic is zero.",
+                run.recipe
+            )
+        });
+        out.push((caller, seconds));
+    }
+    (parameter.to_owned(), out)
+}
+
+#[test]
+fn the_backstop_counts_a_wall_clock_derived_from_the_budget_it_wraps() {
+    // The other half of the defect, and the half that would have grown back.
+    // `timeout 90s` beside `-max_total_time=60` is two numbers written by hand
+    // that have to agree, in three recipes, each carrying its own pair — and
+    // the pair was wrong in all three. Correcting them is a fix for today; the
+    // arithmetic is what stops the fourth pair from being written wrong.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`; the reader is not finding \
+         it, or the backstop is gone"
+    );
+
+    for run in &runs {
+        let spelled: BTreeSet<&str> = words(&run.invocation).collect();
+        for word in words(&run.budget) {
+            assert!(
+                spelled.contains(word),
+                "`just {}` bounds a `-max_total_time={}` run with `{}`, and the two numbers have \
+                 nothing to do with each other. They are one number: the backstop is the search \
+                 budget plus a shutdown, so it has to be computed from it. Written side by side \
+                 they drift — which they had, in all three recipes, in the direction that spent \
+                 the whole search on the build (#224).",
+                run.recipe,
+                run.budget,
+                run.invocation.trim()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_backstop_outlasts_every_search_it_is_asked_to_bound() {
+    // Naming the budget is only half of "computed from it": `timeout $SECONDS`
+    // around `-max_total_time=$SECONDS` names it and truncates it. Measured
+    // against the numbers the callers actually pass, so what is held is the
+    // recipe as it is invoked rather than as it is parameterised — and a
+    // caller that passes the two positional arguments the wrong way round is
+    // read here rather than at the far end of a sweep.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`, so this reader is holding \
+         nothing"
+    );
+
+    for run in &runs {
+        let (parameter, searches) = searches_bounded_by(&justfile, run);
+        for (asked_by, seconds) in &searches {
+            let wall = timeout_budget(&timeout_arguments(&run.invocation, &parameter, *seconds));
+            assert!(
+                wall > *seconds,
+                "`just {asked_by}` asks for a {seconds}-second search and the backstop around it \
+                 fires at {wall}s. A backstop that cuts the search short is not a backstop; it is \
+                 a shorter search that reports itself as a hang — and libFuzzer killed mid-loop \
+                 writes back neither the corpus it grew nor the stats that say what it covered."
+            );
+        }
+    }
+}
+
+#[test]
+fn the_backstop_around_a_fuzz_run_kills_a_run_that_never_ends() {
+    // Run rather than read, and the reason is the change that made the two
+    // assertions above pass: the duration stopped being the literal `90s` and
+    // became `$(( … ))`, i.e. text that is correct only if a shell evaluates it
+    // where the recipe puts it. Quoted one layer differently and `timeout`
+    // receives the expression verbatim, exits 125 without waiting, and every
+    // fuzz run in this repo loses its backstop while both readers above go on
+    // reporting it present. The same goes for `--kill-after`, which neither of
+    // them reads at all.
+    let justfile = read("Justfile");
+    let runs = timed_fuzz_runs(&justfile);
+    assert!(
+        !runs.is_empty(),
+        "no Justfile command wraps a `cargo fuzz` call in a `timeout`, so nothing here is \
+         demonstrated"
+    );
+
+    for run in &runs {
+        let recipe = &run.recipe;
+        let (parameter, _) = searches_bounded_by(&justfile, run);
+
+        // The grace this recipe allows on top of a search, measured by asking
+        // the expression what it comes to at zero. A budget of one second is
+        // then a search of `1 - grace`, which is nonsense as a search and is
+        // exactly the point: what is timed here is the backstop, not a fuzzer.
+        let grace = timeout_budget(&timeout_arguments(&run.invocation, &parameter, 0));
+        let shrunk = 1 - grace;
+        let wall = timeout_budget(&timeout_arguments(&run.invocation, &parameter, shrunk));
+        assert_eq!(
+            wall, 1,
+            "`just {recipe}` computes a {wall}-second backstop for a {shrunk}-second search, so \
+             its wall clock is not the search budget plus a fixed grace and this demonstration \
+             cannot shrink the recipe's own invocation to something it can wait for. Either the \
+             duration went back to a literal — the arrangement the reader above rejects — or it \
+             grew a factor, in which case rewrite the shrink and not the recipe."
+        );
+        let ready = invocation_for(&run.invocation, &parameter, shrunk);
+
+        // The demonstration: the recipe's own invocation, around something that
+        // never ends.
+        let started = Instant::now();
+        let hung = bash(&format!("{ready} sleep 300"));
+        let waited = started.elapsed();
+        assert_eq!(
+            hung.code(),
+            Some(124),
+            "`just {recipe}`'s backstop did not kill a command that never ends. 124 is the status \
+             `timeout` reports when it fires, and the status fuzz.yml reported five times for a \
+             reason that was never a hang."
+        );
+        assert!(
+            waited < Duration::from_secs(30),
+            "`just {recipe}`'s backstop fired after {waited:?} on a one-second budget, so what \
+             ended the command was not the duration the recipe computes"
+        );
+
+        // The control. A backstop that fires on a run which finished is a red X
+        // on every sweep, and a red X on every sweep is what taught six pull
+        // requests to merge past this job in the first place.
+        let finished = bash(&format!("{ready} true"));
+        assert!(
+            finished.success(),
+            "`just {recipe}`'s backstop reports {finished:?} for a command that exited immediately"
+        );
+    }
+}
+
+/// The recipe's `timeout` invocation with its budget parameter filled in, ready
+/// for a shell.
+fn invocation_for(invocation: &str, parameter: &str, seconds: i64) -> String {
+    invocation.replace(&format!("{{{{{parameter}}}}}"), &seconds.to_string())
+}
+
+/// Run a script the way the recipes run theirs, and report only how it ended.
+fn bash(script: &str) -> process::ExitStatus {
+    Command::new("bash")
+        .args(["-c", script])
+        .status()
+        .unwrap_or_else(|e| panic!("running bash: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // the fuzz targets, wherever they are listed
 // ---------------------------------------------------------------------------
 
@@ -5388,7 +5928,7 @@ const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[
     (
         "fuzz-lock",
         "it acts on the fuzz workspace's lockfile and not on its targets: one \
-         `cargo update` re-resolves the single graph all four `[[bin]]`s are built \
+         `cargo update` re-resolves the single graph every `[[bin]]` is built \
          from, so there is no per-target step for a list to drive. Recorded here \
          rather than filtered out of `whole_set_fuzz_recipes`, and that carve-out is \
          a real cost — the classifier's premise, that a recipe taking no argument \
@@ -5406,14 +5946,20 @@ const FUZZ_RECIPES_THAT_ENUMERATE_NOTHING: &[(&str, &str)] = &[
 /// of the derivation is that there are none of those.
 const FUZZ_RECIPES_THAT_NAME_A_TARGET: &[(&str, &str)] = &[(
     "fuzz-seed",
-    "`sjis_decode` is the one target whose input is bytes rather than text: it hands \
-     them to `decode_sjis`, which rejects a UTF-8 seed at its first multi-byte \
-     character, so its seeds are transcoded to CP932 and every other target's are \
-     not. The encoding a target wants is a per-target fact with nowhere else in this \
-     repo to live — and that is the defect, not the workaround: a second \
-     byte-oriented `[[bin]]` would be seeded with UTF-8 it cannot read, `just \
-     fuzz-seed` would report its seed count as cheerfully as for the rest, and \
-     nothing here would say so",
+    "the input FORMAT a target reads is a per-target fact with nowhere else in this \
+     repo to live, and two targets read something other than \"the whole input is \
+     UTF-8 source\". `sjis_decode` hands its bytes to `decode_sjis`, which rejects a \
+     UTF-8 seed at its first multi-byte character, so its seeds are transcoded to \
+     CP932; `options_space` reads a two-byte option mask before its source, so its \
+     seeds carry that prefix. That is the defect, not the workaround, and it is one \
+     this entry predicted in as many words before `options_space` existed: a second \
+     `[[bin]]` with an input format of its own was seeded with documents it could \
+     not read, `just fuzz-seed` reported its seed count as cheerfully as for the \
+     rest, and nothing here said so. Nothing HERE still does — this text grew a \
+     clause. What now does is `fuzz_regressions.rs`, which reads every target's \
+     corpus back through the shape that target reads and fails when the bytes are \
+     not the documents they were made from; the name in the recipe stays a copy, \
+     and a copy that lies is now caught one directory over rather than never",
 )];
 
 /// The fuzz targets the regression suite replays: the first argument of each
@@ -5801,6 +6347,15 @@ fn every_registered_fuzz_target_starts_from_a_seed_corpus_a_clone_would_get() {
     // already fuzzed on upstream, and a seed set of nothing else would leave
     // the aozora layer — the reason this crate exists — unreached by every
     // sweep while the counts above all looked healthy.
+    //
+    // `some target's corpus, verbatim` is as far as this file can put it, and
+    // it is not far enough: only one target is seeded with the document as it
+    // stands, so the `any` below is held up by `parse_render` alone and says
+    // nothing about the other four. It cannot say more from here — a seed is
+    // in the shape ITS target reads, and the decoders for those shapes live in
+    // the library's own test suite, one of them in a crate this one does not
+    // depend on. `fuzz_regressions.rs` asks the same question per target with
+    // those decoders in hand; what stays here is the half that needs git.
     let documents = seed_source_documents();
     assert!(
         documents.len() >= 5,
@@ -6392,23 +6947,11 @@ fn a_new_advisory_arrives_as_an_issue_and_not_only_as_a_red_square() {
     }
 }
 
-/// Files that describe this repository's own CI to a reader. History is out:
-/// `CHANGELOG.md` records what was true when it was written, and editing it to
-/// match today is how a record stops being one.
-///
-/// The ADRs used to be out on the same reasoning, and that was the hole. An
-/// ADR is not a log entry — `- Status: accepted` means the decision is in
-/// force, which is exactly the authority that makes a wrong sentence in one
-/// expensive. ADR-0015 carried "`cargo semver-checks` cannot run until a
-/// baseline exists on crates.io" for as long as the check went unwired, and
-/// the reason it went unwired is that somebody read it. So an accepted ADR is
-/// read here, and a superseded, deprecated or proposed one is not: those are
-/// the ADRs that genuinely record rather than instruct.
-const CI_PROSE_ROOTS: &[&str] = &["", "docs", "docs/adr"];
-const CI_PROSE_HISTORY: &[&str] = &["CHANGELOG.md"];
+/// The ADR every other one is copied from, and so the file that spells the
+/// status vocabulary.
+const ADR_TEMPLATE: &str = "docs/adr/0000-template.md";
 
-/// The `- Status:` an ADR declares, lower-cased. `None` for a document with
-/// no such line, which is every `.md` outside `docs/adr`.
+/// The `- Status:` a document declares, lower-cased. `None` outside `docs/adr`.
 fn adr_status(text: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.trim().strip_prefix("- Status:"))
@@ -6416,14 +6959,39 @@ fn adr_status(text: &str) -> Option<String> {
 }
 
 /// Is this document in force, as opposed to recording something that was?
-/// Everything outside `docs/adr` is; an ADR is when its status is `accepted`.
-/// The template's placeholder status names all four states at once and is
-/// therefore none of them.
+///
+/// An ADR is when it is `accepted`: that status means the decision is in
+/// force, which is the authority that makes a wrong sentence in one expensive
+/// — see the section on the check ADR-0015 said could not run. Anything else
+/// with a status, and the records `crates/xtask/src/main.rs` already names,
+/// record rather than instruct.
+///
+/// The statuses come off [`ADR_TEMPLATE`]'s placeholder line rather than a
+/// list here, because a status this reader did not recognise used to read as
+/// not-in-force in silence — taking the whole document out of every rule
+/// below with every gate still green.
 fn describes_this_repo_now(label: &str, text: &str) -> bool {
-    if !label.starts_with("docs/adr/") {
-        return true;
-    }
-    adr_status(text).is_some_and(|status| status.starts_with("accepted"))
+    let Some(status) = adr_status(text) else {
+        return !history_paths()
+            .iter()
+            .any(|history| label == history || label.starts_with(&format!("{history}/")));
+    };
+    // `superseded by ADR-XXXX` is offered with a number the writer supplies,
+    // so an offer is matched on the literal half of itself.
+    let placeholder = adr_status(&read(ADR_TEMPLATE))
+        .unwrap_or_else(|| panic!("`{ADR_TEMPLATE}` declares no `- Status:` line to read"));
+    let offered: Vec<&str> = placeholder
+        .trim_matches(|ch| ch == '{' || ch == '}')
+        .split('|')
+        .map(|offer| offer.split("adr-").next().unwrap_or_default().trim())
+        .collect();
+    assert!(
+        label == ADR_TEMPLATE || offered.iter().any(|offer| status.starts_with(offer)),
+        "{label} declares `- Status: {status}` and `{ADR_TEMPLATE}` offers {offered:?}. A status \
+         nothing recognises reads as not-in-force, so a typo takes the document out of every rule \
+         below and fails nothing."
+    );
+    status == "accepted"
 }
 
 /// Words that deny, and the scheduled-run nouns they must not be attached to.
@@ -6454,100 +7022,152 @@ fn prose_words(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every line of `text` on which a word from `negations` reaches a word from
-/// `nouns`, one-based line number and the line itself.
+/// Words that hand the sentence to a new subject, which is what makes a comma
+/// the end of a clause rather than an interruption in one.
+const CONJUNCTIONS: &[&str] = &[
+    "and", "but", "or", "yet", "though", "although", "whereas", "while",
+];
+
+/// The clauses of one unwrapped paragraph, outside backticks so a command
+/// keeps its own punctuation.
 ///
-/// A denial inside straight double quotes is a quotation, not a claim, and the
-/// distinction has to be made or the rule cannot be obeyed: the amendment that
-/// closed ADR-0015 quotes the sentence it retired, and the only thing that
-/// stopped the quotation from reading as a fresh assertion was where the line
-/// happened to wrap. Quote parity is counted from the start of the paragraph
-/// rather than the file, so an unbalanced `"` costs one paragraph.
-fn denials_in(text: &str, negations: &[&str], nouns: &[&str]) -> Vec<(usize, String)> {
+/// A comma cuts only when a conjunction follows it. Cutting at every comma
+/// was the boundary a negation's reach could not cross, and an interrupted
+/// negation — "does not, on any pull request, run `just test`" — landed on the
+/// far side of one. What the cut is really for is CONTRIBUTING.md's two native
+/// gates, which "need a toolchain the dev image has not got, AND they run the
+/// same recipe there": the conjunction is the word doing that work, so it is
+/// the word asked for.
+fn clauses_of(paragraph: &str) -> Vec<&str> {
+    let characters: Vec<(usize, char)> = paragraph.char_indices().collect();
     let mut out = Vec::new();
-    let mut quoted = false;
+    let mut code = false;
+    let mut start = 0;
+    for (at, &(offset, ch)) in characters.iter().enumerate() {
+        code ^= ch == '`';
+        // A full stop ends a sentence unless a word runs on through it, so
+        // `crates.io`, `docs.yml` and `0.4.1` stay in one piece.
+        let stop = matches!(ch, '.' | '!' | '?')
+            && !characters
+                .get(at + 1)
+                .is_some_and(|&(_, next)| next.is_ascii_alphanumeric());
+        let hands_over = ch == ','
+            && paragraph[offset + ch.len_utf8()..]
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| CONJUNCTIONS.contains(&word.to_lowercase().as_str()));
+        if !code && (stop || hands_over || matches!(ch, ';' | ':' | '(' | ')' | '—' | '–')) {
+            out.push(paragraph[start..offset].trim());
+            start = offset + ch.len_utf8();
+        }
+    }
+    out.push(paragraph[start..].trim());
+    out.retain(|clause| !clause.is_empty());
+    out
+}
+
+/// Every clause of `text` in which a word from `negations` reaches a word from
+/// `nouns`, with the line its paragraph starts at.
+///
+/// Paragraphs, because where a sentence wraps is a typesetting decision: a
+/// line-at-a-time reader could attribute a denial to the tool it was about
+/// only when both landed on one physical line, so reflowing defeated it.
+/// [`clauses_of`] then bounds the reach. Fenced blocks are dropped: a
+/// transcript is not a claim.
+fn denials_in(text: &str, negations: &[&str], nouns: &[&str]) -> Vec<(usize, String)> {
+    let mut paragraphs: Vec<(usize, String)> = Vec::new();
+    let (mut fenced, mut open) = (false, false);
     for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            quoted = false;
+        let line = line.trim();
+        let fence = line.starts_with("```");
+        fenced ^= fence;
+        if line.is_empty() || fence || fenced {
+            open = false;
+        } else if open {
+            let (_, paragraph) = paragraphs.last_mut().expect("open implies a paragraph");
+            paragraph.push(' ');
+            paragraph.push_str(line);
+        } else {
+            paragraphs.push((index + 1, line.to_owned()));
+            open = true;
         }
-        let mut words: Vec<(bool, String)> = Vec::new();
-        let mut word = String::new();
-        for ch in line.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                word.push(ch.to_ascii_lowercase());
-                continue;
+    }
+
+    let mut out = Vec::new();
+    for (line, paragraph) in &paragraphs {
+        for clause in clauses_of(paragraph) {
+            let words = prose_words(clause);
+            let denies = words.iter().enumerate().any(|(at, word)| {
+                negations.contains(&word.as_str())
+                    && words
+                        .iter()
+                        .skip(at + 1)
+                        .take(NEGATION_REACH)
+                        .any(|later| nouns.contains(&later.as_str()))
+            });
+            if denies {
+                out.push((*line, clause.to_owned()));
             }
-            if !word.is_empty() {
-                words.push((quoted, mem::take(&mut word)));
-            }
-            if ch == '"' {
-                quoted = !quoted;
-            }
-        }
-        if !word.is_empty() {
-            words.push((quoted, word));
-        }
-        let denies = words.iter().enumerate().any(|(at, (in_quotes, word))| {
-            !in_quotes
-                && negations.contains(&word.as_str())
-                && words
-                    .iter()
-                    .skip(at + 1)
-                    .take(NEGATION_REACH)
-                    .any(|(_, later)| nouns.contains(&later.as_str()))
-        });
-        if denies {
-            out.push((index + 1, line.trim().to_owned()));
         }
     }
     out
 }
 
-/// Does this line deny that a scheduled run exists?
-fn denies_a_schedule(line: &str) -> bool {
-    !denials_in(line, NEGATIONS, SCHEDULE_NOUNS).is_empty()
-}
-
-/// Every `.md` that describes this repo rather than recording its past.
+/// Every `.md` in force that describes this repository to a reader: the prose
+/// at the root, everything under `docs/` and `.github/`, and each workspace
+/// member's own page.
+///
+/// Walked rather than listed, for the reason the conformance-figure reader is
+/// walked: the defect these rules exist for is a copy nobody knew about. The
+/// three listed roots this replaced missed all five crate READMEs — the pages
+/// a reader meets first, published inside the packages themselves — and
+/// `.github/`, whose pull-request template addresses a contributor at the
+/// moment the claims in it are being acted on.
+///
+/// A directory predicate rather than every tracked `.md`, because the rest are
+/// content: `playground/examples/` and the EPUB sample manuscript are input
+/// this suite renders, and a denial written into one of those is a sentence
+/// nobody is being told.
 fn ci_prose_files() -> Vec<(String, String)> {
-    let root = repo_root();
-    let mut out = Vec::new();
-    for directory in CI_PROSE_ROOTS {
-        let path = root.join(directory);
-        let mut entries: Vec<PathBuf> = fs::read_dir(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        entries.sort();
-        for file in entries {
-            let label = label_of(&file);
-            if CI_PROSE_HISTORY
-                .iter()
-                .any(|history| label.starts_with(history))
-            {
-                continue;
-            }
-            let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("reading {label}: {e}"));
-            if !describes_this_repo_now(&label, &text) {
-                continue;
-            }
-            out.push((label, text));
-        }
-    }
+    let members: BTreeSet<String> = workspace_members()
+        .iter()
+        .map(|member| crate_dir(&member.path).to_owned())
+        .collect();
+    let out: Vec<(String, String)> = git_tracked(&[])
+        .into_iter()
+        .filter(|label| {
+            let at = label.rsplit_once('/').map_or("", |(head, _)| head);
+            let addresses_a_reader = |root: &str| at == root || at.starts_with(&format!("{root}/"));
+            Path::new(label)
+                .extension()
+                .is_some_and(|kind| kind == "md")
+                && (at.is_empty()
+                    || addresses_a_reader("docs")
+                    || addresses_a_reader(".github")
+                    || members.contains(at))
+        })
+        .map(|label| {
+            let text = read(&label);
+            (label, text)
+        })
+        .filter(|(label, text)| describes_this_repo_now(label, text))
+        .collect();
+    // Asked here rather than in each of the three rules that read this, since
+    // a reader that has stopped finding the documents passes all of them at
+    // once. An accepted ADR is the class whose excusal as history let
+    // ADR-0015's own sentence stand.
+    assert!(
+        out.iter().any(|(label, _)| label == "SECURITY.md")
+            && out.iter().any(|(label, _)| label.starts_with("docs/adr/")),
+        "the prose reader found {:?}",
+        out.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
     out
 }
 
 #[test]
 fn no_document_denies_a_scheduled_run_this_repo_makes() {
     let documents = ci_prose_files();
-    assert!(
-        documents.iter().any(|(label, _)| label == "SECURITY.md"),
-        "the reader is not finding the documents; it found {:?}",
-        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
-    );
-
     let mut denials = Vec::new();
     for (label, text) in &documents {
         for (line, denial) in denials_in(text, NEGATIONS, SCHEDULE_NOUNS) {
@@ -6562,31 +7182,13 @@ fn no_document_denies_a_scheduled_run_this_repo_makes() {
          authority of policy and the lifespan of a guess.",
         denials.join("\n")
     );
-
-    // The other direction, because deleting the sentence is not the same as
-    // describing what replaced it: the document that discusses the advisory
-    // gates has to name the workflow that schedules them, or the reader is
-    // simply told less than before.
-    let security = read("SECURITY.md");
-    let scheduling: Vec<String> = read_workflows()
-        .into_iter()
-        .filter(|(_, text)| {
-            runs_on_a_cron(text)
-                && CLOCK_DEPENDENT_GATES
-                    .iter()
-                    .any(|&(gate, _)| recipes_invoked(text).contains(gate))
-        })
-        .map(|(label, _)| label)
-        .collect();
-    assert!(
-        scheduling
-            .iter()
-            .any(|label| security.contains(label.as_str())),
-        "SECURITY.md discusses `just audit` and `just deny` and names none of {scheduling:?}, the \
-         workflows that actually re-run them. It described the gap when the gap was real; it has \
-         to describe the control now that the control is."
-    );
 }
+
+// The other direction of this rule used to require SECURITY.md to contain the
+// literal string `.github/workflows/audit.yml`. That is a gate compelling a
+// document to restate a config file, which is the defect above with the sign
+// flipped; the sentence it compelled has gone with it. SECURITY.md keeps only
+// why the schedule is not redundant with the pull request, which no file says.
 
 /// Where the per-package licence waivers live, and where the watch over them
 /// does.
@@ -6660,41 +7262,391 @@ fn every_licence_exemption_is_pinned_to_the_licence_it_was_written_for() {
          the nightly failure that follows will point at the wrong file.",
         mismatched.join("\n")
     );
+
+    // And the other half of the prose: every entry ends with a sentence about
+    // when to drop it, and issue #197 is the story of one of those sentences
+    // being false from the day it was written — `libfuzzer-sys`' entry said to
+    // drop it once the fuzz crate moved to libafl_libfuzzer, which turns out
+    // to depend on libfuzzer-sys itself, so the condition could never come
+    // due. Four months, nothing able to say so, and the sentence read as a
+    // plan every time somebody opened the file.
+    //
+    // What IS decidable here is the precondition every one of those sentences
+    // shares: the exemption waives a package this repo actually resolves. Two
+    // lockfiles, because the fuzz crate is its own workspace and its
+    // dependencies appear in neither the other file nor `cargo deny` — which
+    // is exactly why libfuzzer-sys needs an entry here in the first place. An
+    // exemption for a package no lockfile mentions waives nothing, and waits
+    // to waive whatever takes that name next.
+    let lockfiles = [
+        ("Cargo.lock", read("Cargo.lock")),
+        (FUZZ_LOCK, read(FUZZ_LOCK)),
+    ];
+    for (name, text) in &lockfiles {
+        assert!(
+            text.contains("[[package]]"),
+            "{name} parsed as {} byte(s) with no `[[package]]` table; the reader is not finding \
+             the lockfile and the check below would excuse every exemption",
+            text.len()
+        );
+    }
+    for package in &exempted {
+        let declaration = format!("name = \"{package}\"");
+        assert!(
+            lockfiles
+                .iter()
+                .any(|(_, text)| text.contains(&declaration)),
+            "{LICENCE_REVIEW} exempts `{package}` from the licence check and neither {} nor \
+             {FUZZ_LOCK} resolves it any more. The entry now waives a name rather than a \
+             dependency: delete it, and its row in {LICENCE_WATCH} with it. This is the \
+             `Drop this entry once …` sentence beside it, evaluated — the half of those \
+             sentences that does not need somebody to remember.",
+            lockfiles[0].0
+        );
+    }
 }
 
-/// Scheduled workflows whose only output is a red square, each with why it is
-/// still like that. Every entry is a LIVE DEFECT, not an exemption: a cron
-/// that blocks no merge and reports nowhere is a control only for whoever
-/// remembers to go and look at it, and nobody does.
-const CRON_WITHOUT_A_CHANNEL: &[(&str, &str)] = &[(
-    ".github/workflows/release-pins.yml",
-    "predates this rule. Its `freshness` job compares dist-workspace.toml's hand-maintained \
-     action pins against upstream and exits 1 into a workflow that blocks no merge, uploads \
-     nothing and files nothing — the exact shape audit.yml's `report` job exists to avoid. It \
-     needs the same treatment and that is its own change",
-)];
+/// The reporter a scheduled job calls when it has none of its own: a local
+/// composite action that files ONE rolling issue per title.
+const LOCAL_REPORTER: &str = "./.github/actions/report-failure";
 
-/// How a workflow gets a finding off the runner and in front of somebody.
-fn reporting_channel(workflow: &str) -> Option<&'static str> {
-    let grants = |permission: &str| {
-        let wanted = format!("{permission}: write");
-        workflow
-            .lines()
-            .any(|line| strip_comment(line).trim() == wanted)
-    };
-    if grants("issues") {
-        return Some("opens an issue");
+/// Where that action is written.
+const LOCAL_REPORTER_FILE: &str = ".github/actions/report-failure/action.yml";
+
+/// A step that gets a finding off the runner and in front of somebody, and
+/// what it takes for one to be able to.
+///
+/// A channel is a STEP, which is the second half of this rule and was missing
+/// from the first. `issues: write` on a job used to be read as "this job files
+/// an issue", and that is a claim about what the job COULD do: three jobs hold
+/// that grant now for the sake of one step each, so deleting any one of those
+/// steps leaves the grant behind, and a rule that stopped at the grant would
+/// go on reporting a channel that is gone.
+struct Filer {
+    /// What a step's `uses:` names. Matched inside the reference, so the
+    /// commit a pin carries does not have to be restated here.
+    uses: &'static str,
+    /// The write permission it cannot file with, where it needs one.
+    /// `upload-artifact` needs none — an artifact belongs to the run that
+    /// wrote it.
+    grant: Option<&'static str>,
+    /// What it does, in the words this rule reports.
+    does: &'static str,
+    /// Does it report a failure an EARLIER step produced?
+    ///
+    /// GitHub applies an implicit `success()` to any `if:` that names no
+    /// status function, so a step that reports somebody else's failure and
+    /// does not say `failure()` is skipped on precisely the run it exists for.
+    /// The two scanners below are not in that position: each one IS the check,
+    /// and files what it found on its way to failing.
+    after_an_earlier_failure: bool,
+}
+
+/// Everything this repo has that can put a finding in front of a human. A way
+/// of reporting that is not here reads as no channel at all — which fails
+/// loudly and is added to in one line, the direction this rule would rather
+/// be wrong in.
+const FILERS: &[Filer] = &[
+    Filer {
+        uses: LOCAL_REPORTER,
+        grant: Some("issues"),
+        does: "opens a rolling issue",
+        after_an_earlier_failure: true,
+    },
+    Filer {
+        uses: ADVISORY_REPORTER,
+        grant: Some("issues"),
+        does: "opens an issue per advisory",
+        after_an_earlier_failure: false,
+    },
+    Filer {
+        uses: "github/codeql-action/analyze",
+        grant: Some("security-events"),
+        does: "raises a code-scanning alert",
+        after_an_earlier_failure: false,
+    },
+    Filer {
+        uses: "actions/upload-artifact",
+        grant: None,
+        does: "uploads the evidence",
+        after_an_earlier_failure: true,
+    },
+];
+
+/// What one step's `uses:` names, in either shape a step is written in.
+/// `None` for every other line, which is what keeps a `uses:` discussed in a
+/// comment or quoted in a `body:` out of the answer.
+fn step_uses(line: &str) -> Option<&str> {
+    let body = strip_comment(line).trim();
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    body.strip_prefix("uses:").map(str::trim)
+}
+
+/// Can this step run on a run where an earlier step already failed? Only a
+/// status function makes it so: an `if:` without one, and an absent `if:`,
+/// both mean `success()`.
+fn runs_after_a_failure(step: &[&str]) -> bool {
+    step.iter()
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .any(|expression| {
+            ["failure()", "always()", "!cancelled()"]
+                .iter()
+                .any(|reaches| expression.contains(reaches))
+        })
+}
+
+/// The `permissions:` block that governs one job.
+///
+/// A job's own replaces the workflow's outright rather than adding to it, and
+/// a job without one inherits the workflow's whole. Reading the grant off the
+/// job's own lines alone would get the second case right by accident and the
+/// first wrong.
+fn job_permissions<'a>(workflow: &'a str, lines: &[&'a str]) -> Vec<&'a str> {
+    if declares_key(lines, "permissions") {
+        nested_block(lines, "permissions")
+    } else {
+        top_level_block(workflow, "permissions")
     }
-    if grants("security-events") {
-        return Some("raises a code-scanning alert");
-    }
-    if jobs_block(workflow)
+}
+
+/// Is `permission` granted for writing by this block?
+fn grants_write(permissions: &[&str], permission: &str) -> bool {
+    let wanted = format!("{permission}: write");
+    permissions
         .iter()
-        .any(|line| strip_comment(line).contains("upload-artifact"))
-    {
-        return Some("uploads the evidence");
+        .any(|line| strip_comment(line).trim() == wanted)
+}
+
+/// Every step of a job that files something, paired with the [`Filer`] it
+/// files by. Every one of them, in the order they run: which is the whole
+/// difference between this and the `position` it replaced.
+fn filer_steps(lines: &[&str]) -> Vec<(usize, &'static Filer)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| {
+            let reference = step_uses(line)?;
+            let filer = FILERS.iter().find(|filer| reference.contains(filer.uses))?;
+            Some((at, filer))
+        })
+        .collect()
+}
+
+/// What one reporter's `if:` narrows it to, when that is a comparison against
+/// a step output: the output read, whether the test is `==`, and the literal
+/// it is read against.
+///
+/// A condition on the EVENT is deliberately not one of these. Every reporter
+/// here carries `github.event_name == 'schedule'`, and the rule below is only
+/// ever asked about the scheduled run — so that half is this rule's own scope
+/// rather than a gap in the job's coverage.
+fn output_test(step: &[&str]) -> Option<(String, bool, String)> {
+    let compare =
+        Regex::new(r"(steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'")
+            .expect("the comparison pattern is a literal");
+    step.iter()
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .find_map(|expression| {
+            compare.captures(expression).map(|caught| {
+                (
+                    caught[1].to_owned(),
+                    &caught[2] == "==",
+                    caught[3].to_owned(),
+                )
+            })
+        })
+}
+
+/// Do a job's reporters, between them, answer for every way that job can fail?
+///
+/// Asked only of a job [`reporting_channel`] has already said yes about, so
+/// every step read here is one that can run on a failing run. What is left is
+/// the second question a job with more than one reporter raises and a job with
+/// one cannot: a reporter behind `steps.<id>.outputs.<name> == 'x'` answers
+/// for SOME failures, and the rest of them reach whoever is watching the other
+/// conditions.
+///
+/// audit.yml's `dependabot` job is the first here to split that way, and the
+/// split is the point of it — "the posture is off" and "the posture could not
+/// be read" are different findings for different people, and filing the second
+/// under the first is the false alarm that teaches a reader to stop opening the
+/// channel. A pair like that is a channel only while it is a PARTITION.
+/// Conditions that both narrow leave whatever neither names reaching nobody;
+/// conditions that overlap file two issues for one run, which is the duplicate
+/// the rolling reporter was built to prevent.
+fn every_failure_reaches_a_channel(lines: &[&str]) -> Result<(), String> {
+    let mut narrowed: BTreeMap<String, Vec<(bool, String)>> = BTreeMap::new();
+    let mut answers_for_everything = false;
+    for (at, _) in filer_steps(lines) {
+        match output_test(&step_around(lines, at)) {
+            None => answers_for_everything = true,
+            Some((output, equals, literal)) => {
+                narrowed.entry(output).or_default().push((equals, literal));
+            }
+        }
     }
-    None
+    if answers_for_everything || narrowed.is_empty() {
+        return Ok(());
+    }
+
+    for (output, tests) in &narrowed {
+        let mut seen = BTreeSet::new();
+        for (equals, literal) in tests {
+            if !seen.insert((equals, literal)) {
+                let operator = if *equals { "==" } else { "!=" };
+                return Err(format!(
+                    "puts two of its reporters behind the same `{output} {operator} '{literal}'`, \
+                     so one failure opens two issues — the duplicate a rolling reporter exists to \
+                     prevent, and the surest way to teach a reader to stop reading the channel"
+                ));
+            }
+        }
+    }
+    let complementary = narrowed.values().any(|tests| {
+        tests.iter().any(|(equals, literal)| {
+            *equals
+                && tests
+                    .iter()
+                    .any(|(other, value)| !other && value == literal)
+        })
+    });
+    if complementary {
+        return Ok(());
+    }
+    let listed: Vec<String> = narrowed
+        .iter()
+        .flat_map(|(output, tests)| {
+            tests.iter().map(move |(equals, literal)| {
+                let operator = if *equals { "==" } else { "!=" };
+                format!("`{output} {operator} '{literal}'`")
+            })
+        })
+        .collect();
+    Err(format!(
+        "narrows every one of its reporters to a step output ({}) and no two of those are \
+         complements, so a failure matching none of them is filed by neither",
+        listed.join(", ")
+    ))
+}
+
+/// How ONE JOB of a workflow gets its finding off the runner and in front of
+/// somebody, or what it is missing.
+///
+/// Per job, because the workflow was the wrong unit and said so: audit.yml
+/// passed this rule on the strength of its `report` job while its `licences`
+/// job — the watch over the dependency-review waivers — failed into exactly
+/// the red square the rule forbids, one level below where the rule could see
+/// it. A channel does not transfer between jobs. They are separate runners
+/// with separate tokens, `report` files what `rustsec/audit-check` finds and
+/// nothing else, and a job that goes red ends wherever its own `permissions:`
+/// and its own steps leave it.
+fn reporting_channel(workflow: &str, job: &str) -> Result<&'static str, String> {
+    let Some(lines) = job_lines(workflow, job) else {
+        return Err(format!("has no `{job}:` job to read a channel off"));
+    };
+    let permissions = job_permissions(workflow, &lines);
+    let mut missing = Vec::new();
+    let mut works = None;
+    let mut calls_one = false;
+    // EVERY filing step of the job, rather than the first one per filer that
+    // answers. `position` was right for as long as a job had one reporter, and
+    // wrong from the moment audit.yml's `dependabot` job arrived with two: the
+    // second sat entirely outside this net, so the finding it exists for — a
+    // posture that could not be READ, as against one read and wrong — could
+    // stop being filed with this rule still green on the strength of the
+    // reporter above it. A job with two channels has to keep both.
+    for (at, filer) in filer_steps(&lines) {
+        calls_one = true;
+        if let Some(needed) = filer.grant
+            && !grants_write(&permissions, needed)
+        {
+            missing.push(format!(
+                "calls `{}` without the `{needed}: write` it files with",
+                filer.uses
+            ));
+            continue;
+        }
+        if !filer.after_an_earlier_failure || runs_after_a_failure(&step_around(&lines, at)) {
+            works = works.or(Some(filer.does));
+            continue;
+        }
+        missing.push(format!(
+            "calls `{}` behind an `if:` that names no status function, so GitHub applies the \
+             implicit `success()` and skips it on exactly the run it reports",
+            filer.uses
+        ));
+    }
+    if let Some(does) = works
+        && missing.is_empty()
+    {
+        return Ok(does);
+    }
+    // Read off FILERS rather than listed again, and only where the job calls
+    // nothing at all: a grant held beside a step that IS called has already
+    // been reported on above, by the sentence about that step.
+    if !calls_one {
+        let held: BTreeSet<&str> = FILERS
+            .iter()
+            .filter_map(|filer| filer.grant)
+            .filter(|permission| grants_write(&permissions, permission))
+            .collect();
+        for permission in held {
+            missing.push(format!(
+                "holds `{permission}: write` and calls nothing that uses it — a permission is \
+                 what a channel would need, not a channel"
+            ));
+        }
+    }
+    Err(if missing.is_empty() {
+        "neither files an issue, raises a code-scanning alert nor uploads an artifact".to_owned()
+    } else {
+        missing.join("; and ")
+    })
+}
+
+/// The scheduled jobs whose failure reaches nobody, one sentence each.
+///
+/// Split out from the rule below so the rule can be asked about a tree other
+/// than this one. A rule only ever run against the tree it passes on is a rule
+/// nobody has watched say no, and that is the half of #200's acceptance the
+/// mutation tests underneath cover.
+fn jobs_with_no_channel(workflows: &[(String, String)]) -> Vec<String> {
+    let mut silent = Vec::new();
+    for (label, text) in workflows.iter().filter(|(_, text)| runs_on_a_cron(text)) {
+        // The floor that matters once the unit is a job, and derived rather
+        // than counted: a workflow defines at least one job or it runs
+        // nothing, so finding none in one is the reader having stopped reading
+        // that file — the way a per-job rule passes vacuously.
+        let jobs = job_keys(text);
+        assert!(
+            !jobs.is_empty(),
+            "{label} runs on a cron and no job was read out of it. The jobs reader is not finding \
+             them, so this workflow answers this rule with nothing."
+        );
+        for job in jobs {
+            if let Err(why) = reporting_channel(text, &job) {
+                silent.push(format!(
+                    "  {label}: `{job}` runs on a cron, blocks no merge, and {why}. A red square \
+                     on a workflow nobody is required to read is not a control, and a sibling \
+                     job's reporter is not this job's channel."
+                ));
+                continue;
+            }
+            // The job has a channel. What is left is whether that channel
+            // answers for every way the job can fail — the question a job with
+            // one reporter never raised and a job that splits its reporting
+            // over two conditions raises immediately.
+            let lines = job_lines(text, &job).expect("the channel was read off this job's lines");
+            if let Err(gap) = every_failure_reaches_a_channel(&lines) {
+                silent.push(format!(
+                    "  {label}: `{job}` runs on a cron, blocks no merge, and {gap}. A failure \
+                     that matches none of a job's reporters reaches nobody by exactly the route a \
+                     job with no reporter at all does."
+                ));
+            }
+        }
+    }
+    silent
 }
 
 #[test]
@@ -6705,61 +7657,691 @@ fn a_scheduled_run_that_blocks_nothing_says_where_its_failure_goes() {
     // either failing stops a merge or lands in a pull request. Whatever
     // reaches a human has to be arranged by the workflow itself.
     //
-    // The rule is per WORKFLOW, which is where it stops short: audit.yml
-    // passes on the strength of its `report` job, and that job reports
-    // cargo-audit findings alone. Its `licences` job — the watch over the
-    // dependency-review waivers — fails into exactly the red square this test
-    // is about, one level below where the test can see it.
-    let mut silent = Vec::new();
+    // Every JOB of one, which is the half this rule used to miss. A reporter
+    // answers for what it ran: audit.yml's `report` files RustSec advisories,
+    // and that made the whole file pass while its `licences` job — the watch
+    // over the dependency-review waivers — and its cargo-deny leg both failed
+    // into the red square this test is about.
+    //
+    // And a channel is a STEP that files, which is the half a per-job reading
+    // does not fix by itself. `issues: write` was the whole of the evidence
+    // once; three jobs hold that grant now for the sake of one step each, so a
+    // reading that stopped at the permission would have gone on reporting a
+    // channel for as long as the grant outlived the step that used it.
+    //
+    // There is no carve-out list any more. The one entry it carried,
+    // release-pins.yml, files its own issue now, and the workflow that
+    // outgrew the per-workflow reading files two. An exception belongs back
+    // here as a named entry with the reason beside it — not as an empty shape
+    // waiting for one.
     let workflows = read_workflows();
-    let scheduled: Vec<&(String, String)> = workflows
+    let scheduled = workflows
         .iter()
         .filter(|(_, text)| runs_on_a_cron(text))
-        .collect();
+        .count();
     assert!(
-        scheduled.len() >= 3,
-        "only {} workflow(s) read as running on a cron; the trigger reader has stopped finding \
-         them and everything below passes vacuously",
-        scheduled.len()
+        scheduled >= 3,
+        "only {scheduled} workflow(s) read as running on a cron; the trigger reader has stopped \
+         finding them and everything below passes vacuously"
     );
 
-    for (label, text) in &scheduled {
-        if CRON_WITHOUT_A_CHANNEL
-            .iter()
-            .any(|&(known, _)| known == label)
-        {
-            continue;
-        }
-        if reporting_channel(text).is_none() {
-            silent.push(format!(
-                "  {label}: runs on a cron, blocks no merge, and neither files an issue, raises a \
-                 code-scanning alert nor uploads an artifact. A red square on a workflow nobody \
-                 is required to read is not a control."
-            ));
-        }
-    }
+    let silent = jobs_with_no_channel(&workflows);
     assert!(
         silent.is_empty(),
-        "scheduled runs whose findings reach nobody:\n{}",
+        "scheduled jobs whose findings reach nobody:\n{}",
         silent.join("\n")
     );
+}
 
-    // A recorded defect that has been fixed is worse than an unrecorded one:
-    // it is a live entry vouching for a state that no longer exists.
-    for &(label, why) in CRON_WITHOUT_A_CHANNEL {
-        let text = read(label);
-        assert!(
-            runs_on_a_cron(&text),
-            "{label} no longer runs on a cron, so it is not in scope for this rule any more — \
-             drop its CRON_WITHOUT_A_CHANNEL entry ({why})"
+/// `text` with the `key:` block of `job` taken out, located by the readers the
+/// rule itself uses rather than by a line number that drifts.
+fn without_a_block(text: &str, job: &str, key: &str) -> String {
+    let lines = job_lines(text, job).unwrap_or_else(|| panic!("no `{job}:` job to mutate"));
+    let header = format!("{key}:");
+    let opens = lines
+        .iter()
+        .find(|line| strip_comment(line).trim() == header)
+        .unwrap_or_else(|| panic!("`{job}` declares no `{key}:` to take out"));
+    let mut block = vec![*opens];
+    block.extend(nested_block(&lines, key));
+    let cut = block.join("\n");
+    assert!(
+        text.contains(&cut),
+        "the `{key}:` block of `{job}` is not the run of consecutive lines this mutation assumed"
+    );
+    text.replacen(&cut, "", 1)
+}
+
+/// `text` with the step of `job` that `uses:` `reference` taken out.
+fn without_a_step(text: &str, job: &str, reference: &str) -> String {
+    let lines = job_lines(text, job).unwrap_or_else(|| panic!("no `{job}:` job to mutate"));
+    let at = lines
+        .iter()
+        .position(|line| step_uses(line).is_some_and(|uses| uses.contains(reference)))
+        .unwrap_or_else(|| panic!("`{job}` has no step using `{reference}` to take out"));
+    let cut = step_around(&lines, at).join("\n");
+    assert!(
+        text.contains(&cut),
+        "the `{reference}` step of `{job}` is not the run of consecutive lines this mutation \
+         assumed"
+    );
+    text.replacen(&cut, "", 1)
+}
+
+/// One workflow, in the shape [`jobs_with_no_channel`] reads.
+fn one_workflow(label: &str, text: String) -> Vec<(String, String)> {
+    vec![(label.to_owned(), text)]
+}
+
+/// Is `job` among the jobs these sentences are about?
+fn named(silent: &[String], job: &str) -> bool {
+    silent
+        .iter()
+        .any(|sentence| sentence.contains(&format!("`{job}`")))
+}
+
+/// The other scheduled workflow these mutations are cut from. The nightly one
+/// is [`LICENCE_WATCH`] — the same file under the name the licence rule reads
+/// it by, spelled once rather than twice.
+const WEEKLY_PINS: &str = ".github/workflows/release-pins.yml";
+
+#[test]
+fn the_rule_names_the_job_the_per_workflow_reading_let_through() {
+    // #200's third acceptance criterion, run rather than reasoned: the tightened
+    // rule has to be watched saying NO to the tree it was tightened for, and a
+    // rule that has only ever been asked about a tree it passes on is a rule
+    // whose reader could have stopped reading.
+    //
+    // The mutation IS that tree: audit.yml with the channel taken back off its
+    // `licences` job, which is what #198 shipped and what the per-workflow
+    // reading called fine on the strength of `report` two jobs above.
+    let text = read(LICENCE_WATCH);
+    let before = without_a_step(&text, "licences", LOCAL_REPORTER);
+    let before = without_a_block(&before, "licences", "permissions");
+    assert_ne!(
+        before, text,
+        "the mutation changed nothing, so it proves nothing"
+    );
+    assert!(
+        runs_on_a_cron(&before),
+        "the mutated workflow no longer reads as scheduled, so this rule would skip it for a \
+         reason that has nothing to do with what is being measured"
+    );
+    assert_eq!(
+        reporting_channel(&before, "report").as_deref(),
+        Ok("opens an issue per advisory"),
+        "the mutated workflow has to keep the sibling reporter that made the old reading pass — \
+         without it this test would be measuring a workflow with no channel anywhere"
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, before));
+    assert!(
+        named(&silent, "licences"),
+        "a cron job with no channel of its own went unreported while a sibling job held one. That \
+         is the per-workflow reading this rule replaced:\n{silent:?}"
+    );
+    assert!(
+        !named(&silent, "report"),
+        "the job that does report was reported too, so the rule is not reading per job at all:\n\
+         {silent:?}"
+    );
+}
+
+#[test]
+fn a_permission_no_step_uses_is_not_a_channel() {
+    // The half a per-job rule still misses if a channel is read off
+    // `permissions:`. Three jobs hold `issues: write` for one step each; delete
+    // the step and the grant stays behind, describing a channel that is gone.
+    let text = read(LICENCE_WATCH);
+    let stripped = without_a_step(&text, "licences", LOCAL_REPORTER);
+    let lines = job_lines(&stripped, "licences").expect("the mutation kept the job");
+    assert!(
+        grants_write(&job_permissions(&stripped, &lines), "issues"),
+        "the mutation removed the grant as well as the step, so it cannot show what reading the \
+         grant alone would have concluded"
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, stripped));
+    assert!(
+        named(&silent, "licences"),
+        "a job holding `issues: write` with nothing in it that files an issue was read as having \
+         a channel:\n{silent:?}"
+    );
+}
+
+#[test]
+fn a_reporter_that_cannot_run_after_the_failure_is_not_a_channel() {
+    // The other way the wiring dies quietly. `if: ${{ failure() && … }}` is
+    // what puts the reporter on the failing run; drop the status function and
+    // GitHub supplies `success()`, so the step is skipped exactly when there is
+    // something to report — with the permission granted, the action called, the
+    // workflow green in review and the finding still in the Actions tab.
+    let text = read(WEEKLY_PINS);
+    assert_eq!(
+        reporting_channel(&text, "freshness").as_deref(),
+        Ok("opens a rolling issue"),
+        "the tree this mutation starts from does not have the channel it is about to break"
+    );
+
+    let unguarded = text.replace("failure() && ", "");
+    assert_ne!(
+        unguarded, text,
+        "no `failure() && …` guard was found to drop, so the mutation proves nothing"
+    );
+    let silent = jobs_with_no_channel(&one_workflow(WEEKLY_PINS, unguarded));
+    assert!(
+        named(&silent, "freshness"),
+        "a reporting step that cannot run on a failing run was read as a channel:\n{silent:?}"
+    );
+}
+
+#[test]
+fn a_channel_is_read_off_the_job_that_would_need_it() {
+    // The reader, against the shapes that decide what a grant belongs to.
+    // Every one of them was answered wrong by the scan this replaced, which
+    // asked whether the WORKFLOW TEXT contained `issues: write` anywhere.
+    let workflow = concat!(
+        "name: probe\n",
+        "\n",
+        "on:\n",
+        "  schedule:\n",
+        "    - cron: \"40 15 * * *\"\n",
+        "\n",
+        "permissions:\n",
+        "  contents: read\n",
+        "\n",
+        "jobs:\n",
+        "  report:\n",
+        "    permissions:\n",
+        "      contents: read\n",
+        "      issues: write\n",
+        "    steps:\n",
+        "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+        "  licences:\n",
+        "    steps:\n",
+        "      - name: Compare each exemption against what crates.io now declares\n",
+        "        run: ./check\n",
+    );
+    assert_eq!(
+        reporting_channel(workflow, "report").as_deref(),
+        Ok("opens an issue per advisory"),
+        "the job that has a channel was not read as having one, so nothing below means anything"
+    );
+    assert!(
+        reporting_channel(workflow, "licences").is_err(),
+        "a sibling job's grant was read as this job's channel"
+    );
+
+    // A workflow-level grant reaches a job that declares no `permissions:` of
+    // its own, and is REPLACED — not extended — by one that does.
+    let reporting = concat!(
+        "        run: ./check\n",
+        "      - uses: ./.github/actions/report-failure\n",
+        "        if: ${{ failure() }}\n",
+    );
+    let inheriting = workflow
+        .replace(
+            "permissions:\n  contents: read\n",
+            "permissions:\n  issues: write\n",
+        )
+        .replace("        run: ./check\n", reporting);
+    assert_eq!(
+        reporting_channel(&inheriting, "licences").as_deref(),
+        Ok("opens a rolling issue"),
+        "a workflow-level grant did not reach the job that declares no `permissions:` of its own"
+    );
+    let replacing = inheriting.replace(
+        "  licences:\n    steps:\n",
+        "  licences:\n    permissions:\n      contents: read\n    steps:\n",
+    );
+    assert!(
+        reporting_channel(&replacing, "licences").is_err(),
+        "a job's own `permissions:` replaces the workflow's outright, so `contents: read` there \
+         means the workflow's `issues: write` is gone — it was read as still in force"
+    );
+
+    // A step's `with:` input is indented like a permission and is not one, and
+    // an upload in a sibling job is that job's evidence and not this one's.
+    let misread = workflow.replace(
+        "        run: ./check\n",
+        &format!("{reporting}        with:\n          issues: write\n"),
+    );
+    assert!(
+        reporting_channel(&misread, "licences")
+            .is_err_and(|why| why.contains("without the `issues: write` it files with")),
+        "a `with:` input spelled like a permission was counted as the grant"
+    );
+    let elsewhere = workflow.replace(
+        "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+        concat!(
+            "      - uses: rustsec/audit-check@0123456789abcdef0123456789abcdef01234567\n",
+            "      - if: failure()\n",
+            "        uses: actions/upload-artifact@0123456789abcdef0123456789abcdef01234567\n",
+        ),
+    );
+    assert!(
+        reporting_channel(&elsewhere, "licences").is_err(),
+        "an upload step in a sibling job was read as this job's evidence"
+    );
+}
+
+/// The job that made the reading above insufficient: the first here to report
+/// through two channels rather than one.
+const TWO_CHANNEL_JOB: &str = "dependabot";
+
+/// What narrows its second reporter, as written. The FIRST reporter is the
+/// complement of this, so a mutation that names this string names exactly one
+/// of the two.
+const SECOND_REPORTER: &str = "steps.posture.outputs.posture != 'off'";
+
+#[test]
+fn a_second_reporter_that_cannot_run_is_not_covered_by_the_first() {
+    // The hole the fourth job of audit.yml opened in the rule above it. That
+    // rule asked each `Filer` for the FIRST step using it and stopped there, so
+    // a job with two reporters was judged on one: break the second and the
+    // first still answers, the workflow still reads as having a channel, and
+    // the finding the second exists for — a posture that could not be read,
+    // as against read and wrong — silently stops being filed.
+    //
+    // The failure mode is the one the test above this section already
+    // measures, one level down: `if: ${{ failure() && … }}` is what puts a
+    // reporter on the failing run, and GitHub supplies `success()` for an
+    // expression that names no status function.
+    let text = read(LICENCE_WATCH);
+    assert_eq!(
+        reporting_channel(&text, TWO_CHANNEL_JOB).as_deref(),
+        Ok("opens a rolling issue"),
+        "the tree this mutation starts from does not have the channel it is about to break"
+    );
+    let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the job the channel was just read off");
+    assert_eq!(
+        filer_steps(&lines).len(),
+        2,
+        "`{TWO_CHANNEL_JOB}` is the job with two reporters this test is about. Either it stopped \
+         splitting its reporting or the step reader stopped finding the steps; either way what \
+         follows measures nothing."
+    );
+
+    let guarded = format!("failure() && github.event_name == 'schedule' && {SECOND_REPORTER}");
+    let unguarded = guarded
+        .strip_prefix("failure() && ")
+        .expect("the guard is the prefix of the string just built");
+    let broken = text.replace(&guarded, unguarded);
+    assert_ne!(
+        broken, text,
+        "no second reporter guarded by `failure() && …` was found to break, so this proves nothing"
+    );
+    assert!(
+        reporting_channel(&broken, TWO_CHANNEL_JOB)
+            .is_err_and(|why| why.contains("implicit `success()`")),
+        "a job whose second reporter cannot run on a failing run was read as having its channel, \
+         on the strength of the first: {:?}",
+        reporting_channel(&broken, TWO_CHANNEL_JOB)
+    );
+
+    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, broken));
+    assert!(
+        named(&silent, TWO_CHANNEL_JOB),
+        "the rule did not name the job whose second channel is gone:\n{silent:?}"
+    );
+}
+
+#[test]
+fn reporters_that_all_narrow_leave_whatever_neither_names_unreported() {
+    // The other half of splitting one job's reporting in two, and the one no
+    // reading of the STEPS can see: both steps are present, both can run on a
+    // failing run, and between them they still answer for only some of the
+    // ways the job fails. `== 'off'` and `!= 'off'` partition every run;
+    // `== 'off'` and `== 'blind'` leave the third answer reaching nobody, and
+    // `== 'off'` twice files two issues for one failure.
+    let text = read(LICENCE_WATCH);
+    let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the two-channel job");
+    assert_eq!(
+        every_failure_reaches_a_channel(&lines),
+        Ok(()),
+        "the tree this mutation starts from is already uncovered, so nothing below is about the \
+         mutation"
+    );
+
+    for (mutation, shape) in [
+        (
+            "steps.posture.outputs.posture == 'blind'",
+            "a gap neither reporter names",
+        ),
+        (
+            "steps.posture.outputs.posture == 'off'",
+            "an overlap both reporters name",
+        ),
+    ] {
+        let mutated = text.replace(SECOND_REPORTER, mutation);
+        assert_ne!(
+            mutated, text,
+            "the second reporter's condition was not found, so {shape} was never introduced"
         );
         assert!(
-            reporting_channel(&text).is_none(),
-            "{label} now {} — the defect its CRON_WITHOUT_A_CHANNEL entry describes is fixed, so \
-             delete the entry rather than leaving it to vouch for a state that is gone",
-            reporting_channel(&text).unwrap_or_default()
+            reporting_channel(&mutated, TWO_CHANNEL_JOB).is_ok(),
+            "the mutation broke the reporting STEPS as well as their conditions, so it cannot \
+             show what the coverage half of the rule sees on its own"
+        );
+        let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, mutated));
+        assert!(
+            named(&silent, TWO_CHANNEL_JOB),
+            "{shape} went unreported — two reporting steps were counted as reporting, without \
+             anything asking what they report on:\n{silent:?}"
         );
     }
+}
+
+/// The body of a `key: |` block scalar, dedented to column zero.
+fn block_scalar(text: &str, key: &str) -> Option<String> {
+    let opens = |line: &str| {
+        let body = line.trim();
+        body == format!("{key}: |") || body == format!("{key}: |-")
+    };
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines.iter().position(|line| opens(line))?;
+    let open_indent = indent(lines[at]);
+    let body: Vec<&str> = lines[at + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || indent(line) > open_indent)
+        .copied()
+        .collect();
+    let margin = body
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| indent(line))
+        .min()?;
+    Some(
+        body.iter()
+            .map(|line| line.get(margin..).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The one shell script the local reporter runs.
+///
+/// Run rather than read, because nothing else in this repo reads it at all:
+/// `just actionlint` discovers `.github/workflows/` and not `.github/actions/`,
+/// and it is invoked with `-shellcheck=` off on purpose. The dedup this script
+/// implements is the whole of #199's "repeated runs do not duplicate", and
+/// until here that promise was a sentence in a comment.
+fn reporter_script() -> String {
+    let action = read(LOCAL_REPORTER_FILE);
+    let script = block_scalar(&action, "run").unwrap_or_else(|| {
+        panic!(
+            "no `run: |` block in {LOCAL_REPORTER_FILE}; the reporter is not a shell step any more"
+        )
+    });
+    assert!(
+        script.contains("gh issue create"),
+        "the script read out of {LOCAL_REPORTER_FILE} files nothing, so every case below would \
+         pass on an empty string"
+    );
+    script
+}
+
+/// A `gh` that answers out of files instead of out of GitHub.
+///
+/// A shell function rather than a program on `PATH`: bash resolves a function
+/// before it searches `PATH`, so what runs underneath it is the action's own
+/// text with nothing altered and no executable bit to set. `cat` gives the
+/// same SIGPIPE behaviour a real `gh` would, which is the point of the third
+/// case below.
+const GH_STUB: &str = r#"
+gh() {
+  printf '%s\n' "${*:-}" >> "$STUB_CALLS"
+  case "${1:-} ${2:-}" in
+    'issue list') cat "$STUB_TITLES" ;;
+    'issue create')
+      shift 2
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --title) printf '%s\n' "$2" >> "$STUB_FILED"; shift 2 ;;
+          --body-file) cat "$2" >> "$STUB_BODY"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      ;;
+  esac
+}
+"#;
+
+const REPORTED_RUN: &str = "https://github.invalid/P4suta/aozora-flavored-markdown/actions/runs/42";
+const REPORTED_BODY: &str = "A pin in dist-workspace.toml is behind its upstream.";
+
+/// What one run of the reporter did.
+struct Reported {
+    ok: bool,
+    stderr: String,
+    /// The title of each issue it created.
+    filed: Vec<String>,
+    body: String,
+    /// Every `gh` command line it ran.
+    calls: Vec<String>,
+}
+
+/// Run the reporter against an issue list of `open_titles`, reporting `title`.
+fn run_the_reporter(open_titles: &[String], title: &str) -> Reported {
+    let dir = scratch("report-failure");
+    let write = |name: &str, content: String| {
+        let path = dir.join(name);
+        fs::write(&path, content).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+        path
+    };
+    let titles = write("open-titles", open_titles.join("\n") + "\n");
+    let calls = write("calls", String::new());
+    let filed = write("filed", String::new());
+    let body = write("body", String::new());
+
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!("{GH_STUB}\n{}", reporter_script()))
+        .env("STUB_TITLES", &titles)
+        .env("STUB_CALLS", &calls)
+        .env("STUB_FILED", &filed)
+        .env("STUB_BODY", &body)
+        .env("RUNNER_TEMP", &dir)
+        .env("GH_TOKEN", "probe")
+        .env("GH_REPO", "P4suta/aozora-flavored-markdown")
+        .env("TITLE", title)
+        .env("BODY", REPORTED_BODY)
+        .env("RUN_URL", REPORTED_RUN)
+        .output()
+        .unwrap_or_else(|e| panic!("running the reporter: {e}"));
+
+    let lines = |path: &Path| {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<String>>()
+    };
+    let reported = Reported {
+        ok: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        filed: lines(&filed),
+        body: fs::read_to_string(&body).unwrap_or_default(),
+        calls: lines(&calls),
+    };
+    drop(fs::remove_dir_all(&dir));
+    reported
+}
+
+#[test]
+fn the_rolling_reporter_files_once_and_stays_quiet_while_that_issue_is_open() {
+    let title = "audit: a licence exemption no longer holds";
+
+    let first = run_the_reporter(&[], title);
+    assert!(
+        first.ok,
+        "the reporter exited non-zero against an empty issue list:\n{}",
+        first.stderr
+    );
+    assert!(
+        first
+            .calls
+            .iter()
+            .any(|call| call.starts_with("issue list")),
+        "nothing asked which issues are open, so what ran is not the script in \
+         {LOCAL_REPORTER_FILE}"
+    );
+    assert_eq!(
+        first.filed,
+        [title],
+        "the first failing run filed {:?} rather than one issue titled {title:?}",
+        first.filed
+    );
+    assert!(
+        first.body.contains(REPORTED_RUN),
+        "the filed issue does not name the run that produced it, so the reader has the finding \
+         and no way to see it:\n{}",
+        first.body
+    );
+
+    let again = run_the_reporter(&[title.to_owned()], title);
+    assert!(again.ok, "the reporter exited non-zero:\n{}", again.stderr);
+    assert!(
+        again.filed.is_empty(),
+        "a repeat failure filed {:?} while an issue of that title was already open. Drift recurs \
+         every run until somebody fixes it, and a weekly copy of a report that is already open is \
+         how a channel stops being read (#199).",
+        again.filed
+    );
+
+    // The hazard the script's own comment names, measured. `gh … | grep -q`
+    // leaves gh writing into a pipe grep has closed, and under `pipefail` that
+    // reads back as "no such issue" — which files the duplicate above on every
+    // run whose issue list outgrows a pipe buffer.
+    let crowded: Vec<String> = iter::once(title.to_owned())
+        .chain((0..5_000).map(|n| format!("some unrelated open issue, number {n}")))
+        .collect();
+    let under_load = run_the_reporter(&crowded, title);
+    assert!(
+        under_load.ok,
+        "the reporter died reading a long issue list:\n{}",
+        under_load.stderr
+    );
+    assert!(
+        under_load.filed.is_empty(),
+        "an issue list too long for a pipe buffer made the reporter file {:?}, which is the \
+         duplicate it read the whole list to avoid",
+        under_load.filed
+    );
+}
+
+#[test]
+fn the_rolling_reporters_key_is_the_whole_title_read_literally() {
+    let title = "release-pins: a hand-maintained release pin has frozen behind upstream";
+    let wider = run_the_reporter(&[format!("{title} on the macOS runner")], title);
+    assert_eq!(
+        wider.filed,
+        [title],
+        "an open issue whose title merely CONTAINS this one suppressed the report. Without a \
+         whole-line match every longer title is a wildcard over the shorter ones, and the report \
+         nobody filed is the one nobody reads."
+    );
+
+    let dotted = "release-pins: dist v1.0 is behind";
+    let alike = run_the_reporter(&["release-pins: dist v1X0 is behind".to_owned()], dotted);
+    assert_eq!(
+        alike.filed,
+        [dotted],
+        "the title was matched as a regular expression, so an open issue that merely looks alike \
+         swallowed the report"
+    );
+}
+
+/// The `with:` input `key` of one step, unquoted.
+fn step_input(step: &[&str], key: &str) -> Option<String> {
+    let header = format!("{key}:");
+    nested_block(step, "with").iter().find_map(|line| {
+        strip_comment(line)
+            .trim()
+            .strip_prefix(header.as_str())
+            .map(|value| value.trim().trim_matches('"').to_owned())
+    })
+}
+
+#[test]
+fn every_rolling_report_is_keyed_on_a_title_that_cannot_change_between_runs() {
+    // What makes the reporter roll is that a repeat failure computes the SAME
+    // key. Two ways that stops being true, neither of which changes a line of
+    // the action: a title carrying `${{ github.run_id }}` files one issue per
+    // run, and two jobs sharing a title file one issue between them — where
+    // whichever fails first suppresses the other for as long as it stays open.
+    let workflows = read_workflows();
+    let mut keys: Vec<(String, String)> = Vec::new();
+    for (label, text) in &workflows {
+        for job in job_keys(text) {
+            let lines = job_lines(text, &job).unwrap_or_default();
+            for (at, line) in lines.iter().enumerate() {
+                if step_uses(line) != Some(LOCAL_REPORTER) {
+                    continue;
+                }
+                let step = step_around(&lines, at);
+                let site = format!("{label}: `{job}`");
+                let title = step_input(&step, "title").unwrap_or_else(|| {
+                    panic!(
+                        "{site} calls the reporter with no `title:`, which is the key it files \
+                            under"
+                    )
+                });
+                assert!(
+                    step_input(&step, "body").is_some(),
+                    "{site} calls the reporter with no `body:`, so the issue it files says only \
+                     that something failed"
+                );
+                keys.push((site, title));
+            }
+        }
+    }
+    // The floor on what was found, derived rather than written down. The walk
+    // above reads the calls job by job; the same texts hold the same `uses:`
+    // lines whether or not the job reader finds the jobs around them, so the
+    // two readings disagree exactly when the walk has stopped seeing part of
+    // the tree — which is how every assertion below starts passing vacuously.
+    let called: usize = workflows
+        .iter()
+        .flat_map(|(_, text)| text.lines())
+        .filter(|line| step_uses(line) == Some(LOCAL_REPORTER))
+        .count();
+    assert!(
+        called > 0,
+        "no step in {} workflow(s) calls `{LOCAL_REPORTER}` any more, so this rule is about \
+         nothing",
+        workflows.len()
+    );
+    assert_eq!(
+        keys.len(),
+        called,
+        "{called} step(s) call `{LOCAL_REPORTER}` and the walk over jobs found {}; the job or step \
+         reader has stopped seeing part of the tree, and what it missed is what this rule would \
+         otherwise have judged.",
+        keys.len()
+    );
+
+    for (site, title) in &keys {
+        assert!(
+            !title.contains("${{"),
+            "{site} keys its rolling issue on `{title}`, which is computed per run. A key that \
+             changes with the run is a new issue every run, which is the duplicate flood the \
+             rolling design exists to avoid."
+        );
+        assert!(
+            !title.trim().is_empty(),
+            "{site} files under an empty title, so every report matches every other"
+        );
+    }
+
+    let distinct: BTreeSet<&String> = keys.iter().map(|(_, title)| title).collect();
+    assert_eq!(
+        distinct.len(),
+        keys.len(),
+        "two scheduled jobs file under one title, so whichever fails first suppresses the other's \
+         report for as long as its issue is open:\n{keys:?}"
+    );
 }
 
 #[test]
@@ -6821,26 +8403,161 @@ fn a_trigger_is_read_off_the_on_block_and_a_job_named_alike_is_not() {
     );
 }
 
+// The rule that used to sit here held two repository settings — Dependabot
+// alerts and Dependabot security updates — against a sentence in SECURITY.md
+// and against some scheduled job running `gh api repos/<this repo>/<endpoint>`
+// for each. Its subject was that sentence and the spelling of a shell command,
+// never the settings themselves: `gh api … || true` satisfied it in full. The
+// control is audit.yml's `dependabot` job, which asks GitHub what the settings
+// actually ARE and reports two ways on the answer; a test asserting that the
+// job is written the way it is written was a second copy of the job. Its list
+// of endpoints could not be derived either — the mapping from the phrase
+// "Dependabot security updates" to `automated-security-fixes` is GitHub's
+// vocabulary and appears in no file here — so it could only ever have been
+// topped up by hand, which is what a hand-written net is for.
+
+// ---------------------------------------------------------------------------
+// the wire between a step and the condition that reads it
+// ---------------------------------------------------------------------------
+
+/// The `id:` a step declares, in either shape a step is written in.
+fn step_id(line: &str) -> Option<&str> {
+    let body = strip_comment(line).trim();
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    let id = body.strip_prefix("id:")?.trim();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Every `steps.<id>.outputs.<name>` a workflow reads, with the job reading it.
+fn output_references(workflow: &str) -> Vec<(String, String, String)> {
+    let reference = Regex::new(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
+        .expect("the reference pattern is a literal");
+    let mut out = Vec::new();
+    for job in job_keys(workflow) {
+        let Some(lines) = job_lines(workflow, &job) else {
+            continue;
+        };
+        for line in lines {
+            for caught in reference.captures_iter(strip_comment(line)) {
+                out.push((job.clone(), caught[1].to_owned(), caught[2].to_owned()));
+            }
+        }
+    }
+    out
+}
+
+/// References that name a step the job has not got, or an output the step they
+/// name never writes.
+fn unresolved_outputs(workflows: &[(String, String)]) -> Vec<String> {
+    let mut dangling = Vec::new();
+    for (label, text) in workflows {
+        for (job, id, name) in output_references(text) {
+            let lines = job_lines(text, &job).expect("the reference was read out of this job");
+            let Some(at) = lines
+                .iter()
+                .position(|line| step_id(line) == Some(id.as_str()))
+            else {
+                dangling.push(format!(
+                    "  {label}: `{job}` reads `steps.{id}.outputs.{name}` and holds no step with \
+                     `id: {id}`"
+                ));
+                continue;
+            };
+            let step = step_around(&lines, at).join("\n");
+            // A step that `uses:` an action gets its outputs from that action's
+            // own `action.yml`, which is not this repository's to read for a
+            // third-party pin. A `run:` step has one way to produce one, and it
+            // is in the script.
+            if !step.contains("run:") {
+                continue;
+            }
+            let written = step.contains("GITHUB_OUTPUT")
+                && (step.contains(&format!("{name}=")) || step.contains(&format!("{name}<<")));
+            if !written {
+                dangling.push(format!(
+                    "  {label}: `{job}` reads `steps.{id}.outputs.{name}` and the script under \
+                     `id: {id}` writes no `{name}` to `$GITHUB_OUTPUT`"
+                ));
+            }
+        }
+    }
+    dangling
+}
+
 #[test]
-fn a_denial_of_a_schedule_is_read_and_a_description_of_one_is_not() {
-    for denial in [
-        "request; there is no cron workflow.",
-        "These do not run on a schedule.",
-        "The advisory scan never runs nightly.",
-    ] {
-        assert!(denies_a_schedule(denial), "a denial went unread: {denial}");
-    }
-    for description in [
-        "The schedule is not redundant with the pull request: an advisory is",
-        "That nightly run also files a GitHub issue per newly disclosed advisory,",
-        "published against a `Cargo.lock` nobody has touched, which is the one case",
-        "Not a PR gate: it depends on upstream release timing, so it must never redden",
-    ] {
-        assert!(
-            !denies_a_schedule(description),
-            "prose describing a schedule was read as denying one: {description}"
-        );
-    }
+fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
+    // The seam the two-channel job runs on, and the quietest one in this
+    // repository. An unset `steps.<id>.outputs.<name>` is not an error at run
+    // time: it is the empty string. So a renamed `id:`, or a script that stops
+    // writing the output, leaves `== 'off'` false for ever and `!= 'off'` true
+    // for ever — and the job goes on reporting, through the wrong one of its
+    // two channels, on every failure it ever has. Every gate stays green: the
+    // steps are all there, the guards all name `failure()`, and the reporters
+    // still hold `issues: write`.
+    let workflows = read_workflows();
+    let references: Vec<(String, String, String)> = workflows
+        .iter()
+        .flat_map(|(_, text)| output_references(text))
+        .collect();
+    assert!(
+        references.len() >= 8,
+        "only {} step-output reference(s) were read out of {} workflow(s); the reader has stopped \
+         finding them and this rule passes on nothing",
+        references.len(),
+        workflows.len()
+    );
+    assert!(
+        references
+            .iter()
+            .any(|(_, id, name)| id == "posture" && name == "posture"),
+        "the reference the two reporting channels of audit.yml split on was not among the {} \
+         found",
+        references.len()
+    );
+
+    let dangling = unresolved_outputs(&workflows);
+    assert!(
+        dangling.is_empty(),
+        "step outputs read by a condition that nothing sets:\n{}\n\
+         An unset output is the empty string rather than an error, so every condition resting on \
+         one answers the same way for ever and no run says a word about it.",
+        dangling.join("\n")
+    );
+}
+
+#[test]
+fn a_renamed_step_and_an_unwritten_output_are_both_read_as_dangling() {
+    let text = read(LICENCE_WATCH);
+    assert!(
+        unresolved_outputs(&one_workflow(LICENCE_WATCH, text.clone())).is_empty(),
+        "the workflow these mutations start from already reads as dangling"
+    );
+
+    // The `id:` moves and the two conditions reading it do not.
+    let renamed = text.replace("id: posture", "id: settings");
+    assert_ne!(renamed, text, "no `id: posture` was found to rename");
+    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, renamed));
+    assert!(
+        dangling
+            .iter()
+            .any(|sentence| sentence.contains("holds no step with `id: posture`")),
+        "a condition reading a step that is not in the job any more was read as wired:\n\
+         {dangling:?}"
+    );
+
+    // The step keeps its name and stops writing what the conditions read.
+    let silent = text.replace("printf 'posture=off\\n' >> \"$GITHUB_OUTPUT\"", ":");
+    assert_ne!(
+        silent, text,
+        "no write to `$GITHUB_OUTPUT` was found to cut"
+    );
+    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, silent));
+    assert!(
+        dangling
+            .iter()
+            .any(|sentence| sentence.contains("writes no `posture`")),
+        "a condition reading an output no script sets was read as wired:\n{dangling:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -7355,163 +9072,607 @@ fn the_prose_rule_is_written_at_a_level_that_makes_the_gate_exit_non_zero() {
     assert!(rules > 0, "there is no rule in `styles/Aozora` to run");
 }
 
-/// The globs the `changes` job classifies a diff with. A skipped `rust` means
-/// no gate in the matrix runs at all.
-fn change_filter_globs(workflow: &str) -> Vec<String> {
-    let lines = job_lines(workflow, "changes")
-        .unwrap_or_else(|| panic!("ci.yml has no `changes` job to read"));
-    let mut out = Vec::new();
-    let mut in_rust = false;
-    for line in lines {
-        let body = line.trim();
-        if let Some(glob) = body.strip_prefix("- ") {
-            let glob = glob.trim();
-            if let Some(literal) = quoted_literal(glob, '\'').filter(|_| in_rust) {
-                out.push(literal.to_owned());
-            }
+/// The `if:` conditions that decide whether a JOB runs, as opposed to a step.
+/// The key is the same at both depths and only the outer one can take a whole
+/// job out of the run, so the depth is what separates them here. The inner one
+/// is not thereby harmless — it is read by [`step_condition`] and held to
+/// [`CONDITIONAL_GATE_STEPS_IN_CI`], because a skipped step leaves the job
+/// reporting success.
+fn job_level_conditions(workflow: &str, job: &str) -> Vec<String> {
+    let lines =
+        job_lines(workflow, job).unwrap_or_else(|| panic!("ci.yml has no `{job}:` job any more"));
+    lines
+        .iter()
+        .filter(|line| line.starts_with("    ") && !line.starts_with("     "))
+        .filter_map(|line| strip_comment(line).trim().strip_prefix("if:"))
+        .map(|condition| condition.trim().to_owned())
+        .collect()
+}
+
+/// The steps of one job, each as its own lines.
+///
+/// Kept apart rather than read out of the job whole: an `if:` belongs to the
+/// step it is written in, and the question below is which step it takes out of
+/// the run. A reader handed the job would answer for a neighbour's condition —
+/// `commitlint` has one on its tool install and one on its gate, and they are
+/// not the same fact.
+fn job_steps<'a>(workflow: &'a str, job: &str) -> Vec<Vec<&'a str>> {
+    let lines =
+        job_lines(workflow, job).unwrap_or_else(|| panic!("ci.yml has no `{job}:` job any more"));
+    let mut out: Vec<Vec<&str>> = Vec::new();
+    let mut at: Option<usize> = None;
+    for line in nested_block(&lines, "steps") {
+        let body = strip_comment(line);
+        let text = body.trim_start();
+        if text.is_empty() {
             continue;
         }
-        if body.ends_with(':') {
-            in_rust = body == "rust:";
+        let indent = body.len() - text.len();
+        // A `- ` deeper in is a list item inside a step (`with:` inputs, a
+        // shell heredoc); only one at the column the first step opened starts
+        // another step.
+        if text.starts_with("- ") && at.is_none_or(|first| indent == first) {
+            at = Some(indent);
+            out.push(Vec::new());
+        }
+        if let Some(step) = out.last_mut() {
+            step.push(line);
         }
     }
     out
 }
 
-#[test]
-fn the_change_filter_watches_the_files_the_prose_gate_was_added_to_read() {
-    // A gate that cannot be reached is a gate that does not exist, and this
-    // filter is the only thing in the repo that can decide a gate is not
-    // reached. It classified a Markdown-only diff as "not rust" and skipped
-    // the whole matrix — so the gate added because no gate could open a `.md`
-    // file would not have run on a change to one. `just ci` would have been
-    // green locally for a reason CI never checked.
-    //
-    // The filter was already wrong before Vale: `typos` and
-    // `comment-discipline` both read `.md`, and a docs-only diff skipped both.
-    let workflow = read(".github/workflows/ci.yml");
-    let globs = change_filter_globs(&workflow);
-    assert!(
-        globs.len() > 5,
-        "the `changes` filter came out as {globs:?}; the reader is not finding it"
-    );
-    let watched = |path: &str| globs.iter().any(|glob| glob_to_regex(glob).is_match(path));
-
-    // The policy: what the gate bans, and what says which files it reads.
-    for policy in [".vale.ini", "styles/Aozora/RetiredPaths.yml"] {
-        assert!(
-            watched(policy),
-            "a change to `{policy}` does not set the `rust` filter, so editing the prose gate's \
-             own policy skips every gate — the rule `zizmor.yml` is in the filter for."
-        );
+/// The `if:` that decides whether one step runs.
+///
+/// Read at the step's own key column, which is the `- ` column plus two. A
+/// `run: |` script says `if [[ ... ]]` in the middle of a step and means
+/// nothing about whether the step runs, so a substring match would report a
+/// condition where there is none — and a rule that fires on shell would be
+/// carved out until it fired on nothing.
+fn step_condition(step: &[&str]) -> Option<String> {
+    let head = strip_comment(step.first()?);
+    let column = head.len() - head.trim_start().len() + 2;
+    for line in step {
+        let body = strip_comment(line);
+        let text = body.trim_start();
+        let indent = body.len() - text.len();
+        let (indent, text) = text
+            .strip_prefix("- ")
+            .map_or((indent, text), |rest| (indent + 2, rest));
+        if indent == column
+            && let Some(condition) = text.strip_prefix("if:")
+        {
+            return Some(condition.trim().to_owned());
+        }
     }
-
-    // And the documents, which is the part no other entry covers.
-    let mut unwatched: Vec<String> = git_tracked(&["*.md".to_owned()])
-        .into_iter()
-        .filter(|path| !watched(path))
-        .collect();
-    unwatched.sort();
-    assert!(
-        unwatched.is_empty(),
-        "a change to these Markdown files skips the entire gate matrix: {unwatched:?}\n\
-         `just vale`, `just typos` and `just comment-discipline` all read them, so all three \
-         can fail on a diff CI never runs them over."
-    );
+    None
 }
 
-/// Tracked paths the `changes` filter does not watch, each with the gate that
-/// reads it anyway.
+/// The conditions written on steps that run a recipe, in one job.
 ///
-/// Every row is a live hole, not an exemption: a diff touching only these
-/// files skips the whole gate matrix, and the gate named beside it is one
-/// `just ci` would fail on locally. They are pinned so the set cannot grow
-/// while nobody is looking, and so removing one is a visible edit rather than
-/// an accident.
-const UNWATCHED_BY_THE_CHANGE_FILTER: &[(&str, &str)] = &[
+/// A `run:` naming `just`, whatever it hands it: the matrix leg runs
+/// `just "$GATE"`, so a reader that wanted a recipe name would have skipped
+/// the one step that is every gate at once. `uses:` steps are out — the
+/// `tool: committed,just` install puts the runner on the box and runs nothing.
+fn conditional_recipe_steps(workflow: &str, job: &str) -> Vec<String> {
+    job_steps(workflow, job)
+        .into_iter()
+        .filter(|step| {
+            step.iter().any(|line| strip_comment(line).contains("run:"))
+                && step
+                    .iter()
+                    .any(|line| words(strip_comment(line)).any(|word| word == "just"))
+        })
+        .filter_map(|step| step_condition(&step))
+        .collect()
+}
+
+/// Where a condition is written, which is what decides what a skip looks
+/// like from outside: a skipped job reports "skipped", a skipped step leaves
+/// its job reporting success.
+#[derive(Clone, Copy)]
+enum Depth {
+    Job,
+    Step,
+}
+
+impl fmt::Display for Depth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Job => "job",
+            Self::Step => "gate step",
+        })
+    }
+}
+
+/// Every `if:` in ci.yml that can take a gate out of the run, at either depth.
+fn conditions_that_can_skip_a_gate(workflow: &str) -> Vec<(String, String, Depth)> {
+    let mut out = Vec::new();
+    for job in job_keys(workflow) {
+        for condition in job_level_conditions(workflow, &job) {
+            out.push((job.clone(), condition, Depth::Job));
+        }
+        for condition in conditional_recipe_steps(workflow, &job) {
+            out.push((job.clone(), condition, Depth::Step));
+        }
+    }
+    out
+}
+
+/// Lines that use an action whose job is to sort a diff.
+///
+/// A list of names, and the weaker of the two readings for exactly that
+/// reason: an action nobody has heard of leaves nothing to grep for. It earns
+/// its place on the case the glob reader cannot see — an action pointed at a
+/// filter file, whose globs are not in this workflow at all.
+fn path_classifier_actions(workflow: &str) -> Vec<&str> {
+    const SORTERS: &[&str] = &["paths-filter", "changed-files"];
+    jobs_block(workflow)
+        .into_iter()
+        .filter(|line| {
+            let body = strip_comment(line);
+            SORTERS.iter().any(|action| {
+                body.split_whitespace()
+                    .any(|word| word.contains(action) && word.contains('/'))
+            })
+        })
+        .collect()
+}
+
+/// `paths:` / `paths-ignore:` written on a trigger rather than inside a job.
+fn trigger_path_filters(workflow: &str) -> Vec<&str> {
+    top_level_block(workflow, "on")
+        .into_iter()
+        .filter(|line| {
+            let key = strip_comment(line).trim().trim_end_matches(':');
+            key == "paths" || key == "paths-ignore"
+        })
+        .collect()
+}
+
+/// Every job in ci.yml whose execution is conditional, with the condition and
+/// the reason it is not a diff being sorted out of the run.
+///
+/// The list is the rule: a job-level `if:` that is not written here fails,
+/// whatever it says. The `changes` filter was three of these at once, and each
+/// read plausibly on its own line.
+const CONDITIONAL_JOBS_IN_CI: &[(&str, &str, &str)] = &[
     (
-        "spec/**",
-        "`just spec` reads the conformance sources and the expectation JSON",
+        "commitlint",
+        "github.event_name == 'pull_request'",
+        "the event kind, not the diff. The recipe lints a base..head range, and a push to main \
+         has no such range — the job is skipped where its question does not exist, not where \
+         somebody decided the answer was cheap.",
     ),
     (
-        "dist/**",
-        "`just dist-assets-check` regenerates the completions and man page and diffs them",
-    ),
-    (
-        "{_typos,bacon,cliff,committed,dist-workspace,mise}.toml",
-        "a gate's own configuration: `just typos` reads one of these, `just commitlint` another",
-    ),
-    (
-        "lefthook.yml",
-        "the hook manifest `gate_wiring` reads to decide a tool is executed",
-    ),
-    (
-        ".config/**",
-        "the second half of the mise declaration `just setup` installs from",
-    ),
-    ("bin/**", "the wrappers a contributor runs the CLI through"),
-    (
-        ".devcontainer/**",
-        "the container definition ADR-0002 makes the only place code runs",
-    ),
-    (
-        "{.editorconfig,.gitattributes,.gitignore,LICENSE-APACHE,LICENSE-MIT,NOTICE}",
-        "read by `just vale` and by `comment-discipline`'s repo-path scan, which was written \
-         for `.gitattributes` and CODEOWNERS in the first place",
+        "ci-success",
+        "always()",
+        "the aggregator, and the only condition here that widens rather than narrows: without it \
+         a failed upstream job would leave the one required check unreported, which reads as \
+         pending forever instead of red.",
     ),
 ];
 
-#[test]
-fn the_files_a_diff_can_hide_behind_are_the_ones_measured_here() {
-    // The debt the rule above stops short of. Widening the filter to `.md`
-    // fixed the file kind Vale was added for and left the shape intact: three
-    // gates read every tracked file, and the filter watches a hand-written
-    // subset of them, so there is still a diff that skips every gate in the
-    // repo. The sharpest of them is `.gitattributes` — `comment-discipline`'s
-    // repo-path scan exists *because* a retired path survived there, and a
-    // change to it skips the matrix that runs the scan.
-    //
-    // Pinned rather than fixed: the correct filter for three whole-worktree
-    // gates is one that never skips, and deleting change-gating is a decision
-    // about CI cost rather than a test's to make. What this holds is the
-    // direction — the set below may shrink, and may not grow.
-    let workflow = read(".github/workflows/ci.yml");
-    let globs = change_filter_globs(&workflow);
-    let unwatched: BTreeSet<String> = git_tracked(&[])
-        .into_iter()
-        .filter(|path| !globs.iter().any(|glob| glob_to_regex(glob).is_match(path)))
-        .collect();
+/// Every step in ci.yml that runs a recipe and does not always run.
+///
+/// One row, and it is a hole rather than an exemption. A conditional step is
+/// the `changes` filter one level down and strictly worse: the job it sits in
+/// still reports SUCCESS, so `ci-success` goes green over a gate that never
+/// executed, where a skipped job at least shows as skipped.
+const CONDITIONAL_GATE_STEPS_IN_CI: &[(&str, &str, &str)] = &[(
+    "commitlint",
+    "github.event.pull_request.user.login != 'dependabot[bot]'",
+    "the one gate this repo knowingly does not run, and it is written down because it is not \
+     free: a bot PR merges with its commit subjects unlinted, on the grounds that the squash \
+     subject a maintainer writes is what actually lands on main.",
+)];
 
-    let known: Vec<Regex> = UNWATCHED_BY_THE_CHANGE_FILTER
-        .iter()
-        .map(|(glob, _)| glob_to_regex(glob))
-        .collect();
-    let mut fresh: Vec<&String> = unwatched
-        .iter()
-        .filter(|path| !known.iter().any(|known| known.is_match(path)))
-        .collect();
-    fresh.sort();
+#[test]
+fn nothing_classifies_a_diff_into_a_run_with_no_gates_in_it() {
+    // A gate that cannot be reached is a gate that does not exist, and for a
+    // year the only thing in this repo that could decide a gate was not
+    // reached was a `changes` job: dorny/paths-filter, one `rust` boolean, and
+    // the whole compile/test/lint matrix hanging off it. It classified a
+    // Markdown-only diff as "not rust" and skipped everything — so the prose
+    // gate, added because no gate could open a `.md` file, would not have run
+    // on a change to one. Widening the filter to `**/*.md` (#208) fixed that
+    // file kind and left the shape: three gates read every tracked file with
+    // no pathspec at all, `spec` and `dist-assets-check` read whole trees of
+    // their own, and the filter still watched a hand-written subset. Twenty-
+    // seven tracked files were left that a diff could hide behind, the
+    // sharpest of them `.gitattributes` — the repo-path scan exists BECAUSE a
+    // retired path survived in that file, and a change to it skipped the
+    // matrix that runs the scan.
+    //
+    // The filter is gone (#210), and this is the direction that keeps it gone.
+    // Four ways back in: the classifier itself, a `paths:` on a trigger, a job
+    // that runs only under some condition, and a STEP that does. The last one
+    // is the sharpest and was the one this rule first left open — a skipped
+    // job reports "skipped", a skipped step leaves its job reporting success.
+    //
+    // The two condition rules are lists rather than shapes on purpose. Reading
+    // the condition and judging it — banning `needs.`, say — passes anything
+    // spelled a different way, and the ways are not enumerable: a label, a
+    // commit subject, an output of a step in the same job. What is enumerable
+    // is the conditions this file is meant to have.
+    let workflow = read(".github/workflows/ci.yml");
+    let jobs = job_keys(&workflow);
     assert!(
-        fresh.is_empty(),
-        "these tracked files joined the set a diff can hide behind: {fresh:?}\n\
-         A change to one of them skips the entire gate matrix while `just ci` still reads it. \
-         Add the path to ci.yml's `changes` filter, or to UNWATCHED_BY_THE_CHANGE_FILTER with \
-         the gate that reads it."
+        jobs.len() >= 5,
+        "ci.yml came out with jobs {jobs:?}; the reader is not finding the `jobs:` mapping"
     );
 
-    let dead: Vec<&str> = UNWATCHED_BY_THE_CHANGE_FILTER
+    // Asked twice, because either half alone names a vendor or a spelling.
+    let classifiers = path_classifier_actions(&workflow);
+    assert!(
+        classifiers.is_empty(),
+        "ci.yml classifies the diff again: {classifiers:?}\n\
+         `just vale`, `just typos` and `just comment-discipline` read every tracked file, so the \
+         only filter that is right for them is no filter — and the one this replaced skipped \
+         exactly the files it should not have."
+    );
+    assert!(
+        diff_classifier(&workflow).is_empty(),
+        "ci.yml carries globs that sort a diff. Which files they name is the next rule's \
+         question; this one is that sorting a diff at all is what was decided against — a filter \
+         wide enough to be harmless is a filter somebody will narrow."
+    );
+
+    // The same skip spelled at the trigger instead of in a job, where nothing
+    // downstream would show it: a workflow that never starts reports nothing
+    // at all, and branch protection is satisfied by a check that never ran.
+    let trigger_paths = trigger_path_filters(&workflow);
+    assert!(
+        trigger_paths.is_empty(),
+        "ci.yml's `on:` block filters by path: {trigger_paths:?}\n\
+         A diff outside the list does not skip the matrix, it skips the workflow — so there is \
+         no `ci-success` to be required at all."
+    );
+
+    let mut conditional: BTreeSet<(String, String)> = BTreeSet::new();
+    for (job, condition, depth) in conditions_that_can_skip_a_gate(&workflow) {
+        let (accounted, list, cost) = match depth {
+            Depth::Job => (
+                CONDITIONAL_JOBS_IN_CI,
+                "CONDITIONAL_JOBS_IN_CI",
+                "A gate something can answer away is a gate: the `changes` filter was three of \
+                 these, and `if: always()` on the aggregator is why every one of them stayed \
+                 green.",
+            ),
+            Depth::Step => (
+                CONDITIONAL_GATE_STEPS_IN_CI,
+                "CONDITIONAL_GATE_STEPS_IN_CI",
+                "The step is skipped and the job it is in succeeds, so the check reports green \
+                 having executed nothing — the #210 defect with the evidence removed.",
+            ),
+        };
+        assert!(
+            accounted
+                .iter()
+                .any(|(named, allowed, _)| *named == job && *allowed == condition),
+            "ci.yml's `{job}` {depth} runs only when `{condition}`, which is not a condition this \
+             workflow is meant to carry. {cost} Add it to {list} with what it costs, or take the \
+             condition off."
+        );
+        conditional.insert((job, condition));
+    }
+
+    // Both lists the other way round. A row for a condition that is no longer
+    // written is a rule that has stopped being a measurement — and it is the
+    // shape that lets the next one in, since a list nobody has to keep true is
+    // a list nobody reads before adding to.
+    let dead: Vec<String> = CONDITIONAL_JOBS_IN_CI
         .iter()
-        .map(|(glob, _)| *glob)
-        .filter(|glob| {
-            let pattern = glob_to_regex(glob);
-            !unwatched.iter().any(|path| pattern.is_match(path))
+        .chain(CONDITIONAL_GATE_STEPS_IN_CI)
+        .filter(|(job, condition, _)| {
+            !conditional.contains(&((*job).to_owned(), (*condition).to_owned()))
         })
+        .map(|(job, condition, _)| format!("{job}: `{condition}`"))
         .collect();
     assert!(
         dead.is_empty(),
-        "these are recorded as unwatched and are not: {dead:?}\n\
-         The filter caught up with them; drop the row so the list stays the measurement it \
-         claims to be."
+        "these jobs are accounted for as conditional and are not: {dead:?}\n\
+         Drop the row, so the list stays the account of this workflow it claims to be."
+    );
+}
+
+/// Three steps, and every way the step reader can be wrong in one job: a `- `
+/// nested inside a step, a shell `if` inside a `run:` script, and a condition
+/// on the step after the one it would be blamed on.
+const STEPS_THE_READER_HAS_TO_TELL_APART: &str = concat!(
+    "jobs:\n",
+    "  gate:\n",
+    "    steps:\n",
+    "      - uses: actions/checkout@0000000\n",
+    "        with:\n",
+    "          persist-credentials: false\n",
+    "      - name: Read the gate manifest\n",
+    "        run: |\n",
+    "          if [[ \"$native\" != \"commitlint\" ]]; then\n",
+    "            exit 1\n",
+    "          fi\n",
+    "          just gates\n",
+    "      - name: Run the gate\n",
+    "        if: steps.filter.outputs.rust == 'true'\n",
+    "        run: just \"$GATE\"\n",
+);
+
+#[test]
+fn a_step_condition_is_read_off_its_own_step_and_not_a_neighbours() {
+    // The rule above is only as good as where it thinks a step starts and
+    // ends. Two ways it could report nothing on the workflow that has the
+    // defect: reading `if [[ ... ]]` in a script as a condition makes the rule
+    // fire on an honest file until somebody carves it out, and blaming the
+    // wrong step makes it name a step that would pass review.
+    let steps = job_steps(STEPS_THE_READER_HAS_TO_TELL_APART, "gate");
+    assert_eq!(
+        steps.len(),
+        3,
+        "the reader split the job into {} steps; `with:` inputs and a shell script are inside a \
+         step, not steps of their own",
+        steps.len()
+    );
+    assert_eq!(step_condition(&steps[0]), None);
+    assert_eq!(
+        step_condition(&steps[1]),
+        None,
+        "a shell `if` in a `run:` script was read as the step's own condition"
+    );
+    assert_eq!(
+        step_condition(&steps[2]).as_deref(),
+        Some("steps.filter.outputs.rust == 'true'"),
+        "the condition that takes the whole gate matrix out of the run was not read"
+    );
+}
+
+/// What ci.yml sorts a diff with: the globs that make a diff worth running
+/// for, and the globs that make one not.
+struct DiffClassifier {
+    watched: Vec<Regex>,
+    ignored: Vec<Regex>,
+}
+
+impl DiffClassifier {
+    /// Does this workflow sort a diff at all?
+    ///
+    /// Not the same question as whether anything is hidden today. A filter
+    /// widened until it watches everything hides nothing and is still a filter
+    /// — the state this one was in when it was deleted, with the wrong 27
+    /// files left in it.
+    fn is_empty(&self) -> bool {
+        self.watched.is_empty() && self.ignored.is_empty()
+    }
+
+    /// Would a diff touching only `path` be sorted out of the run?
+    ///
+    /// Both halves, because the two spellings answer opposite ways: an
+    /// unmatched glob hides a file only when there is an inclusive list to be
+    /// outside of, and a matched one hides it only when the list is the
+    /// `-ignore` kind. A reader that folded them together would call a
+    /// `paths-ignore` of the whole tree "everything is watched".
+    fn hides(&self, path: &str) -> bool {
+        if self.ignored.iter().any(|glob| glob.is_match(path)) {
+            return true;
+        }
+        !self.watched.is_empty() && !self.watched.iter().any(|glob| glob.is_match(path))
+    }
+}
+
+/// Every glob ci.yml classifies a diff with, in every spelling one can be
+/// written in: `paths:` / `paths-ignore:` on a trigger, and the `filters:` or
+/// `files:` a path-classifier action takes as its input.
+///
+/// One reader for all of them because it is one question — which diffs this
+/// workflow decides are worth running for — and because naming the action
+/// that asks it is how a rule ends up meaning "not that vendor" instead of
+/// "not this".
+fn diff_classifier(workflow: &str) -> DiffClassifier {
+    const WATCHES: &[&str] = &["paths", "filters", "files"];
+    const IGNORES: &[&str] = &["paths-ignore", "files-ignore"];
+    let mut watched = Vec::new();
+    let mut ignored = Vec::new();
+    let mut opened: Option<(usize, bool)> = None;
+    for raw in workflow.lines() {
+        let body = strip_comment(raw);
+        let text = body.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let indent = body.len() - body.trim_start().len();
+        if let Some((column, subtracts)) = opened {
+            if indent > column {
+                // A list item, or — where the action takes its globs as one
+                // newline-separated scalar rather than a list — a line that is
+                // not a mapping key. `filters:` nests its globs under a name
+                // and `files:` does not, so a reader that knew only the list
+                // form would read one vendor's classifier and be blind to the
+                // next one's.
+                let item = match text.strip_prefix("- ") {
+                    Some(rest) => Some(rest.trim()),
+                    None if text.ends_with(':') || text.contains(": ") => None,
+                    None => Some(text),
+                };
+                if let Some(item) = item {
+                    // A `!glob` subtracts from what a filter watches, so it
+                    // belongs with the other spelling of "not this one".
+                    let item = unquoted(item);
+                    match item.strip_prefix('!') {
+                        Some(negated) => ignored.push(negated.to_owned()),
+                        None if subtracts => ignored.push(item),
+                        None => watched.push(item),
+                    }
+                }
+                continue;
+            }
+            opened = None;
+        }
+        let Some((key, rest)) = text.split_once(':') else {
+            continue;
+        };
+        let subtracts = IGNORES.contains(&key);
+        if !subtracts && !WATCHES.contains(&key) {
+            continue;
+        }
+        // `filters: |` opens a block scalar and `paths:` a plain list; either
+        // way the globs are the items indented under it.
+        let rest = rest.trim().trim_start_matches(['|', '>', '-', '+']).trim();
+        if rest.is_empty() {
+            opened = Some((indent, subtracts));
+            continue;
+        }
+        let Some(items) = rest
+            .strip_prefix('[')
+            .and_then(|list| list.strip_suffix(']'))
+        else {
+            continue;
+        };
+        for item in items
+            .split(',')
+            .map(|item| unquoted(item.trim()))
+            .filter(|item| !item.is_empty())
+        {
+            if subtracts || item.starts_with('!') {
+                ignored.push(item.trim_start_matches('!').to_owned());
+            } else {
+                watched.push(item);
+            }
+        }
+    }
+    let compile = |globs: Vec<String>| globs.iter().map(|glob| glob_to_regex(glob)).collect();
+    DiffClassifier {
+        watched: compile(watched),
+        ignored: compile(ignored),
+    }
+}
+
+/// A YAML scalar with its quotes off, if it had any.
+fn unquoted(value: &str) -> String {
+    quoted_literal(value, '\'')
+        .or_else(|| quoted_literal(value, '"'))
+        .unwrap_or(value)
+        .to_owned()
+}
+
+/// The classifier this repository actually shipped, kept as the reader's
+/// control. Both spellings are in it: the trigger form, which skips the
+/// workflow outright, and the action form, which skipped every job that hung
+/// off its one boolean.
+const CLASSIFIER_THAT_WAS_DELETED: &str = concat!(
+    "on:\n",
+    "  pull_request:\n",
+    "    branches: [main]\n",
+    "    paths: ['spec/**']\n",
+    "\n",
+    "jobs:\n",
+    "  changes:\n",
+    "    steps:\n",
+    "      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2\n",
+    "        id: filter\n",
+    "        with:\n",
+    "          filters: |\n",
+    "            rust:\n",
+    "              - 'crates/**'\n",
+    "              - 'Cargo.toml'\n",
+    "              - '.github/**'\n",
+    "              - '**/*.md'\n",
+);
+
+/// The same classification by another vendor, whose globs are a newline-
+/// separated scalar and not a list. The rule is "nothing sorts a diff", not
+/// "not that action" — and this is the shape the first reader was blind to.
+const THE_SAME_SORTING_BY_ANOTHER_HAND: &str = concat!(
+    "jobs:\n",
+    "  changes:\n",
+    "    steps:\n",
+    "      - uses: tj-actions/changed-files@0000000\n",
+    "        id: sorted\n",
+    "        with:\n",
+    "          files: |\n",
+    "            crates/**\n",
+    "            **/*.md\n",
+);
+
+#[test]
+fn a_diff_sorted_out_of_the_run_is_one_the_reader_reports() {
+    // The rule below answers "nothing is hidden", and the cheapest way for it
+    // to answer that is to have found nothing to read. This is what says it
+    // did not: the same reader, over the classifier that was actually here,
+    // reporting the same files the issue counted.
+    let classifier = diff_classifier(CLASSIFIER_THAT_WAS_DELETED);
+    for hidden in [
+        ".gitattributes",
+        "NOTICE",
+        "lefthook.yml",
+        "bin/aozora-flavored-markdown",
+        ".config/mise/config.toml",
+    ] {
+        assert!(
+            classifier.hides(hidden),
+            "the reader says a diff touching only `{hidden}` reached the gate matrix under the \
+             filter that skipped it. Reading nothing looks exactly like this."
+        );
+    }
+    // `spec/**` is watched by the trigger and by nothing else, so it is the
+    // one that says both spellings were read and not just the first.
+    for watched in [
+        "spec/commonmark-0.31.2.json",
+        "Cargo.toml",
+        "README.md",
+        "crates/xtask/src/main.rs",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            !classifier.hides(watched),
+            "the reader says `{watched}` was hidden by a filter that watched it — it is reporting \
+             more than it read, which would make the rule below pass on a filter that is really \
+             there."
+        );
+    }
+
+    let elsewhere = diff_classifier(THE_SAME_SORTING_BY_ANOTHER_HAND);
+    assert!(
+        !elsewhere.is_empty() && elsewhere.hides(".gitattributes"),
+        "a classifier written as a newline-separated scalar read as no classifier at all. Every \
+         rule here would pass on the workflow that has the defect, which is how a net comes to \
+         mean `not that vendor` instead of `not this`."
+    );
+}
+
+#[test]
+fn no_tracked_file_can_hide_a_diff_from_the_gate_matrix() {
+    // Acceptance, stated over files rather than over mechanisms: a diff
+    // touching only `.gitattributes` runs the gate matrix. The mechanisms are
+    // held above; this is the thing they were held for, and it is the half a
+    // reader can check against the repository rather than against the
+    // workflow's own vocabulary.
+    //
+    // Twenty-seven tracked files failed this before #210 — `spec/`, `dist/`,
+    // every per-gate configuration at the root, `lefthook.yml`, `.config/`,
+    // `bin/`, `.devcontainer/`, `.editorconfig`, `.gitattributes`,
+    // `.gitignore`, the licences and `NOTICE`. Each one is read by a gate that
+    // would have failed on it locally. The issue counted 26 by hand, which is
+    // the other half of what this rule replaces: the set was written down once
+    // and is measured now.
+    let tracked = git_tracked(&[]);
+    assert!(
+        tracked.contains(".gitattributes"),
+        "the repository no longer tracks `.gitattributes`, so this rule is measuring a tree that \
+         does not contain the file it was written for"
+    );
+
+    let classifier = diff_classifier(&read(".github/workflows/ci.yml"));
+    let hidden: Vec<&String> = tracked
+        .iter()
+        .filter(|path| classifier.hides(path))
+        .collect();
+    let shown: Vec<&&String> = hidden.iter().take(20).collect();
+    assert!(
+        hidden.is_empty(),
+        "a diff touching only one of these {} tracked files skips the gate matrix: {shown:?}\n\
+         `just vale`, `just typos` and `just comment-discipline` read every tracked file with no \
+         pathspec at all, and `just spec` and `just dist-assets-check` own whole trees, so a gate \
+         can fail locally on a file CI never ran it over.",
+        hidden.len()
     );
 }
 
@@ -7653,16 +9814,6 @@ const RUN_NOUNS: &[&str] = &[
     "invoked",
 ];
 
-/// Sub-command and gate names that are also ordinary English. A document
-/// saying something "cannot run" or "is not gated" while the word `build` or
-/// `check` happens to appear on the line is discussing work, not asserting
-/// that a named tool is unavailable — and a reader that took these as names
-/// would fire on most sentences about a compile.
-const TOOL_WORDS_THAT_ARE_ALSO_PROSE: &[&str] = &[
-    "add", "bench", "build", "check", "clean", "coverage", "doc", "fuzz", "install", "metadata",
-    "pin", "prop", "publish", "remove", "run", "spec", "test", "tree", "update",
-];
-
 /// The tools this repo drives, as a document would spell them: the
 /// sub-command for a `cargo` call, the command name for anything else.
 ///
@@ -7681,49 +9832,60 @@ fn tool_vocabulary(justfile: &str) -> BTreeSet<String> {
             }
         }
     }
-    out.retain(|word| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&word.as_str()));
     out
 }
 
-/// The words of `line` that appear in `vocabulary`.
-fn names_any(line: &str, vocabulary: &BTreeSet<String>) -> Vec<String> {
-    let mut named: Vec<String> = prose_words(line)
-        .into_iter()
-        .filter(|word| vocabulary.contains(word))
-        .collect();
-    named.sort();
-    named.dedup();
-    named
+/// The names from `vocabulary` that `clause` puts in COMMAND position: a
+/// backticked span read as a command line, minus the driver that opens it.
+///
+/// Position rather than spelling. Reading bare words meant subtracting a
+/// hand-written list of nineteen tool names that are also ordinary English —
+/// `build`, `check`, `run`, `test`, `doc`, `spec` — and every one of the
+/// nineteen was then invisible to the rule. Markup settles the same question
+/// without a list, because it is what the list was approximating: a document
+/// discussing a build writes build, one naming the recipe writes `just build`.
+///
+/// The drivers are [`BUILD_TOOLS`] — already this file's answer to "which
+/// invocation IS the call" — plus `just`, which runs the recipes. A path is
+/// read to its first flag or argument, so `cargo xtask comment-discipline`
+/// names the sub-command two deep that a `<tool> <sub>` pair could not reach,
+/// and `cargo test --features build` still does not name `build`.
+fn names_in_command_position(clause: &str, vocabulary: &BTreeSet<String>) -> Vec<String> {
+    let mut named = BTreeSet::new();
+    for span in clause.split('`').skip(1).step_by(2) {
+        let path: Vec<String> = span
+            .split_whitespace()
+            .take_while(|token| is_subcommand_word(token))
+            .map(str::to_lowercase)
+            .collect();
+        // A lone backticked word is its own command path. Anything longer is
+        // read only if it opens as a call, which is also what keeps a
+        // backticked quotation of prose from naming everything inside it.
+        let mut driven = path.len() == 1;
+        for word in &path {
+            if driven && vocabulary.contains(word) {
+                named.insert(word.clone());
+            }
+            driven |= BUILD_TOOLS.contains(&word.as_str()) || word == "just";
+        }
+    }
+    named.into_iter().collect()
 }
 
 #[test]
 fn no_document_denies_a_check_this_repo_can_run() {
+    // That the vocabulary still holds `semver-checks` — that this is reading
+    // the recipes at all — is asserted by the reader's own test below, which
+    // takes the sentence this rule was written for all the way to the name.
     let justfile = read("Justfile");
     let tools = tool_vocabulary(&justfile);
-    assert!(
-        tools.contains("semver-checks"),
-        "the tool reader came out as {tools:?} and does not hold the tool this rule was written \
-         for; it is no longer reading the recipes"
-    );
-    let gates: BTreeSet<String> = recipes_in_group(&justfile, "gate")
-        .into_iter()
-        .filter(|gate| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&gate.as_str()))
-        .collect();
-
+    let gates = recipes_in_group(&justfile, "gate");
     let documents = ci_prose_files();
-    assert!(
-        documents
-            .iter()
-            .any(|(label, _)| label.starts_with("docs/adr/")),
-        "the reader is not finding the accepted ADRs; it found {:?}. Excusing them as history \
-         is what let this rule's own sentence stand.",
-        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
-    );
 
     let mut claims = Vec::new();
     for (label, text) in &documents {
         for (line, denial) in denials_in(text, CAPABILITY_DENIALS, RUN_NOUNS) {
-            let named = names_any(&denial, &tools);
+            let named = names_in_command_position(&denial, &tools);
             if !named.is_empty() {
                 claims.push(format!(
                     "  {label}:{line}: {denial}\n    a recipe here runs {named:?}"
@@ -7731,7 +9893,7 @@ fn no_document_denies_a_check_this_repo_can_run() {
             }
         }
         for (line, denial) in denials_in(text, NEGATIONS, RUN_NOUNS) {
-            let named = names_any(&denial, &gates);
+            let named = names_in_command_position(&denial, &gates);
             if !named.is_empty() {
                 claims.push(format!(
                     "  {label}:{line}: {denial}\n    {named:?} is in the gate manifest"
@@ -7751,48 +9913,77 @@ fn no_document_denies_a_check_this_repo_can_run() {
 }
 
 #[test]
-fn a_capability_denial_is_read_and_a_quotation_of_one_is_not() {
-    // The sentence, as ADR-0015 carried it. The wrapping is the ADR's own:
-    // the tool and the denial share the first line, which is the only reason
-    // a line-at-a-time reader could attribute one to the other.
-    let before = concat!(
-        "`cargo semver-checks` cannot run until a baseline exists on crates.io, so it\n",
-        "is wired into the `publish-crates.yml` preflight *after* the first publish,\n",
-        "not into per-PR CI.\n",
-    );
-    let found = denials_in(before, CAPABILITY_DENIALS, RUN_NOUNS);
-    assert_eq!(
-        found.len(),
-        1,
-        "the reader no longer sees the sentence it was written for: {found:?}"
-    );
-    assert!(
-        !names_any(&found[0].1, &tool_vocabulary(&read("Justfile"))).is_empty(),
-        "the denial no longer reads as being about a tool this repo drives"
-    );
+fn a_denial_is_read_where_it_is_made_and_not_where_the_line_happens_to_wrap() {
+    // Run at the scope the rules run at — a whole document. The two readers
+    // this replaced were asked one line at a time, a different reach and a
+    // different quote scope from the call they stood in for, so they agreed
+    // with a rule whose contract they did not share.
+    //
+    // ADR-0015's sentence, wrapped as the ADR wrapped it, and again with the
+    // wrap moved one clause along. The old reader saw the first and not the
+    // second: the tool and the denial had to land on the same physical line.
+    let tools = tool_vocabulary(&read("Justfile"));
+    for claim in [
+        concat!(
+            "`cargo semver-checks` cannot run until a baseline exists on crates.io, so it\n",
+            "is wired into the `publish-crates.yml` preflight *after* the first publish,\n",
+            "not into per-PR CI.\n",
+        ),
+        concat!(
+            "Until a baseline exists on crates.io, `cargo semver-checks`\n",
+            "cannot run at all.\n",
+        ),
+    ] {
+        let found = denials_in(claim, CAPABILITY_DENIALS, RUN_NOUNS);
+        assert_eq!(
+            found.len(),
+            1,
+            "the reader no longer sees the sentence it was written for: {found:?}"
+        );
+        assert_eq!(
+            names_in_command_position(&found[0].1, &tools),
+            vec!["semver-checks".to_owned()],
+            "the denial no longer reads as being about a tool this repo drives"
+        );
+    }
 
-    // The amendment quotes it, deliberately on one line with the tool name, so
-    // that what excuses the quotation is the quoting and not the wrapping.
-    let after = concat!(
-        "This ADR first said `cargo semver-checks` \"cannot run until a baseline\n",
-        "exists on crates.io\", and that was wrong the whole time.\n",
-    );
-    assert!(
-        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS).is_empty(),
-        "a quoted denial read as a fresh one: {:?}\n\
-         Recording a retired claim is how an amendment explains itself; a rule that forbids the \
-         quotation forbids the explanation.",
-        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS)
-    );
-
-    // And the quoting is not a way out: reopen the quote and the claim is the
-    // document's own again.
-    let unquoted = after.replace('"', "");
-    assert_eq!(
-        denials_in(&unquoted, CAPABILITY_DENIALS, RUN_NOUNS).len(),
-        1,
-        "the same sentence without its quotation marks stopped reading as a claim"
-    );
+    // The sentence the schedule half exists for; a denial whose negation is
+    // interrupted rather than ended by its commas, which a clause cut at every
+    // one of them put out of reach; then two that describe what this repo
+    // runs: CONTRIBUTING.md's two native gates, whose negation is handed over
+    // by a conjunction and which name both gates in command position, so a
+    // paragraph read whole would convict it; and a pasted transcript, which is
+    // evidence rather than a claim.
+    for (prose, nouns, denials) in [
+        (
+            "Both ride every PR; there is no cron workflow.\n",
+            SCHEDULE_NOUNS,
+            1,
+        ),
+        ("`just test` does not, on a PR, run.\n", RUN_NOUNS, 1),
+        (
+            concat!(
+                "The two `[group('native')]` gates (`msrv`, `commitlint`) keep a dedicated CI\n",
+                "job because they need a toolchain the dev image has not got, and they run\n",
+                "the same recipe there.\n",
+            ),
+            RUN_NOUNS,
+            0,
+        ),
+        (
+            concat!(
+                "It printed:\n\n",
+                "```text\n",
+                "there is no cron workflow\n",
+                "```\n"
+            ),
+            SCHEDULE_NOUNS,
+            0,
+        ),
+    ] {
+        let found = denials_in(prose, NEGATIONS, nouns);
+        assert_eq!(found.len(), denials, "{prose:?} was read as {found:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

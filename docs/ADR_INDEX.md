@@ -28,6 +28,7 @@ was extracted (ADR-0010).
 | [0022](./adr/0022-collapse-the-aozora-half-of-the-ir.md) | Collapse the Aozora half of the IR to `{kind, span, html}` | accepted |
 | [0023](./adr/0023-substitute-constructs-in-source-coordinates.md) | Substitute constructs in source coordinates | accepted |
 | [0024](./adr/0024-depend-on-crates-io-comrak.md) | Depend on crates.io comrak, retire the vendored tree | accepted |
+| [0025](./adr/0025-stay-on-libfuzzer-sys-as-the-fuzz-engine.md) | Stay on libfuzzer-sys as the fuzz engine | accepted |
 
 ## Authoring a new ADR
 

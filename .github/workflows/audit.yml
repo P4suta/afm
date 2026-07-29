@@ -7,17 +7,10 @@
 # Between two quiet weeks the newest scan of this repo's graph would be two
 # weeks old, and `SECURITY.md` said so out loud ("there is no cron workflow").
 #
-# Three jobs, deliberately independent (no `needs:` between them) so a red gate
-# never suppresses the notification that explains it:
-#
-#   * `advisories` — the authoritative run. Same two recipes, same dev image,
-#     same result as a PR. A red run here is the durable record.
-#   * `report`     — `rustsec/audit-check`, which on a `schedule` event opens a
-#     GitHub issue per newly disclosed advisory. This is the half that makes
-#     the schedule a control at all: a cron that only reddens a workflow
-#     nobody is watching notifies nobody.
-#   * `licences`   — a staleness watch over dependency-review.yml's per-package
-#     licence exemptions, which are blanket waivers with nothing checking them.
+# The jobs below are deliberately independent (no `needs:` between them) so a
+# red gate never suppresses the notification that explains it. What each is for
+# is written above it rather than enumerated here, where a list would only be a
+# second copy of the jobs it names.
 #
 # Scope note: `cargo audit` reads the lockfile it is pointed at, so this covers
 # the workspace `Cargo.lock`. The fuzz crate is its own workspace with its own
@@ -27,9 +20,7 @@ name: audit
 
 on:
   schedule:
-    # Daily, 15:40 UTC = 00:40 Asia/Tokyo. Off the hour and clear of the other
-    # three crons in this repo: fuzz (daily 16:20), codeql (Mon 04:23) and
-    # release-pins (Sun 17:00).
+    # Daily, 15:40 UTC = 00:40 Asia/Tokyo, off the hour.
     - cron: "40 15 * * *"
   push:
     branches: [main]
@@ -53,7 +44,7 @@ concurrency:
 
 jobs:
   # The gate, run exactly as a pull request runs it (ADR-0002: both recipes
-  # reach cargo through the dev image).
+  # reach cargo through the dev image). A red run here is the durable record.
   advisories:
     name: advisories (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
@@ -61,6 +52,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      issues: write   # the rolling issue at the end of this job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -78,6 +70,29 @@ jobs:
       - name: RustSec advisories (cargo-audit)
         if: ${{ !cancelled() }}
         run: just audit
+
+      # `report` below is not this job's channel. It files what
+      # `rustsec/audit-check` finds — RustSec advisories — and cargo-deny
+      # answers for four more things: a ban, an unvetted source, a yanked
+      # crate, a licence it refuses. A nightly that went red on any of those
+      # would otherwise be a red square and nothing else.
+      - name: Say where a nightly failure went
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: the nightly dependency scan is failing"
+          body: |
+            `just deny` or `just audit` failed on a scheduled run of
+            `.github/workflows/audit.yml`, against a `Cargo.lock` nobody here
+            need have touched.
+
+            A newly disclosed RustSec advisory arrives separately, as its own
+            issue from `rustsec/audit-check`. This one also covers the half
+            that reporter never sees: a ban, an unvetted source, a yanked
+            crate, or a licence `deny.toml` refuses.
+
+            Fix the finding or record the exception in `deny.toml`, then close
+            this issue — the next failing run files it again.
 
   # Turn a finding into something with an assignee. On a `schedule` event
   # rustsec/audit-check opens one issue per advisory, skipping any whose
@@ -131,6 +146,9 @@ jobs:
     name: licence exemptions still hold
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write   # the rolling issue at the end of this job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -200,3 +218,191 @@ jobs:
             exit 1
           fi
           echo "licence exemptions: every one still rests on what it was written for"
+
+      # The day this fires is the day it was written for, so it needs somewhere
+      # to fire TO. `report` above answers for advisories and files nothing on
+      # a licence, and this job blocks no merge, so without the step below the
+      # relicensing it exists to catch would land as a red square on a nightly
+      # nobody is required to read.
+      - name: Say where a nightly failure went
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: a licence exemption no longer holds"
+          body: |
+            The `licences` job of `.github/workflows/audit.yml` found an
+            `allow-dependencies-licenses` entry in
+            `.github/workflows/dependency-review.yml` that no longer rests on
+            what it was written for — either a package now declaring a
+            different licence, or an entry on one side with no counterpart on
+            the other. The run below names it.
+
+            That waiver is per package rather than per licence, so until
+            somebody re-reads it the dependency-review gate waves through
+            whatever the package declares today. Drop the entry, or rewrite the
+            licence it rests on in both files, then close this issue — the next
+            failing run files it again.
+
+  # The Advisory tracking section of SECURITY.md tells a reporter that
+  # Dependabot alerts and Dependabot security updates are both on, so GitHub
+  # raises an advisory independently of this workflow. That is the one claim in
+  # that file resting on nothing in this tree: both are repository SETTINGS,
+  # flipped in a menu by anyone with admin rights and carried in no diff, and
+  # GitHub pauses security updates on its own after ~90 days of inactivity. So
+  # the claim can stop being true with every gate here green — the same defect
+  # class the rest of this workflow was written to remove, one level below
+  # where a file-reading test can see it. #198 checked it by hand and shipped
+  # the check as a comment in a pull request, which is a measurement rather
+  # than a control (#201).
+  #
+  # THE TOKEN, because this is the part that cannot be read off the job below.
+  # Both endpoints need Administration: Read on this repository, and
+  # `GITHUB_TOKEN` cannot be granted it at any setting: `administration` is not
+  # one of the scopes a workflow `permissions:` block can name, so there is no
+  # combination of them that reaches these two settings. The job therefore
+  # authenticates as `secrets.DEPENDABOT_POSTURE_TOKEN`:
+  #
+  #   a fine-grained personal access token, "Only select repositories" →
+  #   this repository, Repository permissions → Administration: Read, and
+  #   nothing else. No write anywhere, no account permissions.
+  #
+  # `permissions:` below is a different thing and stays minimal for the
+  # WORKFLOW token, which is all it governs: `contents: read` for the checkout,
+  # `issues: write` for the reporter. Neither reads a setting.
+  #
+  # Fine-grained tokens expire, so this job has a second failure mode of its
+  # own making — and an expired token answers both endpoints exactly as a
+  # repository with both settings switched off would. That is why it reports
+  # through two channels rather than one: "the posture is off" and "the posture
+  # could not be read" are different findings for different people, and filing
+  # the second under the first is the false alarm that teaches a reader to stop
+  # opening the channel.
+  dependabot:
+    name: dependabot alerts and security updates still on
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write   # the rolling issues at the end of this job
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ask the repository what SECURITY.md says about it
+        id: posture
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_POSTURE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Everything that ends "so this job did not read the posture".
+          blind() {
+            printf '[??] %s\n' "$*" >&2
+            printf 'This job reads both settings as DEPENDABOT_POSTURE_TOKEN: fine-grained,\n' >&2
+            printf 'this repository only, Administration: Read, no write anywhere. A token\n' >&2
+            printf 'that expired, was revoked or lost that permission answers these two\n' >&2
+            printf 'endpoints exactly as a repository with both settings off would, so an\n' >&2
+            printf 'unread posture exits here and is never reported as a finding.\n' >&2
+            exit 1
+          }
+
+          [ -n "${GH_TOKEN:-}" ] || blind "DEPENDABOT_POSTURE_TOKEN is unset or empty"
+
+          # Dependabot security updates. Asked FIRST because it is the endpoint
+          # that answers with a body — `{"enabled":true,"paused":false}` — which
+          # is what tells the token's reach apart from the setting's state.
+          fixes=$(gh api "repos/$GH_REPO/automated-security-fixes" 2>&1) \
+            || blind "repos/$GH_REPO/automated-security-fixes: $fixes"
+          enabled=$(jq -r '.enabled' <<<"$fixes" 2>&1) \
+            || blind "automated-security-fixes answered with no readable .enabled: $fixes"
+          paused=$(jq -r '.paused' <<<"$fixes" 2>&1) \
+            || blind "automated-security-fixes answered with no readable .paused: $fixes"
+          case "$enabled $paused" in
+            'true true' | 'true false' | 'false true' | 'false false') ;;
+            *) blind "automated-security-fixes: enabled=$enabled paused=$paused" ;;
+          esac
+
+          # Dependabot alerts: 204 when on, 404 when off. Readable as the
+          # setting only because the call above has already shown this token can
+          # see repository administration — asked on its own, the 404 here is
+          # also what an under-scoped token gets, and the two are indistinguishable.
+          if gh api --silent "repos/$GH_REPO/vulnerability-alerts" >/dev/null 2>&1; then
+            alerts=on
+          else
+            alerts=off
+          fi
+
+          fail=0
+          if [ "$alerts" = on ]; then
+            printf '[OK] Dependabot alerts are enabled\n'
+          else
+            printf '[!!] Dependabot alerts are disabled\n' >&2
+            fail=1
+          fi
+          if [ "$enabled $paused" = 'true false' ]; then
+            printf '[OK] Dependabot security updates are enabled and running\n'
+          else
+            printf '[!!] Dependabot security updates: enabled=%s, paused=%s\n' \
+              "$enabled" "$paused" >&2
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            # The posture, read and wrong — as against unread, which leaves
+            # through blind() above. The two reporting steps below split on
+            # this: re-enabling a setting and renewing a token are different
+            # jobs for different people.
+            printf 'posture=off\n' >> "$GITHUB_OUTPUT"
+            printf 'SECURITY.md says both are enabled and that sentence is now false. Turn them\n' >&2
+            printf 'back on under Settings → Code security, or, if this is deliberate, rewrite\n' >&2
+            printf 'the paragraph in SECURITY.md that rests on them and this job with it.\n' >&2
+            exit 1
+          fi
+          printf 'dependabot posture: alerts on, security updates on and unpaused\n'
+
+      - name: Say that the posture stopped matching
+        if: ${{ failure() && github.event_name == 'schedule' && steps.posture.outputs.posture == 'off' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: Dependabot alerts or security updates are no longer on"
+          body: |
+            The `dependabot` job of `.github/workflows/audit.yml` asked this
+            repository for its own settings and got an answer `SECURITY.md` says
+            it cannot get: Dependabot alerts disabled, or Dependabot security
+            updates disabled or paused. The run below says which.
+
+            Both are settings rather than files, so nothing arrived in a pull
+            request to say so, and the paragraph in `SECURITY.md` about GitHub
+            raising the same finding independently has been false since it
+            happened. GitHub also pauses security updates by itself after a
+            long quiet spell, which looks identical here and is fixed the same
+            way.
+
+            Turn them back on under Settings → Code security, or rewrite that
+            paragraph if the change was meant, then close this issue — the next
+            failing run files it again.
+
+      - name: Say that the posture could not be read
+        if: ${{ failure() && github.event_name == 'schedule' && steps.posture.outputs.posture != 'off' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: the Dependabot posture check cannot see the settings it watches"
+          body: |
+            The `dependabot` job of `.github/workflows/audit.yml` could not read
+            whether Dependabot alerts and Dependabot security updates are on.
+            That is this check failing, rather than the thing it checks: while
+            it lasts, the claim in `SECURITY.md` is unverified rather than
+            false.
+
+            Both endpoints need Administration: Read on this repository, which
+            `GITHUB_TOKEN` cannot hold — `administration` is not a scope a
+            workflow `permissions:` block can name. The job runs as
+            `secrets.DEPENDABOT_POSTURE_TOKEN` instead: a fine-grained token,
+            this repository only, Repository permissions → Administration:
+            Read, nothing else. Fine-grained tokens expire, so the usual cause
+            is that one lapsed.
+
+            Mint a replacement, update the secret, then close this issue — the
+            next failing run files it again.

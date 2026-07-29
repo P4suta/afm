@@ -458,7 +458,33 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // that read the banned list. None of it was deleted: the same explanations
 // are in `styles/Aozora/RetiredPaths.yml` and `.vale.ini`, beside the rule
 // they now describe. Bookkeeping after a cut, not a decision.
-const MAX_DOC_LINES: u64 = 1_699;
+//
+// Re-pinned from 1 699 to 5 191 because the POPULATION grew, not the budget.
+// `collect_crate_sources` now walks every directory `DOC_RATCHET_DIRECTORIES`
+// names, where it walked only `src`. This is not a raise and buys no slack:
+// it is the same zero headroom over a set that is 3 492 doc lines larger, all
+// of which were already written and none of which any gate could see.
+//
+// The ratchet existed to stop rustdoc restatement accumulating, and its walk
+// did not contain the place it accumulated. `crates/*/tests` carried 3 424 doc
+// lines against the 1 699 governed here — twice the budget, ungoverned — and
+// `gate_wiring.rs` alone carried 1 201 of them, a single file within 500 lines
+// of the entire watched surface. So one `///` under `src/` was refused
+// outright while several hundred added to a test file cost nothing, which is
+// the gradient that built the machinery this change is cutting back.
+//
+// What it still does not measure, beyond the directories left out below:
+// plain `//` notes anywhere. That is the live hole — `gate_wiring.rs` carries
+// 1 634 plain-comment lines against its 1 201 rustdoc ones, so prose demoted
+// from `///` to `//` is free, and this comment is itself spending it.
+//
+// Lowered by 1 in the same change: `DOC_RATCHET_ROOT`'s own doc comment lost
+// the sentence carving `tests/` out, there being nothing left to carve.
+// Lowered by 34 more: the `REPOSITORY_SETTINGS` family deleted from
+// `gate_wiring.rs` took its prose with it — the first deletion this ceiling
+// has ever been able to charge for, and the reason to widen it here rather
+// than file it.
+const MAX_DOC_LINES: u64 = 5_191;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured
@@ -468,12 +494,19 @@ const MAX_DOC_LINES: u64 = 1_699;
 /// deletes some code.
 const MAX_DOC_RATIO_PER_100K: u64 = 16_500;
 
-/// Where the ratchet measures: every `.rs` file under a crate's own `src/`,
-/// inline `#[cfg(test)]` modules and all. The `tests/` and `examples/`
-/// directories are out, an example being documentation by nature, but nothing
-/// carves test code out of `src/` — so the share reported below is of all
-/// source, not of production source alone.
+/// Where the ratchet measures: every crate under this directory, read in the
+/// target directories `DOC_RATCHET_DIRECTORIES` names. Nothing carves test
+/// code out of the count, so the share reported below is of all source, not
+/// of production source alone.
 const DOC_RATCHET_ROOT: &str = "crates";
+
+// Cargo's own target directories for hand-written code, less `examples/` (an
+// example is documentation by nature) and the nested `fuzz/` workspace, which
+// is not a target of any crate here. Named once because the walk and all four
+// failure messages below need the same list: spelled out separately in each,
+// they said `src/` and `tests/` for as long as the walk had already been
+// reading `benches/` too — the drift this file's own gate exists to refuse.
+const DOC_RATCHET_DIRECTORIES: [&str; 3] = ["src", "tests", "benches"];
 
 /// A doc line is one whose first non-space token opens a rustdoc comment.
 /// Plain `//` notes are not counted — they cost a reader nothing until they
@@ -500,9 +533,10 @@ fn count_doc_lines(src: &str) -> (u64, u64) {
 fn doc_budget_failure(doc: u64, all: u64) -> Option<String> {
     if doc > MAX_DOC_LINES {
         return Some(format!(
-            "comment-discipline: {doc} doc-comment lines under {DOC_RATCHET_ROOT}/*/src, over the \
-             pinned ceiling of {MAX_DOC_LINES}. Cut restatements of what the code already says, \
-             keep the \"why\". Raising MAX_DOC_LINES is a deliberate hand edit, not a fix."
+            "comment-discipline: {doc} doc-comment lines under {DOC_RATCHET_ROOT}/*/{{{}}}, over \
+             the pinned ceiling of {MAX_DOC_LINES}. Cut restatements of what the code already \
+             says, keep the \"why\". Raising MAX_DOC_LINES is a deliberate hand edit, not a fix.",
+            DOC_RATCHET_DIRECTORIES.join(",")
         ));
     }
     if doc * 100_000 > all * MAX_DOC_RATIO_PER_100K {
@@ -520,15 +554,23 @@ fn doc_budget_failure(doc: u64, all: u64) -> Option<String> {
     None
 }
 
-/// Every `.rs` file under a crate's own `src/`.
+/// Every `.rs` file a crate keeps in a `DOC_RATCHET_DIRECTORIES` directory.
 fn collect_crate_sources(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let crates = root.join(DOC_RATCHET_ROOT);
     let entries = fs::read_dir(&crates).with_context(|| format!("reading {}", crates.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading an entry of {}", crates.display()))?;
-        let src = entry.path().join("src");
-        if src.is_dir() {
-            collect_rust_sources(&src, out)?;
+        // A budget that stopped at `src/` was one the prose walked around: the
+        // integration tests carried twice the rustdoc the ceiling governed, so
+        // a `///` cost nothing there and was refused outright one directory
+        // over. Walking Cargo's whole set rather than the two directories that
+        // happen to be heavy today is what keeps `benches/` from being the
+        // next place it accumulates.
+        for directory in DOC_RATCHET_DIRECTORIES {
+            let measured = entry.path().join(directory);
+            if measured.is_dir() {
+                collect_rust_sources(&measured, out)?;
+            }
         }
     }
     out.sort();
@@ -955,9 +997,10 @@ mod tests {
         workspace_member_names,
     };
     use super::{
-        MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path, PathBuf, RETIRED_PATH_LIST_FILE,
-        RETIRED_REPO_PATHS, aozora_pin_pattern, collect_crate_sources, count_doc_lines,
-        doc_budget_failure, fs, is_semver_triple, scan_repo_paths,
+        DOC_RATCHET_DIRECTORIES, DOC_RATCHET_ROOT, MAX_DOC_LINES, MAX_DOC_RATIO_PER_100K, Path,
+        PathBuf, RETIRED_PATH_LIST_FILE, RETIRED_REPO_PATHS, aozora_pin_pattern,
+        collect_crate_sources, count_doc_lines, doc_budget_failure, fs, is_semver_triple,
+        scan_repo_paths,
     };
 
     // The `(doc, all)` the gate itself would measure — the same walk over the
@@ -974,7 +1017,7 @@ mod tests {
     // go stale at all.
     fn measured_source() -> (u64, u64) {
         let mut files = Vec::new();
-        collect_crate_sources(&repo_root(), &mut files).expect("walking crates/*/src");
+        collect_crate_sources(&repo_root(), &mut files).expect("walking the crate source trees");
         let mut doc = 0;
         let mut all = 0;
         for path in &files {
@@ -986,7 +1029,9 @@ mod tests {
         }
         assert!(
             all > 1_000,
-            "only {all} source line(s) found under crates/*/src; the walk is reading nothing"
+            "only {all} source line(s) found under {DOC_RATCHET_ROOT}/*/{{{}}}; the walk is \
+             reading nothing",
+            DOC_RATCHET_DIRECTORIES.join(",")
         );
         (doc, all)
     }
@@ -1016,10 +1061,12 @@ mod tests {
     fn the_pinned_ceiling_is_the_count_it_is_pinned_to() {
         let (doc, _) = measured_source();
         assert_eq!(
-            doc, MAX_DOC_LINES,
-            "MAX_DOC_LINES is {MAX_DOC_LINES} and crates/*/src carries {doc} doc line(s). \
-             The ceiling is pinned to today's count — a gap either way is a hand edit that was \
-             not made."
+            doc,
+            MAX_DOC_LINES,
+            "MAX_DOC_LINES is {MAX_DOC_LINES} and {DOC_RATCHET_ROOT}/*/{{{}}} carries {doc} doc \
+             line(s). The ceiling is pinned to today's count — a gap either way is a hand edit \
+             that was not made.",
+            DOC_RATCHET_DIRECTORIES.join(",")
         );
     }
 

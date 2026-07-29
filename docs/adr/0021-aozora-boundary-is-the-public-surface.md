@@ -51,8 +51,9 @@ Two consequences are load-bearing enough to state as rules:
 
 Prose follows the same boundary: **no comment in this repo names an upstream
 internal path** — `//`, `///` and `//!` alike, and in either the hyphenated or
-the underscored spelling of a crate. `cargo xtask comment-discipline` (wired
-into `just lint`) fails the build when one appears.
+the underscored spelling of a crate. A name that has to be looked up in a repo
+this one does not build is a dependency on the internals in every sense but
+the compiler's.
 
 ## Consequences
 
@@ -61,8 +62,8 @@ into `just lint`) fails the build when one appears.
 - Where the public surface is coarser than the internal one, this repo pays
   with re-derivation rather than with a private dependency — a real cost,
   bounded by the parity gate that would catch an infidelity.
-- Comments and docs cannot silently rot into references to names that no
-  longer exist; the gate turns that class of drift into a build failure.
+- Comments and docs stop accumulating references to names only an upstream
+  contributor could resolve.
 - A genuinely upstream-motivated API addition is still possible — the rule
   raises the bar, it does not close the door.
 
