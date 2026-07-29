@@ -209,10 +209,74 @@ fn canonicalize_round_trip_regressions_replay_cleanly() {
 
 #[test]
 fn sjis_decode_regressions_replay_cleanly() {
-    replay_each("sjis_decode", |text| {
-        let html = render(text, &Options::default()).html;
-        assert_html_invariants(text, &html);
-    });
+    replay_each("sjis_decode", assert_render_front_doors_agree);
+}
+
+/// DEV-246's original 12-byte reproducer. Keep the exact payload named here
+/// as well as in the discovery sweep: the regression is not merely that
+/// decoding and one HTML render do not panic, but that every public rendering
+/// path agrees after the CP932 boundary has produced Markdown fence syntax.
+const SJIS_FENCE_REPRODUCER: &[u8; 12] =
+    include_bytes!("fuzz_regressions/sjis_decode/crash-ba5ff350751754e25d36dd7606889c0a38e1bd19");
+
+#[test]
+fn twelve_byte_sjis_fence_artifact_agrees_across_every_front_door() {
+    let text = decode_sjis(SJIS_FENCE_REPRODUCER)
+        .expect("the pinned sjis_decode artifact must remain valid CP932");
+    assert_render_front_doors_agree(&text);
+}
+
+fn assert_render_front_doors_agree(src: &str) {
+    let options = Options::default();
+    let rendered = render(src, &options);
+    let projected = render_to_ir(src, &options);
+    let RenderedBlocks {
+        blocks,
+        diagnostics: block_diagnostics,
+        ..
+    } = render_blocks(src, &options);
+    let joined_html: String = blocks.iter().map(|block| block.html.as_str()).collect();
+    let joined_ir: Vec<_> = blocks
+        .iter()
+        .flat_map(|block| block.ir.iter().cloned())
+        .collect();
+
+    assert_html_invariants(src, &rendered.html);
+    assert_html_invariants(src, &projected.html);
+    assert_html_invariants(src, &joined_html);
+    for block in &blocks {
+        if let Err(error) = check_no_sentinel_leak(src, &block.html) {
+            panic!(
+                "sentinel leaked into one block: {error:?}\n  html = {:?}",
+                block.html
+            );
+        }
+    }
+
+    assert_eq!(
+        rendered.html, projected.html,
+        "`render` and `render_to_ir` HTML disagree about {src:?}"
+    );
+    assert_eq!(
+        rendered.html, joined_html,
+        "`render` and joined `render_blocks` HTML disagree about {src:?}"
+    );
+    assert_eq!(
+        projected.ir.blocks, joined_ir,
+        "`render_to_ir` and flattened `render_blocks` IR disagree about {src:?}"
+    );
+
+    let diagnosed = diagnose(src, &options);
+    for (name, actual) in [
+        ("render", &rendered.diagnostics),
+        ("render_to_ir", &projected.diagnostics),
+        ("render_blocks", &block_diagnostics),
+    ] {
+        assert_eq!(
+            actual, &diagnosed,
+            "`{name}` and `diagnose` disagree about {src:?}"
+        );
+    }
 }
 
 /// How a target reads its raw bytes: what `replay_each` turns an artifact
@@ -554,11 +618,17 @@ fn seed_source_documents() -> Vec<(String, String)> {
 /// `encoding_rs` is both the executable contract in `xtask cp932-project` and
 /// the expectation here. This keeps platform `iconv` aliases and handwritten
 /// dash substitutions out of the corpus contract.
-fn cp932_projection(text: &str) -> Option<String> {
-    let (encoded, _, had_errors) = SHIFT_JIS.encode(text);
-    (!had_errors).then(|| {
-        decode_sjis(encoded.as_ref()).expect("encoding_rs emitted bytes the aozora decoder rejects")
-    })
+fn cp932_projection(text: &str) -> String {
+    let mut encoded = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mut utf8 = [0; 4];
+        let scalar = ch.encode_utf8(&mut utf8);
+        let (bytes, _, had_errors) = SHIFT_JIS.encode(scalar);
+        if !had_errors {
+            encoded.extend_from_slice(bytes.as_ref());
+        }
+    }
+    decode_sjis(&encoded).expect("encoding_rs emitted bytes the aozora decoder rejects")
 }
 
 /// One target's committed corpus, decoded through the shape that target
@@ -667,12 +737,13 @@ fn one_document_set_behind_every_corpus(corpora: &[Corpus]) {
         );
     }
 
-    // The lossy target is the exact representable projection of that same
-    // source set. Both the generator and this expectation use encoding_rs.
+    // The lossy target is the complete character-wise projection of that
+    // same source set: only unrepresentable scalars are dropped. Both the
+    // generator and this expectation use encoding_rs.
     let reference: BTreeSet<String> = first
         .texts
         .iter()
-        .filter_map(|text| cp932_projection(text))
+        .map(|text| cp932_projection(text))
         .collect();
     for corpus in corpora.iter().filter(|corpus| !corpus.how.is_lossless()) {
         let extra: Vec<&String> = corpus.texts.difference(&reference).collect();
@@ -707,15 +778,15 @@ fn every_corpus_carries_the_dialect(corpora: &[Corpus]) {
     for corpus in corpora {
         let fold = |text: &str| {
             if corpus.how.is_lossless() {
-                Some(text.to_owned())
+                text.to_owned()
             } else {
                 cp932_projection(text)
             }
         };
-        let held: BTreeSet<String> = corpus.texts.iter().filter_map(|text| fold(text)).collect();
+        let held: BTreeSet<String> = corpus.texts.iter().map(|text| fold(text)).collect();
         let missing: Vec<&String> = documents
             .iter()
-            .filter(|(_, text)| fold(text).is_some_and(|projected| !held.contains(&projected)))
+            .filter(|(_, text)| !held.contains(&fold(text)))
             .map(|(name, _)| name)
             .collect();
         assert!(

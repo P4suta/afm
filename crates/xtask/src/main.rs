@@ -13,6 +13,7 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -63,7 +64,7 @@ enum Command {
         check: bool,
     },
     /// Project every UTF-8 file in a directory to the exact CP932 byte
-    /// sequence used by the fuzz corpus, omitting unrepresentable inputs.
+    /// sequence used by the fuzz corpus, dropping only unmappable scalars.
     Cp932Project {
         /// Directory containing UTF-8 source documents.
         #[arg(long)]
@@ -99,36 +100,51 @@ fn main() -> Result<()> {
 }
 
 /// Encode a seed directory through `encoding_rs`, the same WHATWG Shift_JIS
-/// implementation used by the `aozora` decoder. A source with an unmappable
-/// character is omitted instead of receiving an encoder replacement, so
-/// every emitted seed is a true projection of its UTF-8 source.
+/// implementation used by the `aozora` decoder. Every source document is
+/// emitted. A scalar CP932 cannot represent is dropped rather than replacing
+/// or omitting the whole document, so the corpus remains the complete
+/// character-wise projection of the UTF-8 source set.
 fn cp932_project(input_dir: &Path, output_dir: &Path) -> Result<()> {
     fs::create_dir_all(output_dir).with_context(|| format!("mkdir {}", output_dir.display()))?;
     let mut entries = fs::read_dir(input_dir)
         .with_context(|| format!("reading {}", input_dir.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
 
     let mut written = 0usize;
-    let mut omitted = 0usize;
+    let mut dropped_scalars = 0usize;
+    let mut affected_documents = 0usize;
     for entry in entries {
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
         let path = entry.path();
-        let source =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let (encoded, _, had_errors) = SHIFT_JIS.encode(&source);
-        if had_errors {
-            omitted += 1;
-            continue;
+        if path.is_file() {
+            let source =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            let mut encoded = Vec::with_capacity(source.len());
+            let mut dropped_here = 0usize;
+            for ch in source.chars() {
+                let mut utf8 = [0; 4];
+                let scalar = ch.encode_utf8(&mut utf8);
+                let (bytes, _, had_errors) = SHIFT_JIS.encode(scalar);
+                if had_errors {
+                    dropped_here += 1;
+                } else {
+                    encoded.extend_from_slice(bytes.as_ref());
+                }
+            }
+            if dropped_here > 0 {
+                affected_documents += 1;
+                dropped_scalars += dropped_here;
+            }
+            let output = output_dir.join(entry.file_name());
+            fs::write(&output, &encoded)
+                .with_context(|| format!("writing {}", output.display()))?;
+            written += 1;
         }
-        let output = output_dir.join(entry.file_name());
-        fs::write(&output, encoded.as_ref())
-            .with_context(|| format!("writing {}", output.display()))?;
-        written += 1;
     }
-    println!("cp932-project: wrote {written}, omitted {omitted} unrepresentable input(s)");
+    println!(
+        "cp932-project: wrote {written} document(s); dropped {dropped_scalars} unrepresentable \
+         scalar(s) from {affected_documents} document(s)"
+    );
     Ok(())
 }
 
