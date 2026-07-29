@@ -59,8 +59,8 @@ pub struct RenderResult {
 // carrying a `source_too_large` diagnostic, which the envelope below forwards
 // like any other. A malformed `options` never reaches here at all — `tsify`
 // owns the ABI decode and throws a `TypeError` from it.
-fn render_with_options(source: &str, options: Options) -> RenderResult {
-    let rendered = render_to_ir(source, &options);
+fn render_with_options(source: &str, options: &Options) -> RenderResult {
+    let rendered = render_to_ir(source, options);
     RenderResult {
         ir: rendered.ir,
         html: rendered.html,
@@ -72,7 +72,7 @@ fn render_with_options(source: &str, options: Options) -> RenderResult {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn render(source: &str, options: Option<Options>) -> RenderResult {
-    render_with_options(source, options.unwrap_or_default())
+    render_with_options(source, &options.unwrap_or_default())
 }
 
 /// Decode through a value map first. `serde-wasm-bindgen` optimises typed
@@ -92,7 +92,7 @@ fn strict_options(options: Option<JsOptions>) -> Result<Options, JsValue> {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = render)]
 pub fn render(source: &str, options: Option<JsOptions>) -> Result<RenderResult, JsValue> {
-    Ok(render_with_options(source, strict_options(options)?))
+    Ok(render_with_options(source, &strict_options(options)?))
 }
 
 /// Aozora-only inline mode for the obsidian inline post-processor.
@@ -104,7 +104,7 @@ pub fn render(source: &str, options: Option<JsOptions>) -> Result<RenderResult, 
 #[must_use]
 #[wasm_bindgen(js_name = renderAozoraOnly)]
 pub fn render_aozora_only(text: &str) -> RenderResult {
-    render_with_options(text, Options::default())
+    render_with_options(text, &Options::default())
 }
 
 /// xxh3-64 cache key; JS receives a `bigint`.
@@ -140,12 +140,12 @@ pub struct BlocksResult {
 ///
 /// `options` as in [`render`], including the oversize degradation — which
 /// arrives here as an empty `blocks` beside the diagnostic.
-fn render_blocks_with_options(source: &str, options: Options) -> BlocksResult {
+fn render_blocks_with_options(source: &str, options: &Options) -> BlocksResult {
     let RenderedBlocks {
         blocks,
         diagnostics,
         ..
-    } = render_blocks_core(source, &options);
+    } = render_blocks_core(source, options);
     BlocksResult {
         blocks: blocks
             .into_iter()
@@ -163,14 +163,17 @@ fn render_blocks_with_options(source: &str, options: Options) -> BlocksResult {
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn render_blocks(source: &str, options: Option<Options>) -> BlocksResult {
-    render_blocks_with_options(source, options.unwrap_or_default())
+    render_blocks_with_options(source, &options.unwrap_or_default())
 }
 
 /// WASM boundary equivalent of [`render`], with the same strict options.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = renderBlocks)]
 pub fn render_blocks(source: &str, options: Option<JsOptions>) -> Result<BlocksResult, JsValue> {
-    Ok(render_blocks_with_options(source, strict_options(options)?))
+    Ok(render_blocks_with_options(
+        source,
+        &strict_options(options)?,
+    ))
 }
 
 // =====================================================================

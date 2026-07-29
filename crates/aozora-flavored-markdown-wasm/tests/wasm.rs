@@ -14,6 +14,12 @@
 //! Run by `just test-wasm` (`wasm-pack test --node`), a `[group('gate')]`
 //! recipe, so CI expands it into a job like any other gate.
 //!
+//! Coverage here is semantic, not an assertion-count proxy: each export is
+//! called with an input that distinguishes the value or side effect its host
+//! relies on. `initPanicHook` is the one return-less exception. Its contract
+//! is that installation, including a repeated call, does not trap; reaching
+//! the next statement is therefore the observable assertion.
+//!
 //! The whole file is `#![cfg(target_arch = "wasm32")]`: `#[wasm_bindgen_test]`
 //! is collected by wasm-bindgen's runner, not by libtest, so on the host these
 //! would be tests nothing runs. The two files beside this one carry the
@@ -225,10 +231,38 @@ fn the_document_handle_answers_every_projection_the_editor_asks_for() {
         "the fixture's ※［＃二の字点、1-2-22］ resolves, and the inlay hints are those \
          resolutions"
     );
-    // Diagnostics are asserted for shape only: what the parser chooses to
-    // report about an unmatched 》 is its decision to change, and this crate
-    // only carries the answer across.
-    envelope("diagnosticsJson", &doc.diagnostics_json());
+    let diagnostics = envelope("diagnosticsJson", &doc.diagnostics_json());
+    let entries = diagnostics["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`data` is an array; got {diagnostics}"));
+    let close_start = SOURCE
+        .rfind('》')
+        .expect("the fixture ends with an unmatched ruby close");
+    let unmatched = entries
+        .iter()
+        .find(|entry| {
+            entry["kind"].as_str() == Some("unmatched_close")
+                && entry["span"]["start"].as_u64() == u64::try_from(close_start).ok()
+                && entry["span"]["end"].as_u64()
+                    == u64::try_from(close_start + '》'.len_utf8()).ok()
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "diagnosticsJson must carry the fixture's unmatched `》` at bytes \
+                 {close_start}..{}; got {diagnostics}",
+                close_start + '》'.len_utf8()
+            )
+        });
+    assert_eq!(
+        unmatched["severity"].as_str(),
+        Some("error"),
+        "an unmatched close is an error; got {unmatched}"
+    );
+    assert_eq!(
+        unmatched["source"].as_str(),
+        Some("source"),
+        "the unmatched close came from the source, not an internal check; got {unmatched}"
+    );
 }
 
 #[wasm_bindgen_test]
