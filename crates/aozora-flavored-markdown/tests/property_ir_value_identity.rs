@@ -5,7 +5,7 @@
 //! was pinned on one hand-written document, again as HTML
 //! (`streaming_blocks::concatenated_block_html_matches_the_document_render`).
 //! Both stopped at the HTML because HTML was the only output that could be
-//! compared: `Document`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
+//! compared: `MarkdownDocument`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
 //! no `PartialEq`, so an IR that differed run to run — or between the document
 //! and the streaming path — had nothing to fail.
 //!
@@ -14,7 +14,7 @@
 //! was asserted for 青空文庫 constructs over a fixture corpus
 //! (`construct_spans`) and nowhere else. Here it is asserted for *every* span
 //! and every range the IR carries, over generated input, through the
-//! `From<Span> for Range<usize>` a consumer is meant to use.
+//! `From<ByteSpan> for SourceRange<usize>` a consumer is meant to use.
 //!
 //! The coordinate walk goes through the serialised form on purpose: a new
 //! `Block` / `Inline` variant joins these properties without anyone
@@ -31,7 +31,9 @@ use core::hash::Hash;
 use core::ops::Range as ByteRange;
 use std::hash::{DefaultHasher, Hasher};
 
-use aozora_flavored_markdown::ir::{Block, Document, Inline, Position, Range, Span};
+use aozora_flavored_markdown::ir::{
+    Block, ByteSpan, Inline, MarkdownDocument, SourcePosition, SourceRange,
+};
 use aozora_flavored_markdown::{
     Diagnostic, Options, RenderedBlocks, render, render_blocks, render_to_ir,
 };
@@ -54,8 +56,8 @@ fn hash_of<T: Hash>(value: &T) -> u64 {
 
 #[derive(Debug, Default)]
 struct Coordinates {
-    spans: Vec<Span>,
-    ranges: Vec<Range>,
+    spans: Vec<ByteSpan>,
+    ranges: Vec<SourceRange>,
 }
 
 fn coordinates_of(document: &Value) -> Coordinates {
@@ -84,22 +86,22 @@ fn collect(value: &Value, out: &mut Coordinates) {
 
 /// A byte span serialises as two numbers; a source range as two objects, so
 /// neither reader can mistake the other's shape for its own.
-fn span_at(value: &Value) -> Option<Span> {
+fn span_at(value: &Value) -> Option<ByteSpan> {
     let start = coordinate(value.get("start")?)?;
     let end = coordinate(value.get("end")?)?;
-    Some(Span::new(start, end))
+    Some(ByteSpan::new(start, end))
 }
 
-fn range_at(value: &Value) -> Option<Range> {
+fn range_at(value: &Value) -> Option<SourceRange> {
     let start = position_at(value.get("start")?)?;
     let end = position_at(value.get("end")?)?;
-    Some(Range::new(start, end))
+    Some(SourceRange::new(start, end))
 }
 
-fn position_at(value: &Value) -> Option<Position> {
+fn position_at(value: &Value) -> Option<SourcePosition> {
     let line = coordinate(value.get("line")?)?;
     let column = coordinate(value.get("column")?)?;
-    Some(Position::new(line, column))
+    Some(SourcePosition::new(line, column))
 }
 
 fn coordinate(value: &Value) -> Option<u32> {
@@ -135,14 +137,14 @@ fn serialised(src: &str) -> Value {
 ///   neither direction, and re-serialising is the only thing that says so.
 /// * `Diagnostic` is asserted beside the IR rather than separately. It is a
 ///   second derive over a second envelope (`aozora-md.diagnostics.v1`), it
-///   travels with every render, and a property that stopped at `Document`
+///   travels with every render, and a property that stopped at `MarkdownDocument`
 ///   would leave the type this crate hands back in an *error* position as the
 ///   only public value nobody could read back.
 fn assert_the_wire_round_trips(src: &str) {
     let rendered = render_to_ir(src, &Options::default());
 
     let json = serde_json::to_value(&rendered.ir).expect("the IR must serialise");
-    let document: Document = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
+    let document: MarkdownDocument = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
         panic!("the IR did not read back for src={src:?}: {e}\n  json = {json}")
     });
     assert_eq!(
@@ -284,7 +286,7 @@ proptest! {
     }
 
     /// A `Some` span slices the caller's own source, and the width it reports
-    /// is the width of that slice. Asserted through `Range::from`, the
+    /// is the width of that slice. Asserted through `SourceRange::from`, the
     /// conversion a consumer is pointed at, so the cast lives in one place
     /// instead of at every call site.
     #[test]
@@ -316,6 +318,7 @@ proptest! {
 const HARD_SOURCES: &[&str] = &[
     "可哀想［＃「可哀想」に傍点］だ",
     "本文\r\n｜青梅《おうめ》",
+    "｜\r------------",
     "\u{feff}｜青梅《おうめ》",
     "本文\n----------\n｜青梅《おうめ》",
     "〔e'tude〕｜青梅《おうめ》",
@@ -425,7 +428,11 @@ fn an_aozora_block_reads_back_with_its_kind_beside_the_discriminant() {
         kind, "ruby",
         "the notation tag is read off `aozoraKind`, not off the discriminant"
     );
-    assert_eq!(span, Some(Span::new(0, 12)), "a byte span is two numbers");
+    assert_eq!(
+        span,
+        Some(ByteSpan::new(0, 12)),
+        "a byte span is two numbers"
+    );
     assert!(html.starts_with("<ruby>"), "html: {html}");
     assert_eq!(
         source_line,
@@ -505,7 +512,7 @@ fn a_document_this_test_wrote_round_trips_to_itself() {
             "children": [{ "kind": "text", "value": "本文" }],
         }],
     });
-    let document: Document =
+    let document: MarkdownDocument =
         serde_json::from_value(json.clone()).expect("the published document shape must read");
     assert_eq!(
         serde_json::to_value(&document).expect("a hand-written document serialises"),

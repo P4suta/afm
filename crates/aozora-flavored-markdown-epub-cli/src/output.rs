@@ -2,7 +2,7 @@
 // graphically through miette, or as the `aozora-md.diagnostics.v1` envelope
 // ADR-0012 pins. The EPUB itself goes to a file, so JSON can have stdout.
 
-use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Severity, Span};
+use aozora_flavored_markdown::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
 use aozora_flavored_markdown_epub::{BuildReport, ChapterReport};
 
 use crate::args::DiagFormat;
@@ -24,7 +24,7 @@ struct DiagnosticJson {
     source: DiagnosticSource,
     // **Not** part of the stability contract.
     message: String,
-    span: Span,
+    span: ByteSpan,
     line: u32,
     // 1-based, and a *character* column.
     column: u32,
@@ -101,21 +101,17 @@ fn clamp_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-// The library renders the header and the caret; the chapter text the caret
-// points into is attached here, and withheld for a span it cannot be sliced
-// by.
+// The source-bound adapter validates the chapter span before miette can draw
+// it, so a diagnostic and an unrelated chapter cannot be combined silently.
 fn report_of(d: &Diagnostic, chapter: &ChapterReport) -> miette::Report {
-    let report = miette::Report::new(d.clone());
-    let (start, end) = (d.span().start as usize, d.span().end as usize);
-    let in_bounds =
-        matches!(d.source(), DiagnosticSource::Source) && end > start && end <= chapter.text.len();
-    if in_bounds {
-        report.with_source_code(miette::NamedSource::new(
-            chapter.path.display().to_string(),
-            chapter.text.clone(),
-        ))
-    } else {
-        report
+    let name = chapter.path.display().to_string();
+    match d.bind_source(&name, chapter.text.clone()) {
+        Ok(bound) => miette::Report::new(bound),
+        Err(error) => miette::miette!(
+            "診断 {} を入力 {} に関連付けられません: {error}",
+            d.code(),
+            name
+        ),
     }
 }
 

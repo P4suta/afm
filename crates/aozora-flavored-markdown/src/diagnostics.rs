@@ -56,14 +56,14 @@ pub enum DiagnosticSource {
 // only cost every consumer literal construction and functional record update
 // for a field set that cannot grow. `lsp_types::Position`,
 // `miette::SourceSpan` and `proc_macro2::LineColumn` all make the same call.
-pub struct Span {
+pub struct ByteSpan {
     /// Inclusive start byte offset.
     pub start: u32,
     /// Exclusive end byte offset.
     pub end: u32,
 }
 
-impl Span {
+impl ByteSpan {
     /// No ordering is imposed on the pair; a reversed one reads as empty.
     #[must_use]
     pub const fn new(start: u32, end: u32) -> Self {
@@ -83,9 +83,9 @@ impl Span {
     }
 }
 
-impl From<Span> for Range<usize> {
+impl From<ByteSpan> for Range<usize> {
     /// Slices the source the span was measured against: `&source[span.into()]`.
-    fn from(span: Span) -> Self {
+    fn from(span: ByteSpan) -> Self {
         span.start as usize..span.end as usize
     }
 }
@@ -106,7 +106,7 @@ pub struct Diagnostic {
     source: DiagnosticSource,
     code: Cow<'static, str>,
     message: String,
-    span: Span,
+    span: ByteSpan,
 }
 
 // Three accessors below share a name with a method of a trait this type
@@ -149,7 +149,7 @@ impl Diagnostic {
 
     /// Byte range in the source text this crate was handed.
     #[must_use]
-    pub const fn span(&self) -> Span {
+    pub const fn span(&self) -> ByteSpan {
         self.span
     }
 }
@@ -165,37 +165,134 @@ impl fmt::Display for Diagnostic {
 // `Diagnostic::source`, which answers a different question.
 impl StdError for Diagnostic {}
 
-/// The code and severity become miette's report header; the span becomes a
-/// caret only once a host attaches the text with `Report::with_source_code`,
-/// since a diagnostic carries a byte range and never a copy of the source.
+/// A diagnostic bound to the exact source text its byte span addresses.
+///
+/// Construct this through [`Diagnostic::bind_source`]. Unlike a bare
+/// [`Diagnostic`], this is a `miette::Diagnostic`: the source and its
+/// validated byte range cannot be supplied in separate steps.
 #[cfg(feature = "miette")]
-impl miette::Diagnostic for Diagnostic {
+#[derive(Debug, Clone)]
+pub struct SourceBoundDiagnostic {
+    diagnostic: Diagnostic,
+    source: miette::NamedSource<String>,
+}
+
+/// Why a [`Diagnostic`] could not be bound to a source.
+#[cfg(feature = "miette")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum DiagnosticBindError {
+    /// A source diagnostic named bytes outside the supplied UTF-8 source, in
+    /// reverse order, or through the middle of a scalar value.
+    #[error(
+        "diagnostic byte span {span_start}..{span_end} does not address the supplied {source_len}-byte UTF-8 source"
+    )]
+    InvalidByteSpan {
+        /// Inclusive diagnostic start byte.
+        span_start: u32,
+        /// Exclusive diagnostic end byte.
+        span_end: u32,
+        /// Length of the supplied source, in bytes.
+        source_len: usize,
+    },
+}
+
+#[cfg(feature = "miette")]
+impl SourceBoundDiagnostic {
+    /// The diagnostic whose source was bound.
+    #[must_use]
+    pub const fn diagnostic(&self) -> &Diagnostic {
+        &self.diagnostic
+    }
+
+    /// Display name attached to the source.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        self.source.name()
+    }
+
+    /// Exact source text the diagnostic addresses.
+    #[must_use]
+    pub fn source_text(&self) -> &str {
+        self.source.inner()
+    }
+}
+
+#[cfg(feature = "miette")]
+impl fmt::Display for SourceBoundDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.diagnostic.fmt(f)
+    }
+}
+
+#[cfg(feature = "miette")]
+impl StdError for SourceBoundDiagnostic {}
+
+#[cfg(feature = "miette")]
+impl miette::Diagnostic for SourceBoundDiagnostic {
     fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
-        Some(Box::new(&self.code))
+        Some(Box::new(&self.diagnostic.code))
     }
 
     fn severity(&self) -> Option<miette::Severity> {
         // miette's three levels are Advice / Warning / Error — there is no
         // `Note`, so the quietest one takes it.
-        Some(match self.severity {
+        Some(match self.diagnostic.severity {
             Severity::Error => miette::Severity::Error,
             Severity::Warning => miette::Severity::Warning,
             Severity::Note => miette::Severity::Advice,
         })
     }
 
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        Some(&self.source)
+    }
+
     fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
         // An `Internal` diagnostic blames this library rather than a range of
         // the caller's text, and the `0..0` a document-scoped one carries
         // points at nothing — both render as header plus message.
-        if self.source != DiagnosticSource::Source || self.span.is_empty() {
+        if self.diagnostic.source != DiagnosticSource::Source || self.diagnostic.span.is_empty() {
             return None;
         }
         Some(Box::new(iter::once(miette::LabeledSpan::new(
             None,
-            self.span.start as usize,
-            self.span.len() as usize,
+            self.diagnostic.span.start as usize,
+            self.diagnostic.span.len() as usize,
         ))))
+    }
+}
+
+#[cfg(feature = "miette")]
+impl Diagnostic {
+    /// Bind this diagnostic to the exact source text it was produced from.
+    ///
+    /// Non-empty source spans are checked for ordering, bounds, and UTF-8
+    /// scalar boundaries before a miette report can be constructed.
+    pub fn bind_source(
+        &self,
+        name: impl AsRef<str>,
+        source: impl Into<String>,
+    ) -> Result<SourceBoundDiagnostic, DiagnosticBindError> {
+        let source = source.into();
+        let start = self.span.start as usize;
+        let end = self.span.end as usize;
+        let valid = self.source != DiagnosticSource::Source
+            || (start <= end
+                && end <= source.len()
+                && source.is_char_boundary(start)
+                && source.is_char_boundary(end));
+        if !valid {
+            return Err(DiagnosticBindError::InvalidByteSpan {
+                span_start: self.span.start,
+                span_end: self.span.end,
+                source_len: source.len(),
+            });
+        }
+        Ok(SourceBoundDiagnostic {
+            diagnostic: self.clone(),
+            source: miette::NamedSource::new(name, source),
+        })
     }
 }
 
@@ -212,7 +309,7 @@ impl Diagnostic {
                 "source is {bytes} bytes, over the {} byte (u32 span) limit; nothing was rendered",
                 u32::MAX
             ),
-            span: Span::new(0, 0),
+            span: ByteSpan::new(0, 0),
         }
     }
 
@@ -230,7 +327,7 @@ impl Diagnostic {
                 "{count} 青空文庫 construct(s) could not be located in the source \
                  and were left out of the output"
             ),
-            span: Span::new(0, 0),
+            span: ByteSpan::new(0, 0),
         }
     }
 }
@@ -244,7 +341,7 @@ impl Diagnostic {
             source: DiagnosticSource::from_upstream(d.source()),
             code: Cow::Borrowed(d.code()),
             message: d.to_string(),
-            span: Span::new(span.start, span.end),
+            span: ByteSpan::new(span.start, span.end),
         }
     }
 }
@@ -281,12 +378,12 @@ impl DiagnosticSource {
 mod miette_impl {
     use miette::{Diagnostic as MietteDiagnostic, LabeledSpan, Severity as ReportLevel};
 
-    use super::{Cow, Diagnostic, DiagnosticSource, Severity, Span};
+    use super::{ByteSpan, Cow, Diagnostic, DiagnosticSource, Severity};
 
     // The two real constructors are both document-scoped, so the
     // origin/level/span square is reached by literal — which inside the
     // defining crate is what `#[non_exhaustive]` still allows.
-    fn probe(severity: Severity, source: DiagnosticSource, span: Span) -> Diagnostic {
+    fn probe(severity: Severity, source: DiagnosticSource, span: ByteSpan) -> Diagnostic {
         Diagnostic {
             severity,
             source,
@@ -301,7 +398,10 @@ mod miette_impl {
         let mapped: Vec<Option<ReportLevel>> = [Severity::Error, Severity::Warning, Severity::Note]
             .into_iter()
             .map(|level| {
-                MietteDiagnostic::severity(&probe(level, DiagnosticSource::Source, Span::new(0, 0)))
+                let bound = probe(level, DiagnosticSource::Source, ByteSpan::new(0, 0))
+                    .bind_source("probe.md", "")
+                    .expect("empty span binds");
+                MietteDiagnostic::severity(&bound)
             })
             .collect();
         assert_eq!(
@@ -319,8 +419,13 @@ mod miette_impl {
 
     #[test]
     fn the_report_header_carries_the_stable_code_verbatim() {
-        let d = probe(Severity::Error, DiagnosticSource::Source, Span::new(0, 0));
-        let header = MietteDiagnostic::code(&d).map(|code| code.to_string());
+        let d = probe(
+            Severity::Error,
+            DiagnosticSource::Source,
+            ByteSpan::new(0, 0),
+        );
+        let bound = d.bind_source("probe.md", "").expect("empty span binds");
+        let header = MietteDiagnostic::code(&bound).map(|code| code.to_string());
         assert_eq!(
             header.as_deref(),
             Some(d.code()),
@@ -334,9 +439,15 @@ mod miette_impl {
         let d = probe(
             Severity::Warning,
             DiagnosticSource::Source,
-            Span::new(4, 11),
+            ByteSpan::new(4, 11),
         );
-        let labels: Vec<LabeledSpan> = MietteDiagnostic::labels(&d).into_iter().flatten().collect();
+        let bound = d
+            .bind_source("probe.md", "01234567890")
+            .expect("range binds");
+        let labels: Vec<LabeledSpan> = MietteDiagnostic::labels(&bound)
+            .into_iter()
+            .flatten()
+            .collect();
         assert_eq!(
             labels.len(),
             1,
@@ -352,25 +463,40 @@ mod miette_impl {
     #[test]
     fn a_diagnostic_with_nothing_to_point_at_claims_no_caret() {
         // A caret is a claim about the caller's text. `Internal` blames this
-        // library instead, the `0..0` a document-scoped diagnostic carries
-        // points at nothing, and a reversed pair measures nothing — each
-        // would otherwise put a marker on byte 0 of a file that is not at
-        // fault, and `source_too_large` would make a host copy the source it
-        // just refused to read in order to render one.
+        // library instead, and the `0..0` a document-scoped diagnostic
+        // carries points at nothing. A reversed pair is rejected by
+        // `bind_source` before it can reach label rendering.
         let cases = [
             probe(
                 Severity::Error,
                 DiagnosticSource::Internal,
-                Span::new(4, 11),
+                ByteSpan::new(4, 11),
             ),
-            probe(Severity::Error, DiagnosticSource::Source, Span::new(11, 4)),
             Diagnostic::source_too_large(5_000_000_000),
             Diagnostic::constructs_unresolved(3),
         ];
         for d in &cases {
+            let bound = d
+                .bind_source("probe.md", "01234567890")
+                .expect("non-source and empty spans bind");
             assert!(
-                MietteDiagnostic::labels(d).is_none(),
+                MietteDiagnostic::labels(&bound).is_none(),
                 "must claim no caret: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_or_non_boundary_source_span_cannot_be_reported() {
+        for span in [
+            ByteSpan::new(9, 4),
+            ByteSpan::new(0, 99),
+            ByteSpan::new(1, 2),
+        ] {
+            let d = probe(Severity::Error, DiagnosticSource::Source, span);
+            assert!(
+                d.bind_source("probe.md", "🍣").is_err(),
+                "{span:?} must not bind to a four-byte scalar"
             );
         }
     }
@@ -386,7 +512,7 @@ mod tests {
         assert_eq!(d.severity(), Severity::Error);
         assert_eq!(d.source(), DiagnosticSource::Source);
         assert_eq!(d.code(), "aozora-md::source_too_large");
-        assert_eq!(d.span(), Span { start: 0, end: 0 });
+        assert_eq!(d.span(), ByteSpan { start: 0, end: 0 });
         assert!(d.message().contains("5000000000"), "got: {d}");
         assert!(d.message().contains(&u32::MAX.to_string()), "got: {d}");
     }

@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Severity, Span};
+use aozora_flavored_markdown::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
 use miette::{IntoDiagnostic, Result, WrapErr};
 
 use crate::args::DiagFormat;
@@ -115,7 +115,7 @@ struct DiagnosticJson {
     source: DiagnosticSource,
     /// **Not** part of the stability contract.
     message: String,
-    span: Span,
+    span: ByteSpan,
     line: u32,
     /// 1-based, and a *character* column.
     column: u32,
@@ -155,18 +155,16 @@ pub(crate) struct Input<'a> {
     pub(crate) text: &'a str,
 }
 
-/// The library renders the header and the caret; the text that caret points
-/// into is the host's to supply, and is withheld for a span this input cannot
-/// be sliced by — which also keeps `source_too_large` from copying its source.
+/// Build a report only through the library's source-bound adapter, which
+/// validates the range before miette can draw it.
 fn report_of(d: &Diagnostic, input: Input<'_>) -> miette::Report {
-    let report = miette::Report::new(d.clone());
-    let (start, end) = (d.span().start as usize, d.span().end as usize);
-    let in_bounds =
-        matches!(d.source(), DiagnosticSource::Source) && end > start && end <= input.text.len();
-    if in_bounds {
-        report.with_source_code(miette::NamedSource::new(input.name, input.text.to_owned()))
-    } else {
-        report
+    match d.bind_source(input.name, input.text) {
+        Ok(bound) => miette::Report::new(bound),
+        Err(error) => miette::miette!(
+            "診断 {} を入力 {} に関連付けられません: {error}",
+            d.code(),
+            input.name
+        ),
     }
 }
 

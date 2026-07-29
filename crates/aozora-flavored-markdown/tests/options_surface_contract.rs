@@ -811,26 +811,23 @@ fn an_object_naming_every_knob_is_the_builder_chain_that_sets_them() {
 
 #[cfg(feature = "serde")]
 #[test]
-fn a_key_this_crate_does_not_know_is_ignored_rather_than_refused() {
+fn unknown_and_retired_keys_are_refused() {
     assert_eq!(
         decode("{}"),
         Options::default(),
         "an object naming nothing must be the shipped dialect, or `#[serde(default)]` is not \
          doing the job the `.d.ts`'s optional properties promise"
     );
-    // Leniency is the shipped decision, and it has a sharp edge worth
-    // stating in a test rather than in a comment nobody runs: the wasm
-    // bridge used to spell the first knob `aozoraEnabled`, and a host still
-    // sending that name is not told it has stopped working — it silently
-    // gets the default. Refusing an unknown key instead is
-    // `deny_unknown_fields`, which is a decision about the wire format and
-    // not one a test makes; this pins what the format does today so that
-    // decision is a visible edit rather than a drift.
-    assert_eq!(
-        decode(r#"{"aozoraEnabled": false}"#),
-        Options::default(),
-        "an unknown key must not change the configuration"
-    );
+    for wire in [
+        r#"{"aozoraEnabled": false}"#,
+        r#"{"unknown": true}"#,
+        r#"{"aozora": false, "typo": true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Options>(wire).is_err(),
+            "`{wire}` must be rejected instead of silently using defaults"
+        );
+    }
 }
 
 /// The property names an emitted TypeScript interface declares, each with

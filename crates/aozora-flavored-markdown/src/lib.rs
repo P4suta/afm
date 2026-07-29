@@ -90,7 +90,9 @@ pub mod sentinels {
 }
 
 #[doc(inline)]
-pub use diagnostics::{Diagnostic, DiagnosticSource, Severity, Span};
+pub use diagnostics::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
+#[cfg(feature = "miette")]
+pub use diagnostics::{DiagnosticBindError, SourceBoundDiagnostic};
 
 use core::mem;
 
@@ -118,7 +120,10 @@ use crate::constructs::Constructs;
 // knob it means to change, and `tsify` reads the same attribute to mark every
 // field optional in the emitted `.d.ts` — so the shape a browser host is
 // typed against is the shape serde will actually accept.
-#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(default, deny_unknown_fields, rename_all = "camelCase")
+)]
 #[cfg_attr(feature = "tsify", tsify(from_wasm_abi))]
 #[non_exhaustive]
 pub struct Options {
@@ -131,18 +136,6 @@ pub struct Options {
     strikethrough: bool,
     autolinks: bool,
     task_lists: bool,
-    // Raw HTML, and the GFM filter that only bites when raw HTML is passing
-    // through, exist for the conformance runners alone. The fields are not
-    // compiled into a released build, so there is nothing for a public setter
-    // to reach even by accident — and `skip` keeps the test build's own
-    // deserialiser off them too, so no spelling of the wire form reaches
-    // `render.unsafe` either.
-    #[cfg(test)]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    raw_html: bool,
-    #[cfg(test)]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    tagfilter: bool,
 }
 
 impl Default for Options {
@@ -176,10 +169,6 @@ impl Options {
             strikethrough: true,
             autolinks: true,
             task_lists: true,
-            #[cfg(test)]
-            raw_html: false,
-            #[cfg(test)]
-            tagfilter: false,
         }
     }
 
@@ -292,22 +281,30 @@ impl Options {
         comrak.extension.cjk_friendly_emphasis = self.cjk_friendly_emphasis;
         comrak.parse.smart = self.smart_punctuation;
         comrak.render.hardbreaks = self.hardbreaks;
-        // Rebound rather than mutated under a `#[cfg]` block, which no
-        // spelling of satisfies `semicolon_outside_block` and
-        // `semicolon_if_nothing_returned` at once.
-        #[cfg(test)]
-        let comrak = {
-            let mut comrak = comrak;
-            comrak.extension.tagfilter = self.tagfilter;
-            comrak.render.r#unsafe = self.raw_html;
-            comrak
-        };
         comrak
     }
 }
 
+/// Test-runner-only switches that cannot be represented by public
+/// [`Options`], even in a test build.
 #[cfg(test)]
-impl Options {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConformanceOptions {
+    public: Options,
+    raw_html: bool,
+    tagfilter: bool,
+}
+
+#[cfg(test)]
+impl ConformanceOptions {
+    fn new(public: Options) -> Self {
+        Self {
+            public,
+            raw_html: false,
+            tagfilter: false,
+        }
+    }
+
     // Raw-HTML passthrough, which both spec runners need because the expected
     // output in both fixtures contains raw HTML.
     //
@@ -318,16 +315,28 @@ impl Options {
     // README's compatibility claim is about those two presets; nothing else
     // about them is allowed to be runner-specific. Never reachable from
     // outside the crate — that is the point of the `cfg`.
-    pub(crate) fn with_raw_html(mut self, on: bool) -> Self {
+    fn with_raw_html(mut self, on: bool) -> Self {
         self.raw_html = on;
         self
     }
 
     // GFM's disallowed-raw-html filter. Only observable with raw HTML on, so
     // it belongs to the runner rather than the public surface.
-    pub(crate) fn with_tagfilter(mut self, on: bool) -> Self {
+    fn with_tagfilter(mut self, on: bool) -> Self {
         self.tagfilter = on;
         self
+    }
+
+    fn with_autolinks(mut self, on: bool) -> Self {
+        self.public = self.public.with_autolinks(on);
+        self
+    }
+
+    fn comrak(&self) -> comrak::Options<'static> {
+        let mut comrak = self.public.comrak();
+        comrak.extension.tagfilter = self.tagfilter;
+        comrak.render.r#unsafe = self.raw_html;
+        comrak
     }
 }
 
@@ -349,7 +358,7 @@ pub struct Rendered {
 #[non_exhaustive]
 pub struct RenderedIr {
     /// The projected document.
-    pub ir: ir::Document,
+    pub ir: ir::MarkdownDocument,
     /// The same document as HTML, so a host can render either without a
     /// second pass.
     pub html: String,
@@ -503,7 +512,7 @@ pub(crate) fn push_html_escaped(out: &mut String, s: &str) {
 pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     if !source_within_span_budget(input) {
         return RenderedIr {
-            ir: ir::Document::default(),
+            ir: ir::MarkdownDocument::default(),
             html: String::new(),
             diagnostics: vec![Diagnostic::source_too_large(input.len())],
         };
@@ -523,13 +532,25 @@ where
     F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
 {
     let comrak_options = options.comrak();
+    drive_pipeline_with_comrak(input, options, &comrak_options, project)
+}
+
+fn drive_pipeline_with_comrak<F, T>(
+    input: &str,
+    options: &Options,
+    comrak_options: &comrak::Options<'static>,
+    project: F,
+) -> (String, Vec<Diagnostic>, T)
+where
+    F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
+{
     if !options.aozora {
         let comrak_arena = comrak::Arena::new();
-        let root = comrak::parse_document(&comrak_arena, input, &comrak_options);
+        let root = comrak::parse_document(&comrak_arena, input, comrak_options);
         // No lexer pass, so no constructs and no sentinels: the input goes
         // to comrak as the caller wrote it.
         let extra = project(root, &Constructs::none());
-        let html = format_root(root, &comrak_options, options.source_line_anchors, None);
+        let html = format_root(root, comrak_options, options.source_line_anchors, None);
         return (html, Vec::new(), extra);
     }
 
@@ -552,7 +573,7 @@ where
     let constructs = Constructs::build(&masked_source);
 
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(&comrak_arena, constructs.text(), &comrak_options);
+    let root = comrak::parse_document(&comrak_arena, constructs.text(), comrak_options);
     constructs.remap_source_positions(root);
 
     // Both walkers cursor over the same construct table, each with its own
@@ -563,11 +584,25 @@ where
 
     let html = format_root(
         root,
-        &comrak_options,
+        comrak_options,
         options.source_line_anchors,
         Some(mask_originals.as_slice()),
     );
     (html, constructs.diagnostics().to_vec(), extra)
+}
+
+#[cfg(test)]
+fn render_conformance(input: &str, options: &ConformanceOptions) -> Rendered {
+    if !source_within_span_budget(input) {
+        return Rendered {
+            html: String::new(),
+            diagnostics: vec![Diagnostic::source_too_large(input.len())],
+        };
+    }
+    let comrak = options.comrak();
+    let (html, diagnostics, ()) =
+        drive_pipeline_with_comrak(input, &options.public, &comrak, |_root, _constructs| ());
+    Rendered { html, diagnostics }
 }
 
 /// Formats per top-level child when `anchors` is on, so each child's first
@@ -1015,19 +1050,19 @@ mod tests {
         // this one switch, so the switch has to be exactly that: raw HTML on,
         // every other knob still the preset's.
         for preset in [Options::commonmark(), Options::gfm()] {
-            let opts = preset.clone().with_raw_html(true);
+            let opts = ConformanceOptions::new(preset.clone()).with_raw_html(true);
             assert!(
                 opts.comrak().render.r#unsafe,
                 "with_raw_html must enable raw-HTML passthrough for the runner"
             );
             assert_eq!(
-                opts.with_raw_html(false),
+                opts.with_raw_html(false).public,
                 preset,
                 "with_raw_html must move no knob but its own"
             );
         }
         assert!(
-            Options::commonmark()
+            ConformanceOptions::new(Options::commonmark())
                 .with_raw_html(true)
                 .with_tagfilter(true)
                 .comrak()
@@ -1053,13 +1088,9 @@ mod tests {
         );
     }
 
-    // The wire form is the other way in, and `raw_html` / `tagfilter` are
-    // `#[cfg(test)]` — so this build is the only one in which they exist,
-    // and therefore the only place a deserialiser that reached them could
-    // ever be caught. The integration sweep over the options surface links
-    // the released shape, where both fields are simply absent: it would pass
-    // for the wrong reason, whatever the attributes said. `#[serde(skip)]`
-    // is what holds the line here, and nothing else in the workspace sees it.
+    // The wire form is the other way in. Test-only switches live on a
+    // different type, and strict deserialisation rejects every spelling
+    // instead of silently accepting a configuration it cannot apply.
     #[cfg(feature = "serde")]
     #[test]
     fn no_wire_spelling_reaches_raw_html_or_the_tagfilter() {
@@ -1072,15 +1103,9 @@ mod tests {
             r#"{"render": {"unsafe": true}}"#,
             r#"{"aozora": true, "rawHtml": true, "tagfilter": true}"#,
         ] {
-            let opts: Options = serde_json::from_str(wire).unwrap();
-            let comrak = opts.comrak();
             assert!(
-                !comrak.render.r#unsafe,
-                "{wire} turned raw-HTML passthrough on"
-            );
-            assert!(
-                !comrak.extension.tagfilter,
-                "{wire} turned the GFM tagfilter on"
+                serde_json::from_str::<Options>(wire).is_err(),
+                "{wire} must be rejected as an unknown Options key"
             );
         }
     }

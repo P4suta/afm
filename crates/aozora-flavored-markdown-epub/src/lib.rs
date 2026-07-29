@@ -28,7 +28,7 @@ mod render;
 // A chapter's diagnostics are the renderer's, so they are re-exported rather
 // than copied into a shadow type: a host reads one vocabulary whether it
 // renders the HTML itself or asks for an EPUB.
-pub use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Severity, Span};
+pub use aozora_flavored_markdown::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
 pub use error::{Cause, Error, Result};
 
 /// Inputs for one [`build`].
@@ -61,7 +61,7 @@ impl<'a> BuildOptions<'a> {
 pub struct ChapterReport {
     /// Source file as discovered, before decoding.
     pub path: PathBuf,
-    /// Decoded chapter text. A [`Span`] indexes into this, not into the
+    /// Decoded chapter text. A [`ByteSpan`] indexes into this, not into the
     /// bytes on disk, which may have been Shift_JIS.
     pub text: String,
     /// Never empty — a clean chapter contributes no report at all.

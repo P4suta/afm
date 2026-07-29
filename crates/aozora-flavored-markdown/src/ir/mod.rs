@@ -37,7 +37,10 @@
 
 mod types;
 
-pub use types::{Block, Document, Inline, ListItem, Position, Range, Span, TableAlign, TableRow};
+pub use types::{
+    Block, ByteSpan, Inline, ListItem, MarkdownDocument, SourcePosition, SourceRange, TableAlign,
+    TableRow,
+};
 
 use core::mem;
 
@@ -60,10 +63,10 @@ use crate::constructs::{
 /// A sentinel that landed in a literal markdown context (inline code,
 /// link/image destination) projects back to its original Aozora source
 /// instead of leaking the PUA char and desyncing the cursor.
-pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> Document {
+pub(crate) fn build_ir<'a>(root: &'a AstNode<'a>, constructs: &Constructs) -> MarkdownDocument {
     let mut walker = IrWalker::new(constructs.cursor(), Vec::new());
     walker.walk_root(root);
-    Document {
+    MarkdownDocument {
         blocks: walker.finish(),
     }
 }
@@ -595,7 +598,7 @@ impl<'t> IrWalker<'t> {
     fn project_text_with_sentinels(
         &mut self,
         text: &str,
-        range: Option<Range>,
+        range: Option<SourceRange>,
         out: &mut Vec<Inline>,
     ) {
         // Fast path: no sentinels in this text run.
@@ -684,21 +687,21 @@ fn table_align(a: TableAlignment) -> TableAlign {
     }
 }
 
-fn sourcepos_to_range(s: &Sourcepos) -> Option<Range> {
+fn sourcepos_to_range(s: &Sourcepos) -> Option<SourceRange> {
     // comrak source positions are 1-based line / column. Map the
-    // pair through `Position` directly — no pseudo-byte arithmetic.
-    let start = Position::new(saturating_u32(s.start.line), saturating_u32(s.start.column));
-    let end = Position::new(saturating_u32(s.end.line), saturating_u32(s.end.column));
-    // `Position` derives `Ord` lexicographically (line first, then
+    // pair through `SourcePosition` directly — no pseudo-byte arithmetic.
+    let start = SourcePosition::new(saturating_u32(s.start.line), saturating_u32(s.start.column));
+    let end = SourcePosition::new(saturating_u32(s.end.line), saturating_u32(s.end.column));
+    // `SourcePosition` derives `Ord` lexicographically (line first, then
     // column), so the comparison works for malformed inputs where
     // `end` precedes `start`.
-    (end >= start).then_some(Range::new(start, end))
+    (end >= start).then_some(SourceRange::new(start, end))
 }
 
 struct TableMeta {
     align: Vec<TableAlign>,
     source_line: Option<u32>,
-    range: Option<Range>,
+    range: Option<SourceRange>,
 }
 
 #[derive(Debug, Clone)]

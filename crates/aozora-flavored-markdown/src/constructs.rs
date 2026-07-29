@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use aozora::{ContainerKind, NodeKind, Snapshot};
 use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
 
-use crate::diagnostics::{Diagnostic, Span};
+use crate::diagnostics::{ByteSpan, Diagnostic};
 use crate::{fragment, verbatim_regions};
 
 // What each one stands for is `crate::sentinels`' to say: that is the copy a
@@ -141,7 +141,7 @@ pub(crate) const fn inline_is_dropped(kind: NodeKind, in_heading: bool) -> bool 
 /// splice asks what it renders to.
 #[derive(Debug)]
 struct RunFacts {
-    nodes: Vec<(NodeKind, Span)>,
+    nodes: Vec<(NodeKind, ByteSpan)>,
     html: String,
 }
 
@@ -162,7 +162,7 @@ impl Runs {
         take(cache.entry(run.to_owned()).or_insert(facts))
     }
 
-    fn nodes(&self, run: &str) -> Vec<(NodeKind, Span)> {
+    fn nodes(&self, run: &str) -> Vec<(NodeKind, ByteSpan)> {
         self.with(run, |facts| facts.nodes.clone())
     }
 
@@ -203,10 +203,10 @@ struct Node {
     kind: NodeKind,
     /// Range in the tiled text — the one coordinate space this crate can
     /// still slice after the fact.
-    run: Span,
+    run: ByteSpan,
     /// Range in the caller's own text, or `None` where the parser
     /// canonicalised that text and the two reads could not be paired.
-    span: Option<Span>,
+    span: Option<ByteSpan>,
 }
 
 /// One tiled construct.
@@ -214,8 +214,8 @@ struct Node {
 #[derive(Debug)]
 struct Construct {
     kind: NodeKind,
-    span: Option<Span>,
-    run: Span,
+    span: Option<ByteSpan>,
+    run: ByteSpan,
     /// The source run the sentinel stands for.
     literal: String,
 }
@@ -315,7 +315,7 @@ impl Constructs {
     fn from_read(
         texts: &Reads<'_>,
         snapshot: &Snapshot,
-        published: Option<&[(NodeKind, Span)]>,
+        published: Option<&[(NodeKind, ByteSpan)]>,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         let runs = Runs::default();
@@ -599,7 +599,10 @@ impl<'a> Reads<'a> {
 /// Otherwise it is taken only where the second read found the same construct
 /// in the same position — a document whose two reads disagree publishes no
 /// range rather than a plausible wrong one.
-fn pair_reads(nodes: &[(NodeKind, Span)], published: Option<&[(NodeKind, Span)]>) -> Vec<Node> {
+fn pair_reads(
+    nodes: &[(NodeKind, ByteSpan)],
+    published: Option<&[(NodeKind, ByteSpan)]>,
+) -> Vec<Node> {
     nodes
         .iter()
         .enumerate()
@@ -666,14 +669,14 @@ fn coalesce(text: &str, nodes: &[Node], snapshot: &Snapshot, runs: &Runs) -> Vec
             .unwrap_or((idx, nodes[idx].kind));
         out.push(Node {
             kind,
-            run: Span {
+            run: ByteSpan {
                 start: nodes[idx].run.start,
                 end: nodes[last].run.end,
             },
             span: nodes[idx]
                 .span
                 .zip(nodes[last].span)
-                .map(|(first, last)| Span {
+                .map(|(first, last)| ByteSpan {
                     start: first.start,
                     end: last.end,
                 }),
@@ -728,7 +731,7 @@ impl Fold<'_> {
             self.runs.nodes(run)
                 == [(
                     first.kind,
-                    Span {
+                    ByteSpan {
                         start: 0,
                         end: saturating_u32(run.len()),
                     },
@@ -739,7 +742,7 @@ impl Fold<'_> {
             if self.paired.contains(&next.run.start) {
                 break;
             }
-            let group = Span {
+            let group = ByteSpan {
                 start: first.run.start,
                 end: next.run.end,
             };
@@ -762,7 +765,7 @@ impl Fold<'_> {
         None
     }
 
-    fn slice(&self, span: Span) -> Option<&str> {
+    fn slice(&self, span: ByteSpan) -> Option<&str> {
         slice(self.text, span)
     }
 }
@@ -796,7 +799,7 @@ fn reproduces(runs: &Runs, run: &str, group: &[Node]) -> bool {
     let expected = group.iter().map(|node| {
         (
             node.kind,
-            Span {
+            ByteSpan {
                 start: node.run.start - base,
                 end: node.run.end - base,
             },
@@ -805,14 +808,14 @@ fn reproduces(runs: &Runs, run: &str, group: &[Node]) -> bool {
     runs.nodes(run).into_iter().eq(expected)
 }
 
-fn nodes_of(snapshot: &Snapshot) -> Vec<(NodeKind, Span)> {
+fn nodes_of(snapshot: &Snapshot) -> Vec<(NodeKind, ByteSpan)> {
     snapshot
         .nodes()
         .iter()
         .map(|node| {
             (
                 node.kind(),
-                Span {
+                ByteSpan {
                     start: node.span().start,
                     end: node.span().end,
                 },
@@ -863,7 +866,7 @@ fn parse_heading_hint(html: &str) -> Option<HeadingHint> {
 }
 
 /// The line `span` sits on.
-fn line_around(text: &str, span: Span) -> Span {
+fn line_around(text: &str, span: ByteSpan) -> ByteSpan {
     let start = text
         .get(..span.start as usize)
         .and_then(|head| head.rfind('\n').map(|at| at + 1))
@@ -875,7 +878,7 @@ fn line_around(text: &str, span: Span) -> Span {
             || saturating_u32(text.len()),
             |at| span.end.saturating_add(saturating_u32(at)),
         );
-    Span {
+    ByteSpan {
         start: saturating_u32(start),
         end,
     }
@@ -883,7 +886,7 @@ fn line_around(text: &str, span: Span) -> Span {
 
 /// `text[span]`, or `None` when the range is out of bounds or lands
 /// mid-codepoint.
-fn slice(text: &str, span: Span) -> Option<&str> {
+fn slice(text: &str, span: ByteSpan) -> Option<&str> {
     text.get(span.start as usize..span.end as usize)
 }
 
@@ -933,7 +936,7 @@ fn unescape(text: &str) -> String {
 #[derive(Clone, Copy)]
 pub(crate) struct ConstructHit<'t> {
     pub(crate) kind: NodeKind,
-    pub(crate) span: Option<Span>,
+    pub(crate) span: Option<ByteSpan>,
     table: &'t Constructs,
     idx: usize,
 }
@@ -1591,7 +1594,7 @@ mod tests {
     #[test]
     fn tile_drops_ranges_that_do_not_address_the_text() {
         let node = |start: u32, end: u32| {
-            let run = Span { start, end };
+            let run = ByteSpan { start, end };
             Node {
                 kind: NodeKind::Ruby,
                 run,

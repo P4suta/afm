@@ -16,10 +16,10 @@
 // the README now says which preset carries which promise.
 //
 // The one delta both runners add is raw-HTML passthrough, because the
-// expected output in both fixtures contains raw HTML. `Options::with_raw_html`
-// turns it on and it is `#[cfg(test)]`, which is why these runners live in
-// `src/` instead of `tests/`: an integration test is a separate crate and
-// could only reach that switch if it were public.
+// expected output in both fixtures contains raw HTML. A private
+// `ConformanceOptions` owns that test-only switch, which is why these runners
+// live in `src/` instead of `tests/`: it never becomes a field or method of
+// the public `Options` type.
 //
 // Both suites run WHOLE — every example in either fixture asserted. The GFM
 // runner used to take the 24 examples carrying an extension tag and skip two
@@ -48,7 +48,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::Deserialize;
 
-use crate::{Options, render};
+use crate::{ConformanceOptions, Options, render_conformance};
 
 const COMMONMARK_FIXTURE: &str = include_str!("../spec/commonmark-0.31.2.json");
 const GFM_FIXTURE: &str = include_str!("../spec/gfm-0.29-gfm.json");
@@ -346,8 +346,8 @@ fn assert_nothing_was_skipped(asserted: &BTreeSet<u32>, all: &[SpecExample], sui
 // A named function rather than a `let` inside the runner, so the pin at the
 // bottom of this file can read the same configuration the suite runs with
 // instead of a copy of it.
-fn commonmark_options() -> Options {
-    Options::commonmark().with_raw_html(true)
+fn commonmark_options() -> ConformanceOptions {
+    ConformanceOptions::new(Options::commonmark()).with_raw_html(true)
 }
 
 #[test]
@@ -363,7 +363,7 @@ fn commonmark_0_31_2_full_pass() {
     let mut asserted = BTreeSet::new();
     for ex in &examples {
         assert_eq!(
-            render(&ex.markdown, &opts).html,
+            render_conformance(&ex.markdown, &opts).html,
             ex.html,
             "CommonMark 0.31.2 example {} (section {:?}) markdown {:?}",
             ex.example,
@@ -387,8 +387,8 @@ fn commonmark_0_31_2_full_pass() {
 // while raw HTML is passing through, which no public constructor can arrange,
 // so it stays a switch the runner adds rather than surface a caller can ask
 // for.
-fn options_for(extension: Option<&str>) -> Options {
-    let opts = Options::gfm().with_raw_html(true);
+fn options_for(extension: Option<&str>) -> ConformanceOptions {
+    let opts = ConformanceOptions::new(Options::gfm()).with_raw_html(true);
     match extension {
         // Untagged: the GFM spec's inherited CommonMark body, which the
         // preset renders exactly as it renders everything else.
@@ -421,7 +421,7 @@ fn gfm_0_29_full_pass() {
     let mut asserted = BTreeSet::new();
     for ex in &all {
         let opts = options_for(ex.extension.as_deref());
-        let got = render(&ex.markdown, &opts).html;
+        let got = render_conformance(&ex.markdown, &opts).html;
         let at = format!(
             "GFM 0.29 example {} (section {:?}, extension {:?}) markdown {:?}",
             ex.example, ex.section, ex.extension, ex.markdown
@@ -463,7 +463,7 @@ fn gfm_0_29_full_pass() {
                 );
                 assert_eq!(got, html, "{at}");
                 assert_eq!(
-                    render(&ex.markdown, &opts.clone().with_autolinks(false)).html,
+                    render_conformance(&ex.markdown, &opts.clone().with_autolinks(false)).html,
                     ex.html,
                     "{at} must come back verbatim once the autolink extension is off; while it \
                      does not, the extension is not what supersedes it and this is a defect"
@@ -668,14 +668,17 @@ fn each_runner_measures_the_public_preset_the_readme_names() {
     // with every gate in the repository still passing. Narrowing it back
     // that way now fails here.
     assert_eq!(
-        commonmark_options().with_raw_html(false),
+        commonmark_options().with_raw_html(false).public,
         Options::commonmark(),
         "the CommonMark runner must measure `Options::commonmark()` itself"
     );
     for tag in GFM_EXTENSION_TAGS.map(Some).into_iter().chain([None]) {
         let opts = options_for(tag);
         assert_eq!(
-            opts.clone().with_raw_html(false).with_tagfilter(false),
+            opts.clone()
+                .with_raw_html(false)
+                .with_tagfilter(false)
+                .public,
             Options::gfm(),
             "the GFM runner must measure `Options::gfm()` itself, and it does not for {tag:?}"
         );

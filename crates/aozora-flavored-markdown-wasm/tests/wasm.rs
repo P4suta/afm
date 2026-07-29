@@ -22,12 +22,12 @@
 #![cfg(target_arch = "wasm32")]
 #![forbid(unsafe_code)]
 
-use aozora_flavored_markdown::Options;
 use aozora_flavored_markdown_wasm::{
-    AozoraDocument, hash_source, init_panic_hook, render, render_aozora_only, render_blocks,
-    slugs_json,
+    AozoraDocument, JsOptions, hash_source, init_panic_hook, render, render_aozora_only,
+    render_blocks, slugs_json,
 };
 use serde_json::Value;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 /// One document that reaches every export's interesting path: ruby (an Aozora
@@ -105,7 +105,7 @@ fn hash_source_is_a_stable_key_that_separates_documents() {
 
 #[wasm_bindgen_test]
 fn render_returns_the_ir_the_html_and_the_diagnostics_together() {
-    let rendered = json_of(&render(SOURCE, None));
+    let rendered = json_of(&render(SOURCE, None).expect("default options decode"));
     assert!(
         rendered["ir"]["blocks"]
             .as_array()
@@ -129,9 +129,15 @@ fn render_returns_the_ir_the_html_and_the_diagnostics_together() {
 
 #[wasm_bindgen_test]
 fn render_forwards_the_options_it_was_handed() {
+    let value = tsify::serde_wasm_bindgen::to_value(&serde_json::json!({
+        "aozora": false,
+        "hardbreaks": false
+    }))
+    .expect("known options serialise");
+    let options: JsOptions = value.unchecked_into();
     assert_ne!(
-        json_of(&render(SOURCE, Some(Options::commonmark())))["html"],
-        json_of(&render(SOURCE, None))["html"],
+        json_of(&render(SOURCE, Some(options)).expect("known options decode"))["html"],
+        json_of(&render(SOURCE, None).expect("default options decode"))["html"],
         "`commonmark()` runs no notation pass and `default()` does, so an export that dropped \
          its `options` argument would render these the same"
     );
@@ -141,7 +147,7 @@ fn render_forwards_the_options_it_was_handed() {
 fn render_aozora_only_is_render_with_the_default_options() {
     assert_eq!(
         json_of(&render_aozora_only(SOURCE)),
-        json_of(&render(SOURCE, None)),
+        json_of(&render(SOURCE, None).expect("default options decode")),
         "the aozora-only wrapper takes no options, so the only thing it can get wrong is \
          choosing a different default than `render` does"
     );
@@ -149,7 +155,7 @@ fn render_aozora_only_is_render_with_the_default_options() {
 
 #[wasm_bindgen_test]
 fn render_blocks_returns_every_block_with_the_line_it_started_on() {
-    let bridged = json_of(&render_blocks(SOURCE, None));
+    let bridged = json_of(&render_blocks(SOURCE, None).expect("default options decode"));
     let blocks = bridged["blocks"]
         .as_array()
         .unwrap_or_else(|| panic!("the envelope carries an array of blocks; got {bridged}"));

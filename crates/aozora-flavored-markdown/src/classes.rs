@@ -69,11 +69,22 @@ pub fn is_known(class: &str) -> bool {
     }
     match class.rsplit_once('-') {
         Some((stem, suffix)) => {
-            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) && listed(stem)
+            !suffix.is_empty()
+                && suffix.bytes().all(|b| b.is_ascii_digit())
+                && NUMERIC_FAMILIES.contains(&stem)
         }
         None => false,
     }
 }
+
+// The sibling renderer composes a numeric suffix only for indentation and
+// end-alignment amounts. A listed fixed class such as `bouten-goma` does not
+// become an open family merely because its name can be followed by digits.
+const NUMERIC_FAMILIES: &[&str] = &[
+    "aozora-md-indent",
+    "aozora-md-align-end",
+    "aozora-md-container-indent",
+];
 
 fn listed(class: &str) -> bool {
     all().contains(&class)

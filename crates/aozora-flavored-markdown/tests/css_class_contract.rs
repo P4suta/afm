@@ -225,9 +225,16 @@ fn membership_is_the_listed_class_plus_a_numeric_suffix_and_nothing_else() {
         assert!(classes::is_known(class), "a listed class must be known");
         for n in ["0", "1", "2", "10", "07", "4294967296"] {
             let numeric = format!("{class}-{n}");
-            assert!(
+            let is_numeric_family = [
+                "aozora-md-indent",
+                "aozora-md-align-end",
+                "aozora-md-container-indent",
+            ]
+            .contains(&class);
+            assert_eq!(
                 classes::is_known(&numeric),
-                "the numeric family member {numeric} must be known"
+                is_numeric_family,
+                "{numeric} must be accepted only for an emitted numeric family"
             );
         }
         // `zzq` is not a slug the parser publishes, so `<listed>-zzq` is a

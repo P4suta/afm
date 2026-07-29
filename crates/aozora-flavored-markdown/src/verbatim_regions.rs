@@ -275,7 +275,13 @@ struct RuleRow {
 fn rule_rows(source: &str) -> Vec<RuleRow> {
     let mut rows = Vec::new();
     let mut at = 0;
-    for line in source.split_inclusive('\n') {
+    while at < source.len() {
+        let rest = &source[at..];
+        let line_end = rest
+            .bytes()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .unwrap_or(rest.len());
+        let line = &rest[..line_end];
         let indent = line.len() - line.trim_start().len();
         let row = line.trim();
         if let Some((visible, hidden)) = rule_form(row) {
@@ -285,7 +291,12 @@ fn rule_rows(source: &str) -> Vec<RuleRow> {
                 hidden,
             });
         }
-        at += line.len();
+        at += line_end;
+        match source.as_bytes().get(at..) {
+            Some([b'\r', b'\n', ..]) => at += 2,
+            Some([b'\r' | b'\n', ..]) => at += 1,
+            _ => break,
+        }
     }
     rows
 }
@@ -439,6 +450,18 @@ mod tests {
             .trim_start_matches('\u{FEFF}')
             .replace("\r\n", "\n");
         assert_eq!(hidden.reveal(&normalized), "Foo\n----------\n");
+    }
+
+    #[test]
+    fn rule_row_registry_recognises_every_commonmark_line_ending() {
+        for source in [
+            "Foo\n----------\n",
+            "Foo\r----------\r",
+            "Foo\r\n----------\r\n",
+        ] {
+            let hidden = hide_rule_rows(source).expect("the hyphen row is hidden");
+            assert_eq!(hidden.reveal(hidden.text()), source);
+        }
     }
 
     #[test]
