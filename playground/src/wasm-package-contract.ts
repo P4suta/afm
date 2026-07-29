@@ -1,3 +1,7 @@
+// The retired names must not reappear: in a browser-facing module they
+// shadow lib.dom's Document and Range. `@ts-expect-error` makes their absence
+// part of the real tsc build instead of a text scan over the generated file.
+// biome-ignore assist/source/organizeImports: each error directive must stay attached to its failing import.
 import type {
   ByteSpan,
   MarkdownDocument,
@@ -5,10 +9,6 @@ import type {
   SourcePosition,
   SourceRange,
 } from 'aozora-flavored-markdown-wasm';
-
-// The retired names must not reappear: in a browser-facing module they
-// shadow lib.dom's Document and Range. `@ts-expect-error` makes their absence
-// part of the real tsc build instead of a text scan over the generated file.
 // @ts-expect-error Document was renamed to MarkdownDocument.
 import type { Document as LegacyDocument } from 'aozora-flavored-markdown-wasm';
 // @ts-expect-error Range was renamed to SourceRange.
@@ -24,7 +24,10 @@ export type WasmPackageTypeContract = {
 
 // Prove that the DOM globals retain their ordinary meaning in the same
 // compilation unit that imports the package declarations.
-export function acceptsDomTypes(documentValue: Document, rangeValue: Range): [Document, Range] {
+export function acceptsDomTypes(
+  documentValue: Document,
+  rangeValue: Range,
+): [Document, Range] {
   return [documentValue, rangeValue];
 }
 

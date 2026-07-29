@@ -1,6 +1,5 @@
-import { expect, test } from 'vitest';
-
 import * as wasm from 'aozora-flavored-markdown-wasm';
+import { expect, test } from 'vitest';
 
 const PUBLIC_EXPORTS = [
   'AozoraDocument',
@@ -37,7 +36,9 @@ test('the built package preserves JSON, HTML, IR, diagnostics, and editor assist
     };
     expect(nodes.schemaVersion).toBeGreaterThan(0);
     expect(nodes.data.length).toBeGreaterThan(0);
-    expect(documentHandle.sourceByteLen()).toBe(new TextEncoder().encode(source).length);
+    expect(documentHandle.sourceByteLen()).toBe(
+      new TextEncoder().encode(source).length,
+    );
   } finally {
     documentHandle.free();
   }

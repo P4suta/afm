@@ -48,8 +48,8 @@ export type {
   Block as IrBlock,
   Diagnostic,
   DiagnosticSource,
-  MarkdownDocument as IrDocument,
   Inline as IrInline,
+  MarkdownDocument as IrDocument,
   Severity,
 } from 'aozora-flavored-markdown-wasm';
 export type { RenderOptions, RenderResult };
