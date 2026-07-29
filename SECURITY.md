@@ -45,9 +45,7 @@ touched, which is the one case a scan triggered by a diff can never see.
 
 That nightly run also **files a GitHub issue per newly disclosed
 advisory** (`rustsec/audit-check`), rather than only turning a workflow
-red where nobody is looking. Dependabot alerts and Dependabot security
-updates are both enabled, so GitHub raises the same finding independently
-and opens the version-bump pull request for it.
+red where nobody is looking.
 
 An `unmaintained`, `unsound` or `yanked` crate fails these gates too, not
 only a live vulnerability: an advisory that has not been written yet is

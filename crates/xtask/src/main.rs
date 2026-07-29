@@ -388,7 +388,7 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // Re-measured after every cut, never estimated — the slack a deletion buys is
 // spent by lowering this, or it gets spent by the next comment nobody argued
 // for.
-const MAX_COMMENT_LINES: u64 = 10_198;
+const MAX_COMMENT_LINES: u64 = 10_197;
 
 /// Backstop on comment lines as a share of source, in parts per 100 000. It
 /// catches the one case [`MAX_COMMENT_LINES`] cannot — source shrinking out
