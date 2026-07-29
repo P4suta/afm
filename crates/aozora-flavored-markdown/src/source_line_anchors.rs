@@ -24,6 +24,10 @@ pub(crate) fn format_root_with_anchors<'a>(
 }
 
 /// The per-child half, shared with the streaming block renderer.
+#[allow(
+    clippy::expect_used,
+    reason = "comrak writes through std::fmt::Write into String, whose write operations are infallible"
+)]
 pub(crate) fn format_block_with_anchor<'a>(
     child: &'a AstNode<'a>,
     options: &comrak::Options<'static>,

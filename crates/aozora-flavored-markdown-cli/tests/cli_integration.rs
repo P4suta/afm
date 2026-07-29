@@ -16,6 +16,12 @@
 //! - Failure modes: missing file, unreadable path, SJIS decode errors
 //!   — each exits non-zero with a Japanese error message.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration-test helpers deliberately stop at the first failed fixture or subprocess assertion"
+)]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -35,7 +41,7 @@ fn aozora_bin() -> PathBuf {
 /// Write `contents` to a new unique file under `/tmp`. Returns the
 /// path; the file is cleaned up on test-process exit (we don't fuss
 /// with explicit cleanup — tmp files are small and the test directory
-/// is ephemeral inside the Docker sandbox).
+/// is isolated in a temporary directory).
 fn write_temp_bytes(contents: &[u8], suffix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

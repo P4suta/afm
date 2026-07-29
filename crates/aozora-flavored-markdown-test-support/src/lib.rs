@@ -19,6 +19,10 @@
 //! `aozora-flavored-markdown/tests/heading_promotion.rs`.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::panic,
+    reason = "this publish-disabled test-support crate exposes assertion helpers whose contract is to panic on invariant violations"
+)]
 
 // The repository's landing README, compiled as a doctest by `just test-doc`.
 // It lives here because the crate whose API it demonstrates cannot hold it:

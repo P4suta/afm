@@ -6,7 +6,7 @@ import { loadExamples } from './examples';
 // up in the glob, so a file in `playground/examples/` that nobody labelled —
 // or one whose name the slug regex does not match — is dropped without a
 // word. That directory is not only the dropdown: `crates/xtask/tests/
-// gate_wiring.rs` seeds every fuzz target's corpus from it, so a document can
+// `just fuzz-seed` seeds every fuzz target's corpus from it, so a document can
 // be feeding the fuzzer while being unreachable in the UI it was written for.
 //
 // The same glob the module uses, so the two cannot disagree about what is on

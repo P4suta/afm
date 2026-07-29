@@ -3,6 +3,11 @@
 //! that library leaves to whoever owns the terminal.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI renders requested output and diagnostics to its standard streams"
+)]
 
 use std::process::ExitCode;
 

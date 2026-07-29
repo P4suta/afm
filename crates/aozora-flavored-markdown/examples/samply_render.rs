@@ -5,7 +5,7 @@
 //! lex + splice — the CPU-attribution metric that pairs with criterion
 //! (throughput), `latency_hist` (p50/p99), and `dhat_render` (memory).
 //! Driven from the host-only `just samply-render` recipe (samply needs
-//! `perf_event_open`, which Docker's seccomp blocks).
+//! `perf_event_open`).
 //!
 //! Arg 1 = render repetitions (default 200); more repetitions give
 //! samply more parser-bound wall time after the one-time build.

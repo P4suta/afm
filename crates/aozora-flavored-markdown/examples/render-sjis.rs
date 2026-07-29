@@ -1,3 +1,9 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "this command-line example prints rendered output and input errors"
+)]
+
 //! Render a Shift_JIS aozora-flavored-markdown source (as Aozora Bunko ships) to HTML on stdout.
 //!
 //! Run it against an unpacked Aozora Bunko file:

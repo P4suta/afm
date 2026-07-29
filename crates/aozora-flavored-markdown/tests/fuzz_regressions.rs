@@ -419,15 +419,9 @@ fn a_missing_directory_fails_the_walk_and_an_empty_one_does_not() {
 // target that drops every seed it is handed starts from one empty byte string
 // and reports 700 seeds on the way there.
 //
-// `gate_wiring.rs` already asks two questions here — is a corpus directory
-// non-empty, would a clone get it — and one about content: does each source
-// document appear in SOME target's corpus verbatim. That `some` is the hole.
-// It is satisfied by `parse_render` alone, and the four targets that are not
-// `parse_render` are exactly the ones whose seeds are not the document
-// verbatim. So a target seeded with bytes it cannot read passes every question
-// asked over there, and the file that could tell the difference is this one:
-// the shapes are declared here because the replay needs them, and reading the
-// corpus through the same declaration costs nothing.
+// These product tests read each committed seed through the same input shape as
+// its fuzz target. A count alone cannot tell whether the target can consume
+// those bytes, especially for the Shift_JIS and option-mask targets.
 
 /// Where `just fuzz-seed` installs the committed corpus, relative to this
 /// crate's manifest.
@@ -683,12 +677,8 @@ fn one_document_set_behind_every_corpus(corpora: &[Corpus]) {
 
 /// The content question, per target.
 ///
-/// `gate_wiring.rs` asks it of the union — "no registered target's corpus
-/// holds it verbatim" is its failure — and a union is held up by whichever
-/// target happens to be seeded with the document as it stands. These seven
-/// documents are the only 青空文庫 notation in a corpus of 700, so a target
-/// without them is one whose whole search runs over the CommonMark and GFM
-/// spec, which is the input class comrak is already fuzzed on upstream.
+/// These dialect documents are the only 青空文庫 notation in a corpus dominated
+/// by CommonMark and GFM examples, so every target must receive them.
 fn every_corpus_carries_the_dialect(corpora: &[Corpus]) {
     let documents = seed_source_documents();
     assert!(

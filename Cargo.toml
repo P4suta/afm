@@ -101,8 +101,13 @@ cargo    = { level = "warn", priority = -1 }
 # clippy. Tests are exempted from unwrap/expect/panic via clippy.toml so these
 # only bite production code paths.
 dbg_macro           = "warn"  # ban forgotten `dbg!` drops
-todo                = "warn"  # pair with strict-code grep for issue-ref
+todo                = "warn"
 unimplemented       = "warn"
+unwrap_used         = "warn"
+expect_used         = "warn"
+panic               = "warn"
+print_stdout        = "warn"
+print_stderr        = "warn"
 clone_on_ref_ptr    = "warn"
 unnecessary_safety_comment = "warn"
 unnecessary_safety_doc     = "warn"
@@ -116,12 +121,10 @@ missing_assert_message     = "warn"
 module_name_repetitions    = "warn"
 
 # Hand-picked clippy::restriction lints (the full group has contradictory
-# lints, so it stays off). `print_stdout` / `print_stderr` can't live here —
-# Cargo rejects mixing workspace lints with per-crate overrides
-# (rust-lang/cargo#12697) — so `just strict-code` greps for stray println!.
+# lints, so it stays off).
 str_to_string                    = "warn"  # prefer `.into()` / `String::from`
 absolute_paths                   = "warn"  # prefer `use`-imported names
-allow_attributes_without_reason  = "warn"  # belt-and-braces against strict-code gate
+allow_attributes_without_reason  = "warn"
 empty_structs_with_brackets      = "warn"
 if_then_some_else_none           = "warn"  # prefer `.then_some` / `.then`
 let_underscore_must_use          = "warn"  # ignoring `#[must_use]` via `let _ =`

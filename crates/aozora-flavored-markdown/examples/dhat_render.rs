@@ -6,7 +6,7 @@
 //! writes `dhat-heap.json` (viewable at <https://nnethercote.github.io/dh_view/dh_view.html>).
 //!
 //! ```text
-//! just dhat   # docker compose run --rm dev cargo run --release --example dhat_render -p aozora-flavored-markdown
+//! cargo run --locked --release --example dhat_render -p aozora-flavored-markdown
 //! ```
 
 use std::hint::black_box;

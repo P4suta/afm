@@ -1,4 +1,9 @@
 //! End-to-end tests for the public [`build`] entry point: run it on a
+
+#![allow(
+    clippy::expect_used,
+    reason = "integration-test fixture helpers stop immediately when setup or the expected outcome fails"
+)]
 //! fixture manuscript and inspect the produced EPUB container — and, from
 //! [`a_build_report_carries_exactly_what_a_direct_render_saw`] down, the
 //! report it hands back beside that container.

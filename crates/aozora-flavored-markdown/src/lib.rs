@@ -571,6 +571,10 @@ where
 
 /// Formats per top-level child when `anchors` is on, so each child's first
 /// open tag can pick up its `data-aozora-md-source-line`.
+#[allow(
+    clippy::expect_used,
+    reason = "comrak writes through std::fmt::Write into String, whose write operations are infallible"
+)]
 fn format_root<'a>(
     root: &'a AstNode<'a>,
     comrak: &comrak::Options<'static>,
@@ -691,6 +695,10 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "comrak writes through std::fmt::Write into String, whose write operations are infallible"
+)]
 fn collect_rendered_blocks<'a>(
     root: &'a AstNode<'a>,
     options: &Options,

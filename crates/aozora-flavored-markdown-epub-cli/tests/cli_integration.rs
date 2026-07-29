@@ -11,6 +11,12 @@
 //! under test is the one this build just produced and no `assert_cmd`
 //! dependency is needed.
 
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration-test helpers deliberately stop at the first failed fixture or subprocess assertion"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

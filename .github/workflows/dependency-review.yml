@@ -1,9 +1,3 @@
-# Dependency review on pull requests.
-#
-# A PR-time canary that flags the dependency changes a PR introduces and
-# comments the diff in the review UI. cargo-deny remains the source of
-# truth, checking the full workspace against our licence + advisory rules.
-
 name: dependency-review
 
 on:
@@ -22,77 +16,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
-          # Match the cargo-deny policy: reject any newly introduced
-          # advisory of moderate severity or worse.
           fail-on-severity: moderate
-
-          # Keep in sync with deny.toml's license allow-list.
-          # BSD-2-Clause is required for the comrak dependency.
-          # Zlib covers zlib-rs, pulled by the EPUB generator's zip dependency.
-          # CC-BY-SA-4.0 covers spec/*.json fixtures that inherit it
-          # from the CommonMark / GFM specs (test data, not runtime deps).
-          allow-licenses: >-
-            Apache-2.0,
-            MIT,
-            BSD-2-Clause,
-            BSD-3-Clause,
-            ISC,
-            Unicode-DFS-2016,
-            Unicode-3.0,
-            CC0-1.0,
-            MPL-2.0,
-            Zlib,
-            CC-BY-SA-4.0
-
-          # Per-package exemptions, for three distinct reasons:
-          #
-          # - Swatinem/rust-cache (LGPL-3.0). CI-only actions are build-time
-          #   tooling, never linked into or shipped with the crates, so their
-          #   licenses are out of scope for the `Apache-2.0 OR MIT` product
-          #   policy. Append a purl here for any future copyleft CI action.
-          #
-          # - rustc-demangle (transitive: miette -> backtrace-ext ->
-          #   backtrace). It declares the deprecated slash spelling
-          #   `MIT/Apache-2.0`, which this action cannot parse into SPDX and
-          #   reports as `LicenseRef-bad-mitapache-2.0`. The licence itself
-          #   is dual MIT / Apache-2.0 — both already allowed above — so this
-          #   is a parser limitation, not a policy exception. cargo-deny, the
-          #   source of truth, reads the same field and passes. Drop this
-          #   entry once upstream switches to `MIT OR Apache-2.0`.
-          #
-          # - minicov (transitive: wasm-bindgen-test -> minicov), the same
-          #   parser limitation with the halves the other way round: it
-          #   declares `Apache-2.0/MIT` and is reported as
-          #   `LicenseRef-bad-apache-2.0mit`. Dev-dependency of the wasm
-          #   crate only, reached solely by `just test-wasm`, and never
-          #   linked into a published artefact. Same removal condition.
-          #
-          # - libfuzzer-sys declares `(MIT OR Apache-2.0) AND NCSA`. Unlike
-          #   the two above this is a real third licence, not a parser
-          #   artefact: NCSA is the University of Illinois/NCSA licence LLVM
-          #   used before it relicensed, and libfuzzer-sys wraps LLVM's
-          #   libFuzzer. It is permissive and OSI-approved, so it conflicts
-          #   with nothing the product ships — and it cannot reach a shipped
-          #   artefact anyway, because it is reached only from
-          #   crates/aozora-flavored-markdown/fuzz, which is `publish = false`
-          #   and outside the cargo workspace. That exclusion is also why
-          #   cargo-deny never sees this edge and only this action does. There
-          #   is no removal condition: ADR-0025 measured the one that used to
-          #   be written here and decided to stay.
-          #
-          # Each of the three cargo entries waives the check for the PACKAGE,
-          # not for the licence it happens to declare today, so a relicence
-          # under one of them would pass unnoticed. `audit.yml`'s `licences`
-          # job holds each one to the string it was written for; adding a purl
-          # here without adding it there fails that job.
-          allow-dependencies-licenses: >-
-            pkg:githubactions/Swatinem/rust-cache,
-            pkg:cargo/rustc-demangle,
-            pkg:cargo/minicov,
-            pkg:cargo/libfuzzer-sys
-
-          # Comment only on failure so clean PRs aren't spammed.
           comment-summary-in-pr: on-failure

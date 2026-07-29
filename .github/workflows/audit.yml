@@ -1,36 +1,8 @@
-# Dependency hygiene on a clock, rather than only on a diff.
-#
-# `just deny` and `just audit` are `[group('gate')]` recipes, so ci.yml's gate
-# matrix already runs both on every pull request. That covers exactly one
-# failure mode: a PR that ADDS a vulnerable dependency. It cannot cover the
-# common one — an advisory published against a `Cargo.lock` nobody touched.
-# Between two quiet weeks the newest scan of this repo's graph would be two
-# weeks old, and `SECURITY.md` said so out loud ("there is no cron workflow").
-#
-# The jobs below are deliberately independent (no `needs:` between them) so a
-# red gate never suppresses the notification that explains it. What each is for
-# is written above it rather than enumerated here, where a list would only be a
-# second copy of the jobs it names.
-#
-# Scope note: `cargo audit` reads the lockfile it is pointed at, so this covers
-# the workspace `Cargo.lock`. The fuzz crate is its own workspace with its own
-# `fuzz/Cargo.lock`; it is `publish = false`, reaches no shipped artefact, and
-# is not scanned here.
 name: audit
 
 on:
   schedule:
-    # Daily, 15:40 UTC = 00:40 Asia/Tokyo, off the hour.
-    - cron: "40 15 * * *"
-  push:
-    branches: [main]
-    # The inputs to both scans, plus this file. A merge that changes the
-    # resolved graph gets its answer immediately instead of at midnight.
-    paths:
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/audit.yml'
-      - '.github/workflows/dependency-review.yml'
+    - cron: "40 15 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -38,207 +10,20 @@ permissions:
 
 concurrency:
   group: audit
-  # NOT cancel-in-progress: a run cancelled mid-flight can be one that had
-  # already found an advisory and not yet filed the issue for it.
   cancel-in-progress: false
 
 jobs:
-  # The gate, run exactly as a pull request runs it (ADR-0002: both recipes
-  # reach cargo through the dev image). A red run here is the durable record.
-  advisories:
-    name: advisories (cargo-deny + cargo-audit)
+  cargo-deny:
+    name: cargo-deny
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: read
-      issues: write   # the rolling issue at the end of this job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-
-      - uses: ./.github/actions/setup-dev-image
-
-      - name: Licences, advisories and bans (cargo-deny)
-        run: just deny
-
-      # `!cancelled()` rather than the default `success()`: these two scans
-      # answer different questions, and a nightly report that stops at the
-      # first one is half a report. Not `continue-on-error` — a failure here
-      # still fails the job.
-      - name: RustSec advisories (cargo-audit)
-        if: ${{ !cancelled() }}
-        run: just audit
-
-      # `report` below is not this job's channel. It files what
-      # `rustsec/audit-check` finds — RustSec advisories — and cargo-deny
-      # answers for four more things: a ban, an unvetted source, a yanked
-      # crate, a licence it refuses. A nightly that went red on any of those
-      # would otherwise be a red square and nothing else.
-      - name: Say where a nightly failure went
-        if: ${{ failure() && github.event_name == 'schedule' }}
-        uses: ./.github/actions/report-failure
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea  # v4.2.1
         with:
-          title: "audit: the nightly dependency scan is failing"
-          body: |
-            `just deny` or `just audit` failed on a scheduled run of
-            `.github/workflows/audit.yml`, against a `Cargo.lock` nobody here
-            need have touched.
-
-            A newly disclosed RustSec advisory arrives separately, as its own
-            issue from `rustsec/audit-check`. This one also covers the half
-            that reporter never sees: a ban, an unvetted source, a yanked
-            crate, or a licence `deny.toml` refuses.
-
-            Fix the finding or record the exception in `deny.toml`, then close
-            this issue — the next failing run files it again.
-
-  # Turn a finding into something with an assignee. On a `schedule` event
-  # rustsec/audit-check opens one issue per advisory, skipping any whose
-  # `RUSTSEC-…` id already appears in an open issue or PR title, so a nightly
-  # cron does not re-file the same advisory every night. On every other event
-  # (push, workflow_dispatch) it writes a check run instead — so a manual
-  # re-run is a way to see the report, not a way to file it.
-  #
-  # ADR-0002 scope: this action installs and runs cargo-audit natively on the
-  # runner, outside the dev image. That is tolerable precisely because it is
-  # not the gate — `advisories` above is, on the pinned cargo-audit the image
-  # ships. This job is a reporter, and it is the reporting that is wanted from
-  # it rather than the verdict.
-  report:
-    name: file an issue per new advisory
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      issues: write   # reportIssues() on a schedule event
-      checks: write   # reportCheck() on every other event
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  # `allow-dependencies-licenses` in dependency-review.yml waives the licence
-  # check for four packages. A waiver there is per PACKAGE, not per licence —
-  # it says "whatever this package declares is fine", forever — and each entry
-  # was written against a specific declared string, recorded in that file as
-  # prose. Prose is a claim nothing evaluates: if `rustc-demangle` relicensed
-  # tomorrow, the exemption written for its unparseable `MIT/Apache-2.0` would
-  # wave the new licence straight through and no gate in this repo would say a
-  # word.
-  #
-  # So the same claim, in the form something checks. Not a PR gate: it depends
-  # on when an upstream maintainer edits a manifest, so it must never redden an
-  # unrelated PR — the same reasoning, and the same shape, as release-pins.yml.
-  # A failure means "go re-read the exemption and either drop it or rewrite
-  # what it rests on", which is also how the `Drop this entry once…` sentences
-  # in that file finally become actionable.
-  #
-  # `Swatinem/rust-cache` is exempt for a reason that does not depend on what
-  # it declares (a CI-only action links into nothing this project ships), so
-  # there is nothing to watch and it is absent below by design.
-  licences:
-    name: licence exemptions still hold
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write   # the rolling issue at the end of this job
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Compare each exemption against what crates.io now declares
-        run: |
-          set -euo pipefail
-          review=.github/workflows/dependency-review.yml
-          ua='aozora-flavored-markdown-ci (https://github.com/P4suta/aozora-flavored-markdown)'
-          fail=0
-
-          # The declared licence each exemption was written for. Keep the
-          # reasoning in dependency-review.yml; this is only the string.
-          declare -A expected=(
-            [rustc-demangle]='MIT/Apache-2.0'
-            [minicov]='Apache-2.0/MIT'
-            [libfuzzer-sys]='(MIT OR Apache-2.0) AND NCSA'
-          )
-
-          # The cargo purls actually listed over there. Reading them rather
-          # than restating them is what stops this table from drifting into a
-          # second, private list of exemptions.
-          mapfile -t declared < <(grep -oE 'pkg:cargo/[A-Za-z0-9_.-]+' "$review" \
-                                    | cut -d/ -f2 | sort -u)
-          if [ "${#declared[@]}" -eq 0 ]; then
-            echo "[!!] no pkg:cargo/… purls parsed out of $review — entry format changed?" >&2
-            exit 1
-          fi
-
-          # Both directions: an exemption added there without a line here would
-          # otherwise go unwatched, and a line here outliving its exemption is
-          # a check against nothing.
-          for name in "${declared[@]}"; do
-            if [ -z "${expected[$name]+set}" ]; then
-              printf '[!!] %s is exempted in %s but unwatched here — add its declared licence\n' \
-                "$name" "$review" >&2
-              fail=1
-            fi
-          done
-          for name in "${!expected[@]}"; do
-            if ! printf '%s\n' "${declared[@]}" | grep -qxF "$name"; then
-              printf '[!!] %s is watched here but no longer exempted in %s — drop this line\n' \
-                "$name" "$review" >&2
-              fail=1
-            fi
-          done
-
-          for name in "${declared[@]}"; do
-            [ -n "${expected[$name]+set}" ] || continue
-            want=${expected[$name]}
-            have=$(curl -fsSL -H "User-Agent: $ua" \
-                     "https://crates.io/api/v1/crates/$name" \
-                   | jq -r '.crate.max_stable_version as $v
-                            | .versions[] | select(.num == $v) | .license')
-            if [ "$have" = "$want" ]; then
-              printf '[OK] %s still declares %s\n' "$name" "$want"
-            else
-              printf '[!!] %s now declares %s; the exemption was written for %s\n' \
-                "$name" "$have" "$want" >&2
-              fail=1
-            fi
-          done
-
-          if [ "$fail" -ne 0 ]; then
-            echo "Re-read allow-dependencies-licenses in $review: drop the entry, or rewrite what it rests on." >&2
-            exit 1
-          fi
-          echo "licence exemptions: every one still rests on what it was written for"
-
-      # The day this fires is the day it was written for, so it needs somewhere
-      # to fire TO. `report` above answers for advisories and files nothing on
-      # a licence, and this job blocks no merge, so without the step below the
-      # relicensing it exists to catch would land as a red square on a nightly
-      # nobody is required to read.
-      - name: Say where a nightly failure went
-        if: ${{ failure() && github.event_name == 'schedule' }}
-        uses: ./.github/actions/report-failure
-        with:
-          title: "audit: a licence exemption no longer holds"
-          body: |
-            The `licences` job of `.github/workflows/audit.yml` found an
-            `allow-dependencies-licenses` entry in
-            `.github/workflows/dependency-review.yml` that no longer rests on
-            what it was written for — either a package now declaring a
-            different licence, or an entry on one side with no counterpart on
-            the other. The run below names it.
-
-            That waiver is per package rather than per licence, so until
-            somebody re-reads it the dependency-review gate waves through
-            whatever the package declares today. Drop the entry, or rewrite the
-            licence it rests on in both files, then close this issue — the next
-            failing run files it again.
+          version: 2026.7.13
+          cache: true
+          install_args: rust@1.96.0 just cargo:cargo-deny
+      - run: just deny

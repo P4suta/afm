@@ -38,18 +38,13 @@ Out of scope:
 
 ## Advisory tracking
 
-`just audit` (RustSec) and `just deny` ride every pull request and re-run
-on a nightly schedule. The schedule is not redundant with the pull request:
-an advisory is normally published against a `Cargo.lock` nobody has
-touched, which is the one case a scan triggered by a diff can never see.
+`just deny` checks the shipped workspace and the fuzz workspace on every pull
+request, and `.github/workflows/audit.yml` repeats the same cargo-deny scan
+weekly. The scheduled scan covers advisories published against a lockfile
+nobody has changed.
 
-That nightly run also **files a GitHub issue per newly disclosed
-advisory** (`rustsec/audit-check`), rather than only turning a workflow
-red where nobody is looking.
-
-An `unmaintained`, `unsound` or `yanked` crate fails these gates too, not
-only a live vulnerability: an advisory that has not been written yet is
-still the likeliest way this dependency graph goes wrong.
+An `unmaintained`, `unsound` or `yanked` crate fails the scan too, not only a
+live vulnerability.
 
 On a hit the gate prints the matching `RUSTSEC-…` id, and the fix is
 normally a version bump. An advisory that provably does not apply to how
