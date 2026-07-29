@@ -297,9 +297,7 @@ dist-assets-check:
 
 [group('release')]
 dist-plan:
-    # The release workflow intentionally uses the repository's locked mise
-    # environment instead of cargo-dist's generated installer steps.
-    dist plan --allow-dirty --output-format=json
+    dist plan --output-format=json
 
 [group('release')]
 changelog-check:

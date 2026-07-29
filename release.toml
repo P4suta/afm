@@ -1,24 +1,14 @@
 # cargo-release configuration — what `just release <level>` reads.
 #
-# The tool has been in the dev image since the Dockerfile grew its tier-D
-# layer and nothing has ever invoked it. Releasing was three steps in
-# CONTRIBUTING.md, performed by hand, and two of them were things a person has
-# to remember rather than things a tool does: cut `## [Unreleased]` into a
-# dated section, and re-run `just dist-assets` because the man page embeds the
-# version. Both are declarations here now.
+# `cargo-release` performs the three mutation phases used by `just release`.
+# The isolated `just release-smoke` runs those same phases with `--execute`,
+# then validates the changed metadata, changelog, dist assets and packages.
 #
 # Per-package configuration is in `[package.metadata.release]` in the three
 # manifests it concerns, so each rule sits next to the thing it is a fact
 # about: the CHANGELOG replacements in the library's, the man-page hook in the
 # CLI's, and the second version line in the two EPUB manifests.
 #
-# NOT EXERCISED END TO END. No release is cut this cycle, so nothing below has
-# written a file. What the dry run does show — `just release minor`, which
-# passes no `--execute` — is more than a plan: the version step names every
-# member and the number each would take, the replace step prints the CHANGELOG
-# diff it would apply, and the hook actually runs. What is untested is the one
-# step that writes.
-
 # The default version line: the 0.5.x one the workspace manifest carries.
 #
 # `shared-version` as a GROUP NAME rather than `true` is the feature this
@@ -53,16 +43,9 @@ shared-version = "workspace"
 # with no approval in front of it.
 publish = false
 
-# The commit and the tag are the developer's, made on the host.
-#
-# Both are SSH-signed and signing is mandatory here, and the signing key is
-# deliberately not in the dev image: docker-compose mounts the work tree and
-# the cargo caches, and nothing else (ADR-0002). A `git commit` run inside the
-# container would therefore not fail — it would SUCCEED, unsigned, which is
-# the failure mode worth arranging against. So `just release` runs
-# cargo-release's file-rewriting STEPS only (`version`, `replace`, `hook`) and
-# stops before `commit`; the release commit and the annotated `v<version>` tag
-# are made afterwards, by hand, where the key is.
+# The commit and tag remain deliberate developer actions. `just release` runs
+# only cargo-release's file-rewriting phases (`version`, `replace`, `hook`);
+# the signed release commit and annotated `v<version>` tag are made afterwards.
 #
 # `tag = false` also keeps the tag NAME a decision this file does not get to
 # make silently: cargo-release would spell it `aozora-flavored-markdown-v0.6.0`
@@ -72,12 +55,8 @@ publish = false
 tag  = false
 push = false
 
-# Not run by `just release` (see above), but a developer can reach the step
-# from `just shell`, and two files already depend on what it writes:
-# `committed.toml` rejects a capitalised subject, which cargo-release's default
-# (`chore: Release {{crate_name}} version {{version}}`) is; and `cliff.toml`
-# skips `^chore\(release\)` so the release commit stays out of the next draft,
-# which only holds if the commit really is spelled that way.
+# Not run by `just release` (see above). `cliff.toml` skips
+# `^chore\(release\)`, so the release commit stays out of the next draft.
 pre-release-commit-message = "chore(release): v{{version}}"
 
 # A release is cut from `main`. cargo-release's default is every branch but a

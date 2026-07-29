@@ -29,16 +29,20 @@ readme = "README.md"
 # dereferences them into the archive, so a consumer gets the text, and there is
 # no second copy in the tree to drift from the original.
 #
-# Not: the test suite, the benchmarks and the fuzz targets. Those are things
-# only this repository runs, and together they are most of the crate's bytes.
-# Excluded rather than moved, because they belong exactly where they are for
-# everyone who has the repository — the cost is cargo naming each dropped
-# target on the way past, which is the honest report of what `exclude` did.
-# `fuzz/` is already skipped (cargo does not descend into a subdirectory
-# holding its own Cargo.toml) and is named anyway, so the day that crate stops
-# being its own workspace it does not silently join the payload. `examples/`
-# stays in: an example is documentation, and the README points at it.
-exclude = ["tests/", "benches/", "fuzz/"]
+# Not: the integration suite, benchmarks and fuzz targets. The explicit
+# include list keeps the crate payload readable while carrying the generated
+# CommonMark/GFM fixtures needed by its unit tests.
+include = [
+    "src/**",
+    "examples/**",
+    "theme/**",
+    "spec/*.json",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "NOTICE",
+]
 
 # docs.rs otherwise builds default features only, and every feature here is off
 # by default — so the published page would omit `theme`'s stylesheets, the

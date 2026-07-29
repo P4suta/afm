@@ -303,11 +303,83 @@ mod proptests {
     //! with arbitrary Aozora-shaped and CommonMark-adversarial input.
 
     use super::*;
-    use aozora_flavored_markdown_test_support::config;
-    use aozora_flavored_markdown_test_support::generators::{
-        aozora_fragment, commonmark_adversarial,
-    };
     use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
+    use std::env;
+
+    const AOZORA_ATOMS: &[&str] = &[
+        "｜",
+        "《",
+        "》",
+        "［＃",
+        "］",
+        "※",
+        "［＃２字下げ］",
+        "［＃地から３字上げ］",
+        "改ページ",
+        "改丁",
+        "漢字",
+        "かんじ",
+        "ABC",
+        "1234",
+        "\n",
+        "\n\n",
+        "\r\n",
+        "\r\n\r\n",
+        "、",
+        "。",
+        " ",
+        "------------",
+        "===================================",
+    ];
+
+    const COMMONMARK_ATOMS: &[&str] = &[
+        "# heading\n\n- item\n  > quote in list\n    1. nested",
+        "> outer\n> > inner\n> > > deepest\n",
+        "- loose\n\n- items\n\n- here\n",
+        "\\*escaped\\* and \\[not a link\\]\n",
+        "```rust\nlet x = 1;\n```\n",
+        "~~~\n｜青梅《おうめ》\n［＃改ページ］\n~~~\n",
+        "| h1 | h2 |\n| -- | -- |\n| a  | b  |\n",
+        "[link](url) and ![img](src)\n",
+        "***\n\nthematic\n\n***\n",
+        "`｜青梅《おうめ》` in code, ｜青梅《おうめ》 outside\n",
+        "[｜青梅《おうめ》](https://example.com/#［＃)\n",
+    ];
+
+    fn joined_atoms(pool: &[&str], max_atoms: usize) -> impl Strategy<Value = String> {
+        let owned: Vec<String> = pool.iter().map(|atom| (*atom).to_owned()).collect();
+        prop::collection::vec(prop::sample::select(owned), 0..=max_atoms)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    fn aozora_fragment(max_atoms: usize) -> impl Strategy<Value = String> {
+        joined_atoms(AOZORA_ATOMS, max_atoms)
+    }
+
+    fn commonmark_adversarial() -> impl Strategy<Value = String> {
+        let owned: Vec<String> = COMMONMARK_ATOMS
+            .iter()
+            .map(|atom| (*atom).to_owned())
+            .collect();
+        prop::sample::select(owned)
+    }
+
+    fn property_config() -> ProptestConfig {
+        let cases = env::var("AOZORA_PROPTEST_CASES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|cases| *cases > 0)
+            .unwrap_or(128);
+        ProptestConfig {
+            cases,
+            max_shrink_iters: 10_000,
+            failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+                "proptest-regressions",
+            ))),
+            ..ProptestConfig::default()
+        }
+    }
 
     /// Aozora fragments mixed with CommonMark-adversarial constructs.
     fn aozora_or_commonmark() -> impl Strategy<Value = String> {
@@ -344,7 +416,7 @@ mod proptests {
     }
 
     proptest! {
-        #![proptest_config(config::default())]
+        #![proptest_config(property_config())]
 
         /// Sources without `` ` `` or `~` round-trip untouched.
         #[test]

@@ -50,14 +50,13 @@ use serde::Deserialize;
 
 use crate::{Options, render};
 
-const COMMONMARK_FIXTURE: &str = include_str!("../../../spec/commonmark-0.31.2.json");
-const GFM_FIXTURE: &str = include_str!("../../../spec/gfm-0.29-gfm.json");
+const COMMONMARK_FIXTURE: &str = include_str!("../spec/commonmark-0.31.2.json");
+const GFM_FIXTURE: &str = include_str!("../spec/gfm-0.29-gfm.json");
 // The crates.io page for this crate, and the ONLY document in this repository
 // that states the figures this file measures. Included rather than read at run
 // time so the claim is a build dependency of the thing that proves it, and
-// reached with `../` rather than `../../../`: it is inside this package, so
-// `every_file_a_published_source_includes_is_one_its_own_tarball_carries`
-// has nothing to excuse.
+// reached with `../` rather than a repository-root path: it is inside this
+// package and is therefore available to the extracted-tarball unit test.
 //
 // Three other documents used to restate these figures, held together by a
 // regex rule that matched the wording each sentence happened to use — so a

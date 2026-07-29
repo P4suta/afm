@@ -51,15 +51,12 @@ makes wrong. The `release.yml` cargo-dist pipeline (binaries) is untouched and
 runs off the same `v<semver>` tag; the crates.io upload stays separate and
 manually triggered, because it is the one operation nobody can take back.
 
-**Packaging is a per-PR gate (amended).** `just package` is a `[group('gate')]`
-recipe, and `publish-crates.yml`'s preflight calls that recipe instead of
-carrying a second copy of the command. Until this amendment that workflow was
-the only thing in the repository that ever built the published form of these
-crates, and it runs on `workflow_dispatch` — so the tarball a consumer receives
-was verified when somebody decided to publish and at no other moment, and the
-dependency graph a consumer resolves had never been built on `main` at all
-while `comrak` was a path dependency (ADR-0024). Every pull request packages
-and verify-builds the whole ladder now (DEV-224).
+**Packaging is a per-PR gate (amended).** `just package-smoke` runs
+`cargo publish --workspace --dry-run --locked`, then extracts the core
+`.crate` and runs its all-feature library unit tests from Cargo's normalized
+manifest. Generated CommonMark/GFM JSON fixtures live under the core crate so
+those tests exercise exactly the files a consumer receives. The
+`publish-crates.yml` preflight calls the same recipe.
 
 **Semver policy (pre-1.0).** Under `0.y.z`, the **minor** position is the
 breaking-change axis (cargo treats `0.y`→`0.(y+1)` as breaking). Breaking =
@@ -67,20 +64,17 @@ a change to rendered HTML for any CommonMark/GFM input, the
 `aozora-md.diagnostics.v1` schema (ADR-0012), the public IR enums (ADR-0013), or
 `Options::default`. Patch = additive features and fixes.
 
-**Semver enforcement (amended).** This ADR first deferred `cargo semver-checks`
-past the first publish, on the stated grounds that it needed a baseline on
-crates.io. That was wrong, and the correction is the reason for this amendment:
-`--baseline-rev <tag>` takes the baseline out of this repository's git history
-and needs no registry presence at all. The check was available the whole time
-the public surface was being rebuilt.
-
-The baseline flag is scaffolding: after the first publish it comes out, and the
-registry version — cargo-semver-checks' own default — is the baseline.
+**Semver enforcement (amended).** Semver checks run in the tag/publish
+preflight, where a real public baseline and the version about to be uploaded
+exist. Before the first 0.5 publication, making this a pull-request gate would
+compare against a baseline that does not describe the intended public 0.5
+surface and provide an empty assurance. Issue #215 remains open until that
+baseline exists.
 
 One limit is recorded here rather than implied, because nothing in the tree can
 hold it: `cargo semver-checks` takes no `--locked`, so the baseline build
 resolves its own dependency graph. It is the one resolution in this repository
-that is not bound to a lockfile, and there is no in-repo substitute (DEV-298).
+that is not bound to a lockfile, and there is no in-repo substitute (#215).
 
 ## Consequences
 
@@ -123,7 +117,7 @@ written: `-Zpackage-workspace` stabilised in Cargo **1.89**
 (`cargo::core::features`), while this repository pinned 1.95.0 and then 1.96.0
 on the very day this ADR was accepted. So the finding never described a
 toolchain this workspace ran on, and no version bump was needed to reverse it —
-only a dry run, which `just package` now performs on every pull request. The
+only a dry run, which `just package-smoke` now performs on every pull request. The
 inherited half of a decision is the half worth re-measuring.
 
 ## References

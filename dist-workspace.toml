@@ -5,6 +5,11 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
+# cargo-dist cannot generate the repository's locked mise setup. Keep the
+# release workflow hand-maintained, while still running the real dist plan
+# below and checking generated completions/man pages with `just
+# dist-assets-check`.
+allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
@@ -16,14 +21,13 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 # `just dist-assets` (drift-gated by `just dist-assets-check` in CI).
 include = ["dist/assets/completions", "dist/assets/man"]
 
-# Action refs for the generated `.github/workflows/release.yml`. dist's
-# templates reference floating major tags (`actions/checkout@v6`); this table
-# overrides each ref with an immutable commit, so the release pipeline resolves
-# an exact tree rather than whatever the tag points at on the day it runs. The
-# generator emits these values, so `dist plan`'s drift check stays green — the
-# file is both pinned and drift-free. Bump them by hand (tag -> commit via
-# `gh api repos/<action>/git/ref/tags/<tag> --jq .object.sha`) — Dependabot does
-# not read this file.
+# Action refs used when the hand-maintained release workflow is intentionally
+# regenerated. dist's templates use floating major tags; this table makes a
+# future generation preserve immutable commits instead. The live workflow pins
+# the same refs directly and `just zizmor` checks those executable definitions.
+# Bump both together (tag -> commit via `gh api
+# repos/<action>/git/ref/tags/<tag> --jq .object.sha`) — Dependabot does not
+# read this file.
 [dist.github-action-commits]
 "actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"          # v7.0.1
 "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"   # v7.0.1
