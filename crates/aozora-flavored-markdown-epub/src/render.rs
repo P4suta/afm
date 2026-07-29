@@ -4,10 +4,11 @@
 
 use std::str;
 
-use aozora_flavored_markdown::{Options, escape_html, render};
+use aozora_flavored_markdown::{Options, render};
 
 use crate::discover::{Encoding, Manuscript, SourceFile, encoding_of};
 use crate::validate::validate_xml_text;
+use crate::xml;
 use crate::{ChapterReport, Error, Result};
 
 #[derive(Debug, Clone)]
@@ -35,7 +36,6 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
     for (idx, source) in manuscript.sources.iter().enumerate() {
         let text = decode_source(source)?;
         validate_xml_text(&source.path, "chapter source", &text)?;
-        let rendered = render(&text, &opts);
         let title = source
             .path
             .file_stem()
@@ -43,6 +43,7 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
             .unwrap_or("untitled")
             .to_owned();
         validate_xml_text(&source.path, "chapter title", &title)?;
+        let rendered = render(&text, &opts);
         let xhtml = wrap_xhtml(&title, &rendered.html, &manuscript.metadata.language);
         items.push(SpineItem {
             href: format!("chapter-{:03}.xhtml", idx + 1),
@@ -80,10 +81,8 @@ fn decode_source(source: &SourceFile) -> Result<String> {
 }
 
 fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
-    // The renderer owns the escape table; a copy here could gain a character
-    // on its own and leave one of the two sides open.
-    let title = escape_html(title);
-    let lang = escape_xml_attribute(lang);
+    let title = xml::escape(title);
+    let lang = xml::escape(lang);
     // The body opts into the bundled theme via `aozora-md-root`. The
     // writing mode (horizontal vs. vertical) is decided by which theme
     // `aozora-md.css` carries, selected per book in `compose`, so the
@@ -103,23 +102,6 @@ fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
 </html>
 "#,
     )
-}
-
-// XML 1.0 §3.3.3 normalises literal TAB/LF/CR in attributes. Numeric
-// references preserve the authored scalar value, while the renderer's escape
-// table handles the five markup-significant characters.
-fn escape_xml_attribute(value: &str) -> String {
-    let escaped = escape_html(value);
-    let mut output = String::with_capacity(escaped.len());
-    for ch in escaped.chars() {
-        match ch {
-            '\t' => output.push_str("&#9;"),
-            '\n' => output.push_str("&#10;"),
-            '\r' => output.push_str("&#13;"),
-            _ => output.push(ch),
-        }
-    }
-    output
 }
 
 #[cfg(test)]
@@ -160,23 +142,12 @@ mod tests {
     // The alphabet the two slots are quantified over: the five characters the
     // escape table owns, the entity syntax itself (so an escaper that skips
     // what already looks like an entity gives itself away), and ordinary
-    // text. Two classes are deliberately absent, and each absence is a bug
-    // this crate still has rather than a property of the escaper:
-    //
-    //  * `\t`, `\n`, `\r`. Attribute-value normalisation (XML 1.0 §3.3.3)
-    //    turns each into a space before a parser hands the value over, and
-    //    end-of-line normalisation (§2.11) rewrites CR in text content to LF.
-    //    Markup significance is all `escape_html` covers, so a `book.toml`
-    //    `language = "ja\n"` and a chapter file named `序\r.md` both reach
-    //    the reader altered. Only numeric references (`&#9;` `&#10;` `&#13;`)
-    //    survive normalisation, and nothing emits them.
-    //  * C0 controls and the non-characters. XML 1.0 §2.2 forbids them
-    //    outright, so a file stem holding one yields a chapter that is not
-    //    well-formed XML at all. `quick_xml` does not enforce that
-    //    constraint (its own docs say so of `resolve_char_ref`) and neither
-    //    does anything else here — but epubcheck and a reading system do.
+    // text, and XML whitespace whose numeric references must survive
+    // attribute/end-of-line normalisation. Forbidden C0 controls and
+    // noncharacters are absent because `validate_xml_text` rejects them
+    // before this wrapper is called.
     const ENVELOPE_ATOMS: &[&str] = &[
-        "&", "<", ">", "\"", "'", "amp;", "#39;", "lt", "a", "第", " ", "-",
+        "&", "<", ">", "\"", "'", "\t", "\n", "\r", "amp;", "#39;", "lt", "a", "第", " ", "-",
     ];
 
     // The hostile pool stays reachable by selection rather than being
@@ -251,10 +222,10 @@ mod tests {
     // Every other XHTML in the package goes through `quick_xml`, which escapes
     // on the caller's behalf. This wrapper is the one document built by string
     // interpolation, so the title and the language tag are the two places
-    // user-controlled text reaches markup with only `escape_html` in front of
-    // it — and an unescaped `<` there closes `<title>` early and unbalances
-    // the whole document. The body is a real render rather than a literal, so
-    // the check covers the seam between the envelope and the HTML too.
+    // user-controlled text reaches markup through the EPUB-private XML
+    // escaper — and an unescaped `<` there closes `<title>` early and
+    // unbalances the whole document. The body is a real render rather than a
+    // literal, so the check covers the seam between the envelope and HTML too.
     //
     // Balance is the whole of what it sees, and less than it looks: a `"`
     // that escapes its attribute moves no tag boundary at all, because the
@@ -315,14 +286,17 @@ mod tests {
     }
 
     #[test]
-    fn xml_attribute_whitespace_survives_as_numeric_references() {
+    fn xml_whitespace_in_title_and_language_survives_as_numeric_references() {
+        let title = "title\tone\ntwo\rthree";
         let language = "ja\tJpan\nJP\rprivate";
-        let xhtml = wrap_xhtml("title", "", language);
+        let xhtml = wrap_xhtml(title, "", language);
         assert!(
             xhtml.contains(r#"lang="ja&#9;Jpan&#10;JP&#13;private""#),
             "{xhtml}"
         );
-        let (_, read_language) = read_back(&xhtml);
+        assert!(xhtml.contains("<title>title&#9;one&#10;two&#13;three</title>"));
+        let (read_title, read_language) = read_back(&xhtml);
+        assert_eq!(read_title, title);
         assert_eq!(read_language, language);
     }
 

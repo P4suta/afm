@@ -109,9 +109,8 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
         match metadata.spine.as_deref() {
             None => sweep(opts.input)?,
             Some([]) => {
-                return Err(Error::SpineInvalid {
+                return Err(Error::NoSources {
                     path: opts.input.to_path_buf(),
-                    reason: "an explicit `spine` must contain at least one chapter".to_owned(),
                 });
             }
             Some(entries) => entries

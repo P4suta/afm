@@ -10,7 +10,7 @@
 //! in neither `time` nor compressors nothing here uses.
 
 use std::fs;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{Cursor, Write};
 use std::path::Path;
 
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -19,17 +19,28 @@ use crate::compose::Bundle;
 use crate::{Error, Result};
 
 pub(crate) fn write(out: &Path, bundle: &Bundle) -> Result<()> {
+    // Assembly has no filesystem beneath it: every zip write targets the
+    // infallible `Cursor<Vec<u8>>` below. Only the completed archive crosses
+    // the filesystem boundary, so an output-device failure is always
+    // `PackageIo`, never an archiver-shaped `Package`.
+    let archive = assemble(out, bundle)?;
+
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).map_err(|source| Error::PackageIo {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let file = fs::File::create(out).map_err(|source| Error::PackageIo {
+    fs::write(out, archive).map_err(|source| Error::PackageIo {
         path: out.to_path_buf(),
         source,
-    })?;
-    let mut zip = ZipWriter::new(BufWriter::new(file));
+    })
+}
+
+type ArchiveWriter = ZipWriter<Cursor<Vec<u8>>>;
+
+fn assemble(out: &Path, bundle: &Bundle) -> Result<Vec<u8>> {
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
 
     write_stored(&mut zip, "mimetype", bundle.mimetype.as_bytes(), out)?;
     write_deflated(
@@ -56,30 +67,24 @@ pub(crate) fn write(out: &Path, bundle: &Bundle) -> Result<()> {
     for item in &bundle.spine {
         write_deflated(&mut zip, &item.path, &item.contents, out)?;
     }
-    zip.finish()
+    let archive = zip
+        .finish()
         .map_err(|source| Error::package(out.to_path_buf(), source))?;
-    Ok(())
+    Ok(archive.into_inner())
 }
 
-fn write_stored<W: Write + Seek>(
-    zip: &mut ZipWriter<W>,
-    name: &str,
-    bytes: &[u8],
-    out_path: &Path,
-) -> Result<()> {
+fn write_stored(zip: &mut ArchiveWriter, name: &str, bytes: &[u8], out_path: &Path) -> Result<()> {
     let opts: SimpleFileOptions =
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file(name, opts)
         .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
-    zip.write_all(bytes).map_err(|source| Error::PackageIo {
-        path: out_path.to_path_buf(),
-        source,
-    })?;
+    zip.write_all(bytes)
+        .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
     Ok(())
 }
 
-fn write_deflated<W: Write + Seek>(
-    zip: &mut ZipWriter<W>,
+fn write_deflated(
+    zip: &mut ArchiveWriter,
     name: &str,
     bytes: &[u8],
     out_path: &Path,
@@ -88,10 +93,8 @@ fn write_deflated<W: Write + Seek>(
         SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip.start_file(name, opts)
         .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
-    zip.write_all(bytes).map_err(|source| Error::PackageIo {
-        path: out_path.to_path_buf(),
-        source,
-    })?;
+    zip.write_all(bytes)
+        .map_err(|source| Error::package(out_path.to_path_buf(), source))?;
     Ok(())
 }
 
@@ -146,6 +149,18 @@ mod tests {
         assert!(
             matches!(err, Error::PackageIo { ref path, .. } if path == &blocker),
             "expected PackageIo for the parent path, got {err:?}",
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_finished_archive_write_failure_is_package_io() {
+        let out = Path::new("/dev/full");
+
+        let err = write(out, &minimal_bundle()).expect_err("/dev/full rejects every write");
+        assert!(
+            matches!(err, Error::PackageIo { ref path, .. } if path == out),
+            "the filesystem boundary must report PackageIo, got {err:?}",
         );
     }
 }

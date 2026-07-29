@@ -99,7 +99,7 @@ pub enum Error {
 
     /// An explicit spine entry is empty, rooted, or escapes its manuscript.
     #[error("invalid EPUB spine entry {path}: {reason}")]
-    #[diagnostic(code(aozora_flavored_markdown_epub::validate::spine))]
+    #[diagnostic(code(aozora_flavored_markdown_epub::discover::spine))]
     #[non_exhaustive]
     SpineInvalid {
         /// The manuscript root or entry that failed validation.
@@ -226,6 +226,42 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorKind {
+        DiscoverIo,
+        MetadataParse,
+        MetadataInvalid,
+        SpineInvalid,
+        XmlCharacter,
+        XmlBuild,
+        NoSources,
+        Package,
+        PackageIo,
+        Utf8,
+        Sjis,
+    }
+
+    // This match deliberately lives inside the defining crate and has no
+    // wildcard. `Error` is non-exhaustive for consumers, so the integration
+    // sweep cannot make a newly added variant a compile-time failure by
+    // itself. This classifier does: adding a variant requires assigning it a
+    // registry kind before the crate's tests can compile.
+    fn error_kind(error: &Error) -> ErrorKind {
+        match error {
+            Error::DiscoverIo { .. } => ErrorKind::DiscoverIo,
+            Error::MetadataParse { .. } => ErrorKind::MetadataParse,
+            Error::MetadataInvalid { .. } => ErrorKind::MetadataInvalid,
+            Error::SpineInvalid { .. } => ErrorKind::SpineInvalid,
+            Error::XmlCharacter { .. } => ErrorKind::XmlCharacter,
+            Error::XmlBuild(_) => ErrorKind::XmlBuild,
+            Error::NoSources { .. } => ErrorKind::NoSources,
+            Error::Package { .. } => ErrorKind::Package,
+            Error::PackageIo { .. } => ErrorKind::PackageIo,
+            Error::Utf8 { .. } => ErrorKind::Utf8,
+            Error::Sjis { .. } => ErrorKind::Sjis,
+        }
+    }
+
     // A failure with a cause of its own, so the delegation is observable.
     // `Cause::source` answers "inner" here; a wrapper that handed back the
     // error it holds instead would answer "outer" and print it twice.
@@ -287,6 +323,7 @@ mod tests {
     #[test]
     fn the_packaging_constructor_keeps_the_path_and_the_cause() {
         let err = Error::package(PathBuf::from("out.epub"), Outer(Inner));
+        assert_eq!(error_kind(&err), ErrorKind::Package);
         assert_eq!(
             chain(&err),
             ["EPUB packaging failed for out.epub", "outer", "inner"],

@@ -24,6 +24,7 @@ mod error;
 mod package;
 mod render;
 mod validate;
+mod xml;
 
 // A chapter's diagnostics are the renderer's, so they are re-exported rather
 // than copied into a shadow type: a host reads one vocabulary whether it

@@ -7,7 +7,9 @@ use crate::discover::{Manuscript, Metadata};
 use crate::{Error, Result};
 
 pub(crate) fn validate(manuscript: &Manuscript) -> Result<()> {
-    validate_metadata(&manuscript.metadata)?;
+    // XML representability is the outer contract. Report a prohibited
+    // scalar with its path/field even when the same value would also fail a
+    // semantic rule such as "non-empty title" or BCP 47 language syntax.
     validate_xml_text(
         &manuscript.metadata_path,
         "title",
@@ -26,7 +28,7 @@ pub(crate) fn validate(manuscript: &Manuscript) -> Result<()> {
     if let Some(identifier) = &manuscript.metadata.identifier {
         validate_xml_text(&manuscript.metadata_path, "identifier", identifier)?;
     }
-    Ok(())
+    validate_metadata(&manuscript.metadata)
 }
 
 pub(crate) fn validate_metadata(meta: &Metadata) -> Result<()> {
