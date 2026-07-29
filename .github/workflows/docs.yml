@@ -30,7 +30,7 @@ jobs:
         with:
           key: docs
       - run: just docs-site
-      - uses: actions/upload-pages-artifact@de65e3a2c17eb0147c44792b9e75d119163878f4  # v4.0.0
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b  # v4.0.0
         with:
           path: target/site
 
@@ -47,4 +47,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@f5a6913267f07fa19a188d12455354625e319cdf  # v4.0.5
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4.0.5
