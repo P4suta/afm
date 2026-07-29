@@ -29,30 +29,25 @@ automatically.
 5. **No unused dependencies.** `just shear` rejects them. For a macro- or
    `cfg`-only use its `syn` pass cannot see, record a documented
    `[workspace.metadata.cargo-shear] ignored = [...]`.
-6. **Prose earns its place, and it rots like code.** `just vale` fails on a
-   retired upstream path named in a document or a comment — `.vale.ini` says
-   what it reads, [`styles/Aozora/RetiredPaths.yml`](styles/Aozora/RetiredPaths.yml)
-   says what is banned. `just comment-discipline` fails on a line naming a
-   repo path that no longer exists, and on a doc-comment count above the
-   pinned ceiling. Write down *why*, not what the code already says.
-7. **Workflows are linted, not reviewed by eye.** The rules they answer to —
-   `uses:` on a 40-hex commit rather than a mutable tag above all — live in
-   [`zizmor.yml`](zizmor.yml), and `just zizmor` / `just actionlint` are
-   gates. The `# vX.Y.Z` beside a ref is a comment for humans and Dependabot.
-8. **A gate is declared once.** `[group('gate')]` on a `Justfile` recipe is
-   the whole declaration: `just gates` prints the set, `ci.yml` builds its job
-   matrix from it, and `just ci` refuses to start when its own lanes disagree.
-   Adding a check means adding the attribute and a lane — never a job in the
-   workflow. The two `[group('native')]` gates (`msrv`, `commitlint`) keep a
-   dedicated CI job because they need a toolchain or a commit range the dev
-   image has not got, and they run the same recipe there.
+6. **Prose earns its place, and it rots like code.** Write down *why*, not
+   what the code already says: a sentence restating a config file is a second
+   copy that drifts, and deleting it is a fix. `just vale` and
+   `just comment-discipline` are the gates; each names its own rule list.
+7. **Workflows are linted, not reviewed by eye.** The rules they answer to
+   live in [`zizmor.yml`](zizmor.yml), and `just zizmor` / `just actionlint`
+   are gates. The `# vX.Y.Z` beside a ref is a comment for humans and
+   Dependabot.
+8. **A gate is declared once**, by `[group('gate')]` on a `Justfile` recipe.
+   Adding a check means adding the attribute and a `just ci` lane — never a
+   job in the workflow. The `gates` recipe's own comment says how that one
+   declaration reaches both.
 
 ## Setup and the development loop
 
 ```sh
 just setup                     # build the dev image, install hooks, run tests
 just watch                     # bacon watcher inside the container
-just lint                      # fmt + clippy + typos + strict-code + comments + prose + workflows
+just lint                      # every lint (the recipe's dependency list is the list)
 just test                      # full workspace nextest
 just gates                     # the gate manifest, as CI reads it
 just ci                        # exactly the gate CI runs
@@ -73,9 +68,8 @@ the sibling repo. Run them from there.
 
 ## Troubleshooting
 
-Run **`just doctor`** first: it audits images, cache volumes, the `aozora`
-pin and playground prerequisites, and prints a fix hint for anything
-missing. Beyond that:
+Run **`just doctor`** first: it audits images, cache volumes and playground
+prerequisites, and prints a fix hint for anything missing. Beyond that:
 
 - **`Blocking waiting for file lock on build directory`** — two cargo
   commands share the one `cargo-target` volume (e.g. `just watch` during
@@ -124,15 +118,21 @@ format) under `docs/adr/`:
 cargo xtask new-adr 'my new decision'
 ```
 
-Add a row to [`docs/ADR_INDEX.md`](docs/ADR_INDEX.md) and reference the ADR
-in the commit body.
+Reference the ADR in the commit body. There is no index to update: the
+directory is the index, each file's name carrying its number and title and its
+`- Status:` line its status. Numbers 0003–0008 are retired and never reused —
+0003 and 0005 were superseded and removed, and 0004 / 0006 / 0007 / 0008 moved
+to the sibling [`P4suta/aozora`](https://github.com/P4suta/aozora) repo when the
+parser core was extracted (ADR-0010).
 
 ## Commits and pull requests
 
 [Conventional Commits](https://www.conventionalcommits.org/), enforced by
-the `commit-msg` hook. Scopes match the workspace shape: `markdown`, `cli`,
-`wasm`, `epub`, `xtask`, `comrak`, `adr`, `release`, `dev`, `test`. One
-logical change per commit.
+the `commit-msg` hook. A scope names the part of the tree the change is
+about — a crate, or the shared concern the change belongs to. The list that
+used to sit here enumerated ten while the history carried forty-four, and
+`committed.toml` constrained neither (DEV-245). One logical change per
+commit.
 
 PR titles match the commits, and `Closes #N` links the issue. Keep the PR
 template's checklist — it is the same gate `just ci` runs, so a green
@@ -154,29 +154,22 @@ git commit -am 'chore(release): v0.6.0'
 git tag -a v0.6.0 -m 'v0.6.0' && git push --follow-tags
 ```
 
-[cargo-release](https://github.com/crate-ci/cargo-release) writes every
-manifest and `Cargo.lock`, cuts the `## [Unreleased]` section of
-`CHANGELOG.md` into a dated one, and regenerates the man page that embeds the
-version. `release.toml` is the configuration — plus a
-`[package.metadata.release]` table in three manifests, each next to the thing
-it is a fact about. Writing the CHANGELOG *entries* is still yours: an entry
-has to say what broke and what to do about it, which a commit subject does
-not. `just changelog` prints a git-cliff draft to check the section against
-before you cut it.
+[cargo-release](https://github.com/crate-ci/cargo-release) does the rewriting;
+`release.toml` and the `[package.metadata.release]` tables beside it are the
+configuration, and the dry run above prints exactly which files move. Writing
+the CHANGELOG *entries* is still yours: an entry has to say what broke and
+what to do about it, which a commit subject does not. `just changelog` prints
+a git-cliff draft to check the section against before you cut it.
 
-The two version lines move independently and neither is told what the other
-is: `shared-version` groups the crates that inherit `[workspace.package]
-version` as `workspace` and the two 0.1.x EPUB crates as `epub`, and a bump
-applies the level within each group. A new crate that carries its own version
-has to name its group, or it is bumped onto the workspace's number without a
-warning.
+The workspace has two version lines and `release.toml` is where they are
+grouped. A new crate that carries its own version has to name its group, or it
+is bumped onto the workspace's number without a warning.
 
 The commit and the tag are yours by design. Both are SSH-signed and the key
 is not in the dev image — a `git commit` run inside the container would not
 fail, it would succeed unsigned — so `just release` stops when the files are
-written. `release.toml` says the same in the form cargo-release reads
-(`publish = false`, `tag = false`, `push = false`), so reaching for the tool
-by hand from `just shell` lands in the same place. Publishing is
+written, and `release.toml` refuses the same steps so that reaching for the
+tool by hand from `just shell` lands in the same place. Publishing is
 `publish-crates.yml`'s, behind a required-reviewer approval and a short-lived
 OIDC token; its preflight refuses a version `CHANGELOG.md` has no section
 for.
@@ -193,9 +186,8 @@ rewrite it, in which case close the PR and bump the pin instead. The weekly
 files a rolling issue naming what froze, so the finding reaches somebody
 rather than sitting in the Actions tab.
 
-**ADR-0002 scope exception**: release builds run on native runners so each
-binary target matches its runner OS. Docker-only applies to development and
-CI.
+Release builds run on native runners so each binary target matches its runner
+OS — the ADR-0002 scope exception, stated there.
 
 ## License
 

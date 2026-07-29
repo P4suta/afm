@@ -8721,11 +8721,9 @@ fn retired_name_in_both_spellings() -> (String, String) {
 /// recipe's `command -v vale || curl` bridge exists for.
 ///
 /// CI runs `just test` inside a published dev image that predates the
-/// Dockerfile adding a tool, so the two probes below cannot insist on the
-/// binary without going red on the merge that installs it. What they can
-/// insist on is that an absence is still that window: the version is pinned
-/// and the recipe knows how to fetch it. Anything measured past this point is
-/// unmeasured for exactly one merge.
+/// Dockerfile adding a tool, so the probe below cannot insist on the binary
+/// without going red on the merge that installs it. What it can insist on is
+/// that an absence is still that window: the recipe knows how to fetch it.
 fn vale_or_the_bridge_that_installs_it() -> Option<PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let found = env::split_paths(&path)
@@ -8734,10 +8732,10 @@ fn vale_or_the_bridge_that_installs_it() -> Option<PathBuf> {
     if found.is_some() {
         return found;
     }
-    assert!(
-        read("Dockerfile").contains("VALE_VERSION="),
-        "vale is neither installed nor pinned in the Dockerfile, so `just vale` runs nothing"
-    );
+    // That the version the bridge fetches is still pinned where the recipe
+    // looks for it is `every_search_this_repo_runs_to_read_a_value_finds_one`'s
+    // now: it compiles the recipe's own `grep` against the `Dockerfile`, which
+    // the `contains("VALE_VERSION=")` that used to stand here could not.
     assert!(
         recipe_body(&read("Justfile"), "vale")
             .join("\n")
@@ -10389,25 +10387,24 @@ fn the_arguments_the_semver_gate_passes_are_what_makes_a_breaking_change_fail() 
 
 #[test]
 fn the_semver_gate_answers_vacuously_while_this_workspace_outruns_its_baseline() {
-    // A debt, pinned rather than described. cargo reads `0.4` -> `0.5` as a
+    // A debt, pinned rather than described — which is why neither the recipe
+    // nor ADR-0015 describes it any more. cargo reads `0.4` -> `0.5` as a
     // major bump, and a major bump permits every break there is: the same
-    // removal the test above catches is skipped here along with the other 252
-    // lints, and the run reports `no semver update required` and exits 0.
+    // removal the test above catches is skipped here, and the run reports
+    // `no semver update required` and exits 0.
     //
     // That is the correct answer for this cycle — the breaking changes are the
     // plan and 0.5.0 declares them — and it means the green leg on every PR
     // until the next release asserts only that the declared version covers
     // what changed. The gate starts biting the moment the baseline is a
     // version this workspace is merely a patch ahead of, and that is the
-    // moment this test fails and wants deleting, along with the vacuity note
-    // in the recipe and in ADR-0015.
+    // moment this test fails and wants deleting.
     let justfile = read("Justfile");
     let probe = SemverProbe::new();
     assert!(
         probe.accepts(&SemverCall::of(&justfile), "0.2.0", PROBE_BROKEN),
         "a 0.y major bump no longer absorbs a removed public field. cargo-semver-checks has \
-         changed what it skips; this test recorded the opposite and the note it belongs to is \
-         now wrong in the Justfile and in ADR-0015."
+         changed what it skips, and this test recorded the opposite."
     );
 
     let arguments = semver_arguments(&justfile);
@@ -10433,8 +10430,7 @@ fn the_semver_gate_answers_vacuously_while_this_workspace_outruns_its_baseline()
         breaking,
         "this workspace declares {declared:?} against a {baseline:?} baseline, so the gate is \
          no longer skipping its lints — it is comparing public API for real. Good: delete this \
-         test, and delete the note in the `{SEMVER_GATE}` recipe and in ADR-0015 that calls the \
-         pass vacuous, because it has stopped being one."
+         test, because the pass it pins has stopped being vacuous."
     );
 }
 
@@ -11230,13 +11226,14 @@ fn no_workflow_reads_a_crate_version_out_of_a_manifest_by_hand() {
     );
 }
 
-/// The ADR that decides the publishable set, and the lead-in of the section
-/// that states it.
 const PUBLICATION_ADR: &str = "docs/adr/0015-crates-io-publication-and-semver.md";
 const PUBLISHABLE_SET_SECTION: &str = "**Publishable set & order";
 
-/// The lines of one bold-lead-in section of an ADR, up to the next lead-in or
-/// heading.
+// One bold-lead-in section of an ADR, up to the next lead-in or heading. A
+// section runs to the next lead-in and not to the next blank line, so it keeps
+// its continuation paragraphs — but a lead-in wrapped onto a second physical
+// line would be invisible here, and would silently extend the section before
+// it.
 fn adr_section(text: &str, lead_in: &str) -> Option<String> {
     let mut out: Vec<&str> = Vec::new();
     for line in text.lines() {
@@ -12832,15 +12829,6 @@ fn every_replacement_the_release_makes_matches_where_it_says_it_does() {
         let path = repo_root()
             .join(&replacement.member)
             .join(&replacement.file);
-        let text = fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "{}'s replacement targets {} and it does not read: {e}\n\
-                 `file` resolves against the manifest's own directory, not the workspace root.",
-                replacement.member,
-                path.display()
-            )
-        });
-
         let exactly = replacement.exactly.unwrap_or_else(|| {
             panic!(
                 "{}'s search `{}` declares no `exactly`. Without it cargo-release accepts any \
@@ -12849,13 +12837,15 @@ fn every_replacement_the_release_makes_matches_where_it_says_it_does() {
                 replacement.member, replacement.search
             )
         });
-        let pattern = Regex::new(&replacement.search).unwrap_or_else(|e| {
-            panic!(
-                "{}'s search `{}` is not a regular expression: {e}",
-                replacement.member, replacement.search
-            )
-        });
-        let found = pattern.find_iter(&text).count();
+        let found = declared_search_matches(
+            &format!(
+                "{}'s pre-release-replacement (`file` resolves against the manifest's own \
+                 directory, not the workspace root)",
+                replacement.member
+            ),
+            &replacement.search,
+            &path,
+        );
         assert_eq!(
             found, exactly,
             "`{}` matches {} in {}, and the release declares `exactly = {exactly}`.\n\
@@ -12906,6 +12896,167 @@ fn the_search_cargo_release_documents_would_rewrite_this_files_history() {
         "no search over CHANGELOG.md is anchored any more, and the word it is looking for \
          appears {documented} times in that file"
     );
+}
+
+// ---------------------------------------------------------------------------
+// a declared search finds what it says it finds, wherever it is declared
+// ---------------------------------------------------------------------------
+
+// How many times a declared search matches the file it names.
+//
+// One core for every spelling of the same claim — "this text is in that file".
+// A manifest writes it as a TOML `search` field and a recipe or a workflow
+// writes it as `grep` arguments, and the reason to compile all of them here is
+// that nothing else compiles any of them: what is being searched is prose or a
+// manifest, and neither is type-checked.
+fn declared_search_matches(site: &str, pattern: &str, path: &Path) -> usize {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!(
+            "{site} searches {} and it does not read: {e}",
+            path.display()
+        )
+    });
+    let compiled = Regex::new(pattern)
+        .unwrap_or_else(|e| panic!("{site}'s search `{pattern}` is not a regular expression: {e}"));
+    compiled.find_iter(&text).count()
+}
+
+// The words a shell would see, with quoted runs kept whole.
+//
+// `shell_tokens` flattens quotes into separators, which is the right reading
+// for finding a sub-command and the wrong one here: `grep -oE 'rev =
+// "[0-9a-f]{40}"' Cargo.toml` is a three-argument call whose pattern holds
+// both a space and a quote. `$(` reopens an unquoted context the way the shell
+// does, so a substitution inside a double-quoted assignment reads as the
+// command it is.
+fn quoted_words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut quote = None;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // A command substitution starts a fresh quoting context even inside a
+        // double-quoted word, so it ends the word AND the quote:
+        // `have="v$(grep -oE '…' file)"` is a call, not a string.
+        let substitution = ch == '$' && chars.peek() == Some(&'(');
+        if substitution {
+            chars.next();
+        }
+        if substitution || (quote.is_none() && ch.is_whitespace()) {
+            if quoted || !word.is_empty() {
+                out.push(mem::take(&mut word));
+            }
+            quoted = false;
+            quote = None;
+        } else if quote == Some(ch) {
+            quote = None;
+        } else if quote.is_none() && (ch == '\'' || ch == '"') {
+            quote = Some(ch);
+            quoted = true;
+        } else {
+            word.push(ch);
+        }
+    }
+    if quoted || !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+// The searches a shell script runs to READ A VALUE out of a named file.
+//
+// `grep -o` prints the matched text and nothing else, so it is only ever
+// written where the match IS the answer: a pinned version out of a `Dockerfile`
+// ARG, a tool's own version out of `dist-workspace.toml`. `-q` is the other
+// shape — it asks a yes/no question and "no" is one of the two answers it is
+// entitled to give — so a `-q` search is not read here.
+//
+// What a `-o` search cannot do is match nothing; the failure message below
+// carries what that cost.
+fn value_searches(text: &str) -> Vec<(String, String)> {
+    // Flags that swallow the word after them, so that word is not mistaken for
+    // the pattern.
+    const TAKES_A_VALUE: &[&str] = &["-A", "-B", "-C", "-m", "-e", "-f", "-d"];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let words = quoted_words(line);
+        for (at, word) in words.iter().enumerate() {
+            if word.rsplit(['|', ';', '&', '`']).next() != Some("grep") {
+                continue;
+            }
+            let mut rest = words[at + 1..].iter();
+            let mut prints_the_match = false;
+            let mut pattern = None;
+            while let Some(word) = rest.next() {
+                if let Some(flags) = word.strip_prefix('-') {
+                    prints_the_match |= flags.contains('o');
+                    if TAKES_A_VALUE.contains(&word.as_str()) {
+                        rest.next();
+                    }
+                    continue;
+                }
+                pattern = Some(word.clone());
+                break;
+            }
+            let (Some(pattern), Some(file)) = (pattern, rest.next()) else {
+                continue;
+            };
+            // A pattern or a path assembled at run time is not a literal this
+            // reader can resolve, and a `grep` with no path reads a pipe.
+            let resolved = |value: &str| !value.contains('$') && !value.contains('*');
+            if !prints_the_match
+                || !resolved(&pattern)
+                || !resolved(file)
+                || file.starts_with(['|', '>', '<', '&', ';', ')'])
+            {
+                continue;
+            }
+            out.push((pattern, file.clone()));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_search_this_repo_runs_to_read_a_value_finds_one() {
+    let mut sites: Vec<(String, String, String)> = Vec::new();
+    for (recipe, line) in expanded_recipe_lines(&read("Justfile")) {
+        for (pattern, file) in value_searches(&line) {
+            sites.push((format!("the `{recipe}` recipe"), pattern, file));
+        }
+    }
+    for path in workflow_files() {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for (pattern, file) in value_searches(&text) {
+            sites.push((name.clone(), pattern, file));
+        }
+    }
+
+    assert!(
+        sites.len() >= 4,
+        "only {} value-reading search(es) found across the Justfile and the workflows; the \
+         reader is not finding `grep -o` any more, and a rule that finds nothing passes on \
+         everything: {sites:?}",
+        sites.len()
+    );
+
+    for (site, pattern, file) in &sites {
+        let found = declared_search_matches(site, pattern, &repo_root().join(file));
+        assert!(
+            found > 0,
+            "{site} reads a value out of {file} with `{pattern}`, and that pattern matches \
+             nothing in it. The variable comes back empty and the script runs its \"absent\" \
+             branch on every tree — which is how `just doctor` came to fail unconditionally \
+             while the gate that owns the same question was passing."
+        );
+    }
 }
 
 /// The `just` recipes any member's `pre-release-hook` runs, with the member.

@@ -742,17 +742,14 @@ samply-render REPEAT="200":
 # matches this regex against every member's `src/` and fails on any published
 # file it reaches, whatever shape the entry that reaches it is written in.
 # `_COV_IGNORE` therefore holds only what is not published source, or what a
-# gate that DOES run it covers — never what a comment asserts is fine:
-#
-#   target/             build artefacts, not source.
-#   xtask/              repo tooling; `publish = false`.
-#   ...-test-support/   test scaffolding; `publish = false`.
-#   ...-wasm/           ships to wasm32 and llvm-cov instruments the host
-#                       build, so the exclusion defers to `just test-wasm`,
-#                       which runs that crate's tests on the target it ships
-#                       to. `gate_wiring.rs`'s
-#                       `a_crate_excused_from_coverage_for_shipping_to_wasm_is_tested_on_wasm`
-#                       goes red if that gate ever disappears.
+# gate that DOES run it covers — never what a comment asserts is fine.
+# Everything but the wasm crate is the first case: build output, or a member
+# whose own manifest says `publish = false`. The wasm crate is the second — it
+# ships to wasm32 and llvm-cov instruments the host build, so the exclusion
+# defers to `just test-wasm`, which runs that crate's tests on the target it
+# ships to, and
+# `a_crate_excused_from_coverage_for_shipping_to_wasm_is_tested_on_wasm` goes
+# red if that gate ever disappears.
 #
 # Test code is out of the denominator already, and by nothing written here:
 # cargo-llvm-cov's own default regex drops
@@ -821,8 +818,7 @@ coverage-branch:
 
 # --- lint / static analysis ---------------------------------------------------
 
-# Run all lints (fmt + clippy + typos + strict-code + comment-discipline
-# + vale + zizmor + actionlint)
+# Run every lint. The dependency list below is the list.
 [group('lint')]
 lint: fmt-check clippy typos strict-code comment-discipline vale zizmor actionlint
 
@@ -1132,10 +1128,7 @@ actionlint:
 # to keep in step, and nothing about the scope is written down twice.
 # `every_file_this_repo_tracks_is_one_the_prose_gate_reads` holds it there.
 #
-# The `command -v` line is the one-merge bridge `just zizmor` and
-# `just actionlint` carry, for the same reason and read back off the same kind
-# of Dockerfile ARG: CI pulls a published dev image that lags a tool addition
-# by one merge.
+# `command -v`: the one-merge bridge, described above `just zizmor`.
 [group('gate')]
 [group('lint')]
 vale:
@@ -1267,11 +1260,8 @@ deny:
 # delete the dead dependency, or record a documented
 # `[workspace.metadata.cargo-shear] ignored = [...]` for a macro/cfg-only use.
 #
-# Self-bootstraps cargo-shear when absent: CI's `setup-dev-image` pulls the
-# published `aozora-md-dev:latest`, which lags a Dockerfile tool addition by
-# one merge, so the gate binstalls the tool into the pulled image until the
-# image republishes. A local dev image already ships it, so the bootstrap is
-# a no-op there.
+# `command -v`: the one-merge bridge, described above `just zizmor`, in the
+# form a cargo crate needs.
 [group('gate')]
 [group('lint')]
 shear:
@@ -1315,37 +1305,23 @@ udeps:
 # is the entire public-surface rebuild — every entry point, every IR name,
 # every error type moved with the one tool that measures such a move unwired.
 #
-# `v0.4.1` is the newest tag and it is scaffolding: nothing is on crates.io
-# yet, so a tag is the only baseline there is. After the first publish, delete
-# the flag — the registry version is what cargo-semver-checks compares against
-# by default, and then there is no literal here for anyone to keep in step.
+# `--baseline-rev` is scaffolding: nothing is on crates.io yet, so a tag is the
+# only baseline there is. After the first publish, delete the flag — the
+# registry version is cargo-semver-checks' own default, and then there is no
+# literal here for anyone to keep in step. Both callers check out with
+# `fetch-depth: 0`, since the flag resolves a TAG and a depth-1 clone has none.
 #
-# `--exclude`: the two epub crates were consolidated into this workspace after
-# that tag was cut and carry their own 0.1.x line (ADR-0018), so the baseline
-# holds nothing to compare them against — semver-checks stops with "package
-# not found" rather than skipping them. Only the library one stops it today;
-# the CLI is excluded because it is the same fact about the same pair, and a
-# lib target added to it later would otherwise fail this gate for a reason
-# that has nothing to do with the change under test. The `publish = false`
-# members and the other binary-only crates need no flag: cargo-semver-checks
-# skips both kinds itself (measured — naming them changes nothing).
-#
-# What it asserts TODAY, stated plainly rather than implied: cargo reads
-# 0.4.1 -> 0.5.0 as a major bump, so all 253 lints are skipped and the answer
-# is only "the version you declared covers whatever you changed". That is the
-# correct answer for this cycle — every break landed so far is absorbed by the
-# 0.5.0 this workspace has not released — and it is a vacuous pass, so say so:
-# the gate starts reporting breakage the moment the baseline is a version this
-# workspace is merely a patch ahead of. To watch it fail, set the workspace
-# version to 0.4.2 and run this recipe.
+# The two `--exclude`s and the baseline this recipe names are each held by a
+# gate that reads them out of this line and checks them against git and against
+# the packages the tag holds, so what they are and why is not written here a
+# second time. Same for the vacuity of the pass while the declared version is
+# a 0.y major bump ahead of the baseline: the gate that measures it says so,
+# and it fails the day it stops being true.
 #
 # No `--locked`, per the block at the top of this file. It is the one entry
 # there with nothing else covering it: the baseline build resolves its own
 # graph, so which graph proved the comparison is not pinned. DEV-298 tracks
 # it; there is no offline or in-repo substitute to write here instead.
-#
-# Both callers check out with `fetch-depth: 0` — `--baseline-rev` resolves a
-# TAG out of the checkout, and a depth-1 clone carries none.
 #
 # The private target directory is not a speed knob, it is the verdict. Both
 # halves of this check are rustdoc JSON, and rustdoc names its output after the
@@ -1371,13 +1347,16 @@ semver:
 
 # --- upstream sources ---------------------------------------------------------
 
-# Pin every `aozora-*` git dep in Cargo.toml to a new commit SHA in one
-# pass, then refresh Cargo.lock. Idempotent (no-op when the SHA already
-# matches). Use the full 40-char hex SHA from `git ls-remote
-# https://github.com/P4suta/aozora.git refs/heads/main`.
+# Move the `aozora` pin in both manifests — the workspace one and the fuzz
+# crate's — to a published crates.io version in one pass, then refresh
+# Cargo.lock. Idempotent. The SHA this recipe used to take stopped being an
+# answer when ADR-0015 replaced the git rev with a registry version, and
+# `cargo xtask aozora-bump` has rejected one ever since — which nothing
+# noticed, because a recipe parameter is read by `just --list` and by nothing
+# else. What the argument has to look like is the sub-command's `--help`.
 [group('upstream')]
-aozora-bump SHA:
-    {{_dev}} cargo run --locked --package xtask --quiet -- aozora-bump {{SHA}}
+aozora-bump VERSION:
+    {{_dev}} cargo run --locked --package xtask --quiet -- aozora-bump {{VERSION}}
 
 # Regenerate `spec/*.json` from the vendored cmark-format sources under
 # `spec/sources/*.txt`. Offline-pure: both the sources and the generated
@@ -1426,24 +1405,21 @@ changelog:
 # to the same question — a prompt is also the one part of this that cannot be
 # read in a review or replayed in a terminal without a TTY.
 #
-# THREE STEPS RATHER THAN THE WHOLE OF `cargo release`, and the split is the
-# point. The steps after these are `commit`, `publish`, `tag` and `push`, and
-# each of them belongs to something else: the upload is
+# THE FILE-WRITING STEPS AND NO MORE, and the split is the point. Commit, tag,
+# push and publish each belong to something else: the upload is
 # `publish-crates.yml`'s, behind an approval gate and an OIDC token, and the
 # commit and the tag are SSH-signed with a key that is deliberately not in the
 # dev image. A `git commit` from inside the container would not fail — it
 # would succeed, unsigned. So this recipe stops when the files are written; the
 # release commit and the annotated `v<version>` tag are made on the host
-# afterwards, where the key is. `release.toml` says the same thing in the form
-# cargo-release reads (`tag = false`, `push = false`, `publish = false`), so
-# running the tool by hand from `just shell` lands in the same place.
+# afterwards, where the key is. `release.toml` refuses the same steps in the
+# form cargo-release reads, so running the tool by hand from `just shell` lands
+# in the same place.
 #
-# `--workspace` because the workspace has two version lines and both move:
-# `shared-version` groups them (`workspace` for the crates that inherit
-# `[workspace.package] version`, `epub` for the two 0.1.x generator crates),
-# and a bump applies the level within each group. Leaving the flag off selects
-# the default members, which is a subset — and a version line half-bumped is
-# the failure a shared version exists to prevent.
+# `--workspace` because the workspace has two version lines and both move, and
+# `release.toml`'s `shared-version` is where they are grouped. Leaving the flag
+# off selects the default members, which is a subset — and a version line
+# half-bumped is the failure a shared version exists to prevent.
 #
 # Not a gate, and there is nothing here for one to check: this is the only
 # recipe in the file that writes to the tree on purpose.
@@ -1518,30 +1494,19 @@ changelog-check:
 # under it was resolved out of the workspace instead of a registry.
 #
 # Nothing was asking. `publish-crates.yml` is `workflow_dispatch`-only, so the
-# tarballs are verified when someone decides to publish and at no other moment;
-# and while `comrak` was a path dependency (retired by ADR-0024) the graph a
-# consumer resolves had never been built on `main` at all. This recipe is that
-# workflow's preflight, lifted to where every PR runs it — the workflow calls
-# this same recipe rather than spelling the command out a second time.
+# tarballs were verified when someone decided to publish and at no other
+# moment. This recipe is that workflow's preflight, lifted to where every PR
+# runs it — the workflow calls this same recipe rather than spelling the
+# command out a second time.
 #
-# `--dry-run` packages each member into a temporary registry under
-# `target/package/` and resolves the next member against it (ADR-0015), which
-# is why all four rungs are answerable here even though two of them have never
-# been on crates.io. It also downgrades "this version already exists" to a
-# warning, so the gate keeps working after the first publish.
-#
-# `--allow-dirty` suppresses exactly one check — "is every file in this package
-# committed to git" — and changes nothing else: the same files are packaged and
-# the same tarball is verify-built either way. It is here because that question
-# is not this gate's question, and asking it anyway would remove the gate from
-# the one place it earns its time. `just ci` is what a developer runs BEFORE
-# the commit, so without the flag cargo stops on the first edited file and the
-# packaging question never gets asked locally at all — a gate that only ever
-# runs on a runner, which is the shape this repo keeps deleting. On a runner
-# the tree is a fresh checkout and the flag is inert. Where committedness does
-# matter — the upload, which stamps `.cargo_vcs_info.json` with the revision a
-# published tarball claims to come from — `publish-crates.yml`'s live
-# `cargo publish` carries no such flag.
+# `--allow-dirty` is here because committedness is not this gate's question,
+# and asking it anyway would remove the gate from the one place it earns its
+# time: `just ci` is what a developer runs BEFORE the commit, so without the
+# flag cargo stops on the first edited file and the packaging question never
+# gets asked locally at all. On a runner the tree is a fresh checkout and the
+# flag is inert. That the live upload carries no such flag is checked by
+# `the_upload_still_answers_to_git_though_the_gate_does_not`, not asserted
+# here.
 [group('gate')]
 [group('release')]
 package:
@@ -1766,12 +1731,12 @@ ci:
     #!/usr/bin/env bash
     set -uo pipefail
 
-    # Why this shape (no gate is weakened vs. the old sequential loop):
-    #   * The compile gates (msrv/clippy/build/test/prop/spec/doc/doc-public/
-    #     semver/coverage/udeps/package)
-    #     all share ONE cargo target dir, so they contend on its build lock and
-    #     CANNOT truly run in parallel — they stay sequential, ordered
-    #     cheap-to-expensive so a failure surfaces fast. `msrv` leads: inside the
+    # Why this shape (no gate is weakened vs. the old sequential loop). The two
+    # arrays below are the lists; this says why each lane holds what it holds.
+    #   * The compile gates all share ONE cargo target dir, so they contend on
+    #     its build lock and CANNOT truly run in parallel — they stay
+    #     sequential, ordered cheap-to-expensive so a failure surfaces fast.
+    #     `msrv` leads: inside the
     #     dev image it is a bare `cargo check`, so it is also the cheapest
     #     possible "does it still compile". `semver` follows the two doc gates
     #     because it is a third one: what it builds is rustdoc's JSON, here and
@@ -1785,10 +1750,9 @@ ci:
     #   * `check` is not a gate and is not run here: clippy + build both compile
     #     --all-targets, so a bare `cargo check` pass adds no coverage. ci.yml
     #     still runs it, as the fast precondition the gate matrix waits on —
-    #     scheduling, not a gate. The gates `lint` bundles
-    #     (fmt-check/typos/strict-code/comment-discipline/vale/zizmor/
-    #     actionlint) run once on their own instead of a second time inside
-    #     `lint`; only `clippy` is left to run from `lint`.
+    #     scheduling, not a gate. Everything `lint` bundles runs once on its
+    #     own here instead of a second time inside `lint`; only `clippy` is
+    #     left to run from `lint`.
     #   * fuzz-build compiles the fuzz crate, which is its own workspace with
     #     its own target dir — so it takes no lock the compile lane holds, but
     #     it does invoke rustc (and clang, for libFuzzer), so it stays in the
@@ -1832,9 +1796,8 @@ ci:
                    "$(date +%T)" "$1" "$2" "$3"; }
 
     # --- background lane: slow gates that take no cargo build lock ----------
-    # deny / shear / audit overlap the compile lane. Output is buffered to a
-    # log and only replayed on failure so the terminal stays readable.
-    # (shear is syn-based, so it takes no cargo build lock either.)
+    # These overlap the compile lane. Output is buffered to a log and only
+    # replayed on failure so the terminal stays readable.
     bg_steps=(deny shear audit)
 
     # --- foreground lane: instant text gates first (fail-fast in seconds),
@@ -1849,10 +1812,7 @@ ci:
     # --- manifest assert: these two lanes ARE the gate set -------------------
     # "`just ci` is a superset of CI" used to be a sentence, and a sentence is
     # a claim nothing evaluates — it was false for months (msrv and commitlint
-    # ran only in CI, prop only here). `[group('gate')]` is now the single
-    # declaration; `just gates` reads it, ci.yml builds its matrix from the same
-    # command, and the lanes above have to equal it or nothing runs. A gate
-    # added to the Justfile and forgotten here fails in the first second.
+    # ran only in CI, prop only here). This is the same claim as an assertion.
     manifest=$(just gates)
     declared=$(printf '%s\n' "${bg_steps[@]}" "${fg_steps[@]}" | sort)
     if [[ "$manifest" != "$declared" ]]; then
@@ -1894,7 +1854,7 @@ ci:
     done
 
     # --- reap background lane (wait so no container is orphaned on failure) --
-    banner "background gates (deny / shear / audit)"
+    banner "background gates (${bg_steps[*]})"
     for step in "${bg_steps[@]}"; do
         wait "${bg_pid[$step]}"
         read -r brc bdur < "$bg_dir/$step.meta"
@@ -1934,9 +1894,8 @@ setup:
     just doctor
     just test
 
-# One-screen snapshot of the local environment: images, volumes, the aozora
-# SHA pin ↔ Cargo.lock, and playground artefacts. Exit 1 = a missing
-# prerequisite a build would trip on.
+# One-screen snapshot of the local environment: images, volumes and playground
+# artefacts. Exit 1 = a missing prerequisite a build would trip on.
 [group('dev')]
 doctor:
     #!/usr/bin/env bash
@@ -1989,21 +1948,12 @@ doctor:
         fi
     done
 
-    # --- aozora SHA pin ↔ Cargo.lock --------------------------------------
-    pinned=$(grep -oE 'rev = "[0-9a-f]{40}"' Cargo.toml | head -1 | grep -oE '[0-9a-f]{40}' || true)
-    if [ -n "$pinned" ]; then
-        if grep -q "rev = \"$pinned\"" Cargo.lock 2>/dev/null \
-            || grep -q "#${pinned:0:7}" Cargo.lock 2>/dev/null; then
-            printf '%b aozora rev pin: %s (Cargo.lock agrees)\n' "$OK" "${pinned:0:12}…"
-        else
-            printf '%b aozora rev pin %s NOT reflected in Cargo.lock  →  cargo update -p aozora\n' \
-                "$ERR" "${pinned:0:12}…"
-            fail=1
-        fi
-    else
-        printf '%b aozora rev pin: not found in Cargo.toml\n' "$ERR"
-        fail=1
-    fi
+    # No aozora-pin check here. This recipe asks what a laptop is missing;
+    # whether the pins agree is `just verify-version-pins`, a gate, which asks
+    # it of the registry versions the manifests actually carry. The copy that
+    # used to live here still grepped for a `rev = "<40 hex>"` git pin ADR-0015
+    # retired, so it took the `else` branch on every tree and `just setup`
+    # aborted before it reached the tests.
 
     # --- Playground prerequisites ----------------------------------------
     if [ -f crates/aozora-flavored-markdown-wasm/pkg/aozora_flavored_markdown_wasm_bg.wasm ]; then
