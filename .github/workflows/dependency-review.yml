@@ -79,25 +79,15 @@ jobs:
           #   artefact anyway, because it is reached only from
           #   crates/aozora-flavored-markdown/fuzz, which is `publish = false`
           #   and outside the cargo workspace. That exclusion is also why
-          #   cargo-deny never sees this edge and only this action does.
-          #
-          #   This entry used to end "drop it once the fuzz crate moves to
-          #   libafl_libfuzzer, a drop-in replacement under MIT OR Apache-2.0"
-          #   — a removal condition that could never come due. libafl_libfuzzer
-          #   is a shim over this package, not a substitute for it: its
-          #   manifest carries `libfuzzer-sys = "0.4.7"` as a normal
-          #   dependency and its `src/lib.rs` is `pub use libfuzzer_sys::*;`,
-          #   so the swap leaves the NCSA declaration exactly where it is.
-          #   ADR-0025 measured that and three other costs and decided to stay;
-          #   read it before proposing the swap again (issue #197).
+          #   cargo-deny never sees this edge and only this action does. There
+          #   is no removal condition: ADR-0025 measured the one that used to
+          #   be written here and decided to stay.
           #
           # Each of the three cargo entries waives the check for the PACKAGE,
           # not for the licence it happens to declare today, so a relicence
-          # under one of them would pass unnoticed and the `drop this entry`
-          # sentences above would never come due. The `licences` job in
-          # `audit.yml` holds each one to the string it was written for, and
-          # fails nightly when crates.io stops agreeing. Adding a purl here
-          # without adding it there fails that job too.
+          # under one of them would pass unnoticed. `audit.yml`'s `licences`
+          # job holds each one to the string it was written for; adding a purl
+          # here without adding it there fails that job.
           allow-dependencies-licenses: >-
             pkg:githubactions/Swatinem/rust-cache,
             pkg:cargo/rustc-demangle,

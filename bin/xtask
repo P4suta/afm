@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# xtask — project automation (comment-discipline, new-adr, spec-refresh,
-# aozora-bump, gen-dist-assets). Always runs inside the dev container.
+# xtask — project automation. `bin/xtask --help` lists the sub-commands; the
+# clap `enum Command` in crates/xtask/src/main.rs is where they are declared.
+# Always runs inside the dev container.
 
 set -euo pipefail
 

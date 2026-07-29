@@ -1,19 +1,9 @@
 # cargo publish workflow for the aozora-flavored-markdown workspace.
 #
-# One command publishes the whole ladder. `cargo publish --workspace` reads the
-# dependency graph, uploads in topological order — each library before the
-# crates that depend on it — and waits for an upload to appear in the crates.io
-# index before uploading its dependents (cargo-publish(1), step 4), so no step
-# here sleeps or sequences anything by hand. Multi-package publish stabilised
-# in Cargo 1.89 (`-Zpackage-workspace`) and this workspace pins 1.96.0.
-# ADR-0015 rejected `--workspace` for not ordering first-publishes, on a
-# toolchain that already had it; the amended ADR records the dry-run that
-# reversed the finding.
-#
-# The set is a fact about the manifests rather than a list this file keeps in
-# step: cargo skips the `publish = false` members itself. Those are
-# aozora-flavored-markdown-wasm (ships via wasm-pack/npm), and
-# aozora-flavored-markdown-test-support / xtask (dev-only).
+# Why one command rather than a ladder, which crates go up and which do not,
+# and why the upload is manual: ADR-0015. Nothing about the set or the order
+# is restated here — cargo reads it out of the manifests and the dependency
+# graph on every run.
 #
 # ADR-0002 scope exception: this runs on the native runner toolchain rather
 # than the dev image (like the `msrv` CI job). Publishing is a release
@@ -33,28 +23,22 @@
 # How to run a real publish (steady state, no secret):
 #   gh workflow run publish-crates.yml -f dry_run=false   # then approve
 #
-# Register the trusted publisher once per crate: crates.io → the crate →
-# Settings → Trusted Publishing → GitHub, owner=P4suta,
-# repo=aozora-flavored-markdown, workflow=publish-crates.yml,
-# environment=release. Once all four carry one, delete the CARGO_TOKEN
-# secret.
+# BOOTSTRAP, IN THIS ORDER. The steady state above is not reachable yet, and
+# going from two rungs to four is why: `aozora-flavored-markdown` and its CLI
+# are on crates.io and can be given a trusted publisher today, but the two
+# EPUB crates are 404 and crates.io has nothing to attach one to until the
+# crate exists. One `cargo publish --workspace` carries one token, so that is
+# a fact about the whole ladder and not those two rungs alone.
 #
-# The bootstrap is not done yet, and going from two rungs to four is why:
-# `aozora-flavored-markdown` and its CLI are on crates.io (v0.4.1) and can be
-# configured today, but the two EPUB crates are 404 and crates.io has nothing
-# to attach a publisher to until a crate exists. One `cargo publish
-# --workspace` carries one token, so that is a fact about the whole ladder and
-# not those two rungs alone: the run that first uploads them goes through the
-# legacy token path (`-f use_oidc=false` with CARGO_TOKEN), and every run
-# after it can use OIDC.
-#
-# NOTE on dry-run coverage: the whole ladder is dry-runnable before any of it
-# exists on crates.io. Cargo packages each member into a temporary registry
-# under `target/package/` and resolves the next member against it, so a crate
-# whose dependency is not yet published still builds exactly as a consumer
-# will build it. Under `--dry-run` the "already exists on crates.io" check
-# that stops a real run is downgraded to a warning, which is what lets the
-# preflight below run on every dispatch.
+#   1. Dispatch once with `-f use_oidc=false`, which authenticates the whole
+#      run from the CARGO_TOKEN secret and is what first registers the EPUB
+#      pair.
+#   2. Register the trusted publisher for each of the four: crates.io → the
+#      crate → Settings → Trusted Publishing → GitHub, owner=P4suta,
+#      repo=aozora-flavored-markdown, workflow=publish-crates.yml,
+#      environment=release.
+#   3. Only once all four carry one, delete the CARGO_TOKEN secret. Deleting
+#      it before step 1 makes step 1 impossible.
 
 name: publish-crates
 
@@ -96,11 +80,6 @@ jobs:
   # with the PR gates — a tag is what gets published, and a tag is not required
   # to be a commit any PR ever ran.
   #
-  # `just package` used to be this job's own `cargo publish --workspace
-  # --dry-run --locked`, which made this file the only place the packaging
-  # check existed — and this file runs on dispatch. It is a `[group('gate')]`
-  # recipe now (DEV-224), so every pull request packages the ladder and this
-  # job calls the recipe rather than keeping a second copy of its command.
   package:
     runs-on: ubuntu-latest
     env:

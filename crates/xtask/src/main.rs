@@ -239,8 +239,8 @@ const RETIRED_REPO_PATHS: &[(&str, &str)] = &[(
 // Where a retired path is a record rather than drift. The changelog says what
 // was removed and a decision record says why; both are dated documents, and
 // rewriting them to keep a lint quiet would delete the only account of the
-// decision. It is why ADR-0024 amends ADR-0015's `comrak` source bullet by
-// reference instead of editing it.
+// decision. A superseded decision is amended by reference — its Context keeps
+// the world it was taken in, and its Decision says which ADR replaced it.
 const HISTORY_PATHS: &[&str] = &["CHANGELOG.md", "docs/adr"];
 
 // The file that defines `RETIRED_REPO_PATHS` necessarily spells every path it
@@ -484,7 +484,14 @@ fn comment_discipline(root: &Path) -> Result<()> {
 // `gate_wiring.rs` took its prose with it — the first deletion this ceiling
 // has ever been able to charge for, and the reason to widen it here rather
 // than file it.
-const MAX_DOC_LINES: u64 = 5_191;
+// Lowered by 4 more: `gate_wiring.rs`'s `PUBLICATION_ADR` block lost the two
+// `///` pairs that restated a constant's own value and a function's own name.
+// Lowered by 2 more: `vale_or_the_bridge_that_installs_it` lost the half of
+// its doc that described the Dockerfile assertion deleted from its body, the
+// version pin now being compiled rather than asserted to contain a substring.
+// Re-measured, not estimated — the slack a deletion buys is spent by lowering
+// this, or it gets spent by the next `///` nobody argued for.
+const MAX_DOC_LINES: u64 = 5_185;
 
 /// Backstop on doc lines as a share of source, in parts per 100 000, held at
 /// the sibling `aozora` crate's own ~16.5% rather than at today's measured

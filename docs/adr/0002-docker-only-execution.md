@@ -13,14 +13,20 @@ want the cost of environment setup to fall on the Docker image, not on each huma
 
 ## Decision
 
-Every development operation runs inside a container defined by `/Dockerfile`
-(stages: `dev`, `fuzz`, `ci`). The entry point is `/Justfile`; every target
-invokes `docker compose run …`. Host-level `cargo` and `bun` invocations are
-forbidden.
+Every development operation runs inside a container defined by `/Dockerfile`.
+The entry point is `/Justfile`: a recipe reaches its tool through the image,
+and CI runs the same recipes, so the CI environment is structurally identical
+to every developer's environment. Reaching for a host-level `cargo` or `bun`
+instead is what this forbids — a second way to run the same step is the drift
+this decision exists to remove.
 
-CI (`.github/workflows/ci.yml`) uses the same Justfile targets via
-`docker compose run --rm ci just <target>` — the CI environment is structurally
-identical to every developer's environment.
+**Scope exception: a check whose subject IS the host toolchain.** Where the
+question being asked is about something the image cannot hold — that the
+declared MSRV compiles on a clean install of it, that a commit range CI can see
+lints clean, that a release binary matches its runner's OS, that a publish
+reaches crates.io with only cargo and rustc — the step runs natively and says
+so at the point it runs. Wrapping those in the image would answer a different
+question. Everything else stays inside.
 
 ## Consequences
 
