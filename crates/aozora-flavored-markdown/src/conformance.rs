@@ -2,8 +2,8 @@
 // under `spec/` (converted from the upstream sources by `xtask spec-refresh`).
 //
 // comrak claims 100% CommonMark compatibility; this crate wraps it unmodified,
-// so 652/652 is the expectation. A drop means the wrapper — lexer pre-pass,
-// option defaults, the HTML splice — perturbed upstream behaviour.
+// so a whole-suite pass is the expectation. A drop means the wrapper — lexer
+// pre-pass, option defaults, the HTML splice — perturbed upstream behaviour.
 //
 // These runners are the executable half of the README's compatibility claim,
 // so what they render with is what that claim names and nothing adjacent:
@@ -21,21 +21,20 @@
 // `src/` instead of `tests/`: an integration test is a separate crate and
 // could only reach that switch if it were public.
 //
-// Both suites run WHOLE — 652 and 672 examples, every one of them asserted.
-// The GFM runner used to take the 24 examples carrying an extension tag and
-// skip two of those: 22 of 672, under a README sentence that said the suite
-// passed. The 648 it left out are the GFM spec's inherited CommonMark 0.29
-// body, and they are where the interesting question lives, because
-// `Options::gfm()` carries all four extensions at once — an inherited example
-// is the one place an extension can contradict the text it was inherited
-// from, and four of them do.
+// Both suites run WHOLE — every example in either fixture asserted. The GFM
+// runner used to take the 24 examples carrying an extension tag and skip two
+// of those: 22 of 672, under a README sentence that said the suite passed.
+// The 648 it left out are the GFM spec's inherited CommonMark 0.29 body, and
+// they are where the interesting question lives, because `Options::gfm()`
+// carries all four extensions at once — an inherited example is the one place
+// an extension can contradict the text it was inherited from, and some do.
 //
-// Fifteen of the 672 do not come back byte for byte. None is a defect and
-// none is skipped: `expected` below names every one of them, and names what
-// to compare it against instead. Two are the same HTML written differently,
-// so they are compared as XML; the other thirteen are the 0.29 fixture being
-// out of date, and each is pinned to the authority that supersedes it. A
-// change on either side of any of the fifteen still fails here.
+// The GFM examples that do not come back byte for byte are neither defects
+// nor skips: `expected` below names every one of them, and names what to
+// compare it against instead. Some are the same HTML written differently, so
+// they are compared as XML; the rest are the 0.29 fixture being out of date,
+// and each is pinned to the authority that supersedes it. A change on either
+// side of any of them still fails here.
 //
 // One `assert_eq!` per example, rather than a divergence collector: the
 // collector's own reporting is unreachable while the suite passes, and
@@ -53,15 +52,18 @@ use crate::{Options, render};
 
 const COMMONMARK_FIXTURE: &str = include_str!("../../../spec/commonmark-0.31.2.json");
 const GFM_FIXTURE: &str = include_str!("../../../spec/gfm-0.29-gfm.json");
-// The crates.io page for this crate, which states the figures this file
-// measures. Included rather than read at run time so the claim is a build
-// dependency of the thing that proves it, and reached with `../` rather than
-// `../../../`: it is inside this package, so
+// The crates.io page for this crate, and the ONLY document in this repository
+// that states the figures this file measures. Included rather than read at run
+// time so the claim is a build dependency of the thing that proves it, and
+// reached with `../` rather than `../../../`: it is inside this package, so
 // `every_file_a_published_source_includes_is_one_its_own_tarball_carries`
-// has nothing to excuse. The landing README and the `just spec` comment say
-// the same figures from outside the package, and
-// `every_document_that_states_a_conformance_figure_states_the_same_one` in
-// `crates/xtask/tests/gate_wiring.rs` holds those against this one.
+// has nothing to excuse.
+//
+// Three other documents used to restate these figures, held together by a
+// regex rule that matched the wording each sentence happened to use — so a
+// copy phrased any other way was compared against nothing. The copies are
+// gone instead: one document states a figure, every figure on it is formatted
+// from a live run below, and drift now needs a failing test, not a pattern.
 const CRATE_README: &str = include_str!("../README.md");
 
 // Every extension tag the GFM fixture carries. `disabled` labels the
@@ -77,10 +79,10 @@ const GFM_EXTENSION_TAGS: [&str; 5] = [
 
 // What one GFM 0.29 example's expected output is worth as an oracle.
 //
-// Everything `expected` below does not name is `Verbatim`, which is 657 of
-// the 672. The other three variants each carry what to check the example
-// against instead — an authority, never a permission to differ — so no entry
-// is satisfied by whatever this crate happens to emit today.
+// Everything `expected` below does not name is `Verbatim`. The other three
+// variants each carry what to check the example against instead — an
+// authority, never a permission to differ — so no entry is satisfied by
+// whatever this crate happens to emit today.
 #[derive(Debug, Clone, Copy)]
 enum Expectation {
     // The fixture's own output, byte for byte.
@@ -91,8 +93,8 @@ enum Expectation {
     // Superseded by CommonMark 0.31.2, whose fixture holds this same input
     // with the output this crate renders. Matched on the input rather than on
     // an example number, because the input is what makes two examples the
-    // same example and the number is what a spec refresh renumbers. All 652
-    // inputs over there are distinct, so the match is unambiguous — and the
+    // same example and the number is what a spec refresh renumbers. Every
+    // input over there is distinct, so the match is unambiguous — and the
     // runner asserts that rather than assuming it.
     CommonMark0312,
     // Superseded by GFM's own "Autolinks (extension)" chapter, which the
@@ -103,7 +105,7 @@ enum Expectation {
     Autolinked(&'static str),
 }
 
-// The allowlist. Fifteen entries, each with the reason it is here, and no
+// The allowlist. Every entry carries the reason it is here, and no
 // entry that is merely "comrak differs" — a divergence this file cannot
 // attribute to a named authority is a bug in the wrapper and has to fail.
 fn expected(example: u32) -> Expectation {
@@ -118,13 +120,13 @@ fn expected(example: u32) -> Expectation {
 
         // Emphasis nesting. CommonMark 0.30 rewrote the rule that had
         // flattened a doubled delimiter run into a single `<strong>`, and
-        // comrak implements 0.31.2. Each of these nine inputs is in the
+        // comrak implements 0.31.2. Each of these inputs is in the
         // 0.31.2 fixture verbatim, carrying the nested output this crate
         // produces — so `commonmark_0_31_2_full_pass` is already asserting
         // the same bytes from the other side, and the GFM fixture is simply
         // the older reading of the same input.
         //
-        // The nine, each with the input it is — one arm rather than nine
+        // Each with the input it is — one arm rather than that many
         // identical ones, which is also what `clippy::match_same_arms` asks
         // for:
         //   398 `__foo, __bar__, baz__`     436 `**foo **bar****`
@@ -134,7 +136,7 @@ fn expected(example: u32) -> Expectation {
         //                                   477 `_____foo_____`
         398 | 426 | 434..=436 | 473..=475 | 477 => Expectation::CommonMark0312,
 
-        // Bare URLs and e-mail addresses. These four sit in the GFM spec's
+        // Bare URLs and e-mail addresses. These sit in the GFM spec's
         // inherited "Autolinks" chapter, which says a URL outside `<…>` is
         // text — and are contradicted by the GFM spec's own "Autolinks
         // (extension)" chapter, which links it. GitHub links it too. The
@@ -168,7 +170,7 @@ fn expected(example: u32) -> Expectation {
     }
 }
 
-// The fifteen again, as (example, the input it is).
+// The allowlist again, as (example, the input it is).
 //
 // Every reason in `expected` is written about an input — "`____foo____`",
 // "a bare URL" — and every one of them is keyed on a number, which is the one
@@ -194,16 +196,16 @@ const ALLOWLISTED: [(u32, &str); 15] = [
     (620, "foo@bar.example.com\n"),
 ];
 
-// What the 672 came to, counted through `expected` rather than asserted from
-// memory. The READMEs state these four numbers in prose; the tests below read
-// them from here, so prose and measurement cannot drift apart the way the
-// sentence this file replaced did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// What the GFM suite came to, counted through `expected` rather than asserted
+// from memory. One field per figure the crate page states, and one per
+// `Expectation` arm, so the two stay the same list: a new arm is a new field,
+// and a new field is a claim the page test has to spell or stop compiling.
 struct Tally {
     total: usize,
     verbatim: usize,
     xml_equivalent: usize,
-    superseded: usize,
+    re_specified: usize,
+    autolinked: usize,
 }
 
 fn gfm_tally() -> Tally {
@@ -211,14 +213,16 @@ fn gfm_tally() -> Tally {
         total: 0,
         verbatim: 0,
         xml_equivalent: 0,
-        superseded: 0,
+        re_specified: 0,
+        autolinked: 0,
     };
     for ex in &load(GFM_FIXTURE) {
         tally.total += 1;
         match expected(ex.example) {
             Expectation::Verbatim => tally.verbatim += 1,
             Expectation::XmlEquivalent => tally.xml_equivalent += 1,
-            Expectation::CommonMark0312 | Expectation::Autolinked(_) => tally.superseded += 1,
+            Expectation::CommonMark0312 => tally.re_specified += 1,
+            Expectation::Autolinked(_) => tally.autolinked += 1,
         }
     }
     tally
@@ -378,7 +382,7 @@ fn commonmark_0_31_2_full_pass() {
 // would leave the interaction between them — the configuration the README
 // actually names — untested. Every example therefore renders under the whole
 // preset, tagged or not, which is the stronger claim of the two and the only
-// way the four autolink entries in `expected` are visible at all.
+// way the autolink entries in `expected` are visible at all.
 //
 // `tagfilter` is the one tag `gfm()` does not cover: the filter only bites
 // while raw HTML is passing through, which no public constructor can arrange,
@@ -473,14 +477,14 @@ fn gfm_0_29_full_pass() {
 }
 
 #[test]
-fn the_allowlist_is_the_fifteen_inputs_it_names_and_nothing_else() {
+fn the_allowlist_is_the_inputs_it_names_and_nothing_else() {
     // `expected` is the successor of a two-element const of example numbers
     // that the runner used to `continue` past, and it inherits that const's
     // weakness: it is a `match`, so it can be widened by one line, and a
     // widened one is invisible — every arm it grows makes the suite MORE
-    // green. Nothing else in the repository can see the size of the
-    // allowlist, which is the same shape as the skip it replaced: an
-    // exception whose only reader is the person adding to it.
+    // green. An exception whose only reader is the person adding to it is the
+    // same shape as the skip it replaced, so a widening has to show up here as
+    // a table entry with a reason, and on the crate page as a changed figure.
     let all = load(GFM_FIXTURE);
     let named: BTreeMap<u32, &str> = ALLOWLISTED.into_iter().collect();
     let listed: BTreeSet<u32> = all
@@ -514,18 +518,6 @@ fn the_allowlist_is_the_fifteen_inputs_it_names_and_nothing_else() {
         ALLOWLISTED.len(),
         "an allowlist entry names an example number the fixture does not hold, so its reason is \
          about nothing"
-    );
-
-    assert_eq!(
-        gfm_tally(),
-        Tally {
-            total: 672,
-            verbatim: 657,
-            xml_equivalent: 2,
-            superseded: 13,
-        },
-        "the suite is no longer the 657/2/13 of 672 that the READMEs, the `just spec` comment and \
-         the header of this file all state"
     );
 }
 
@@ -617,27 +609,29 @@ fn the_crate_page_states_the_figures_this_file_measures() {
     // So each figure below is FORMATTED from the measurement rather than
     // written down. Rewording the page is free; changing what it claims,
     // or changing what the suite measures without saying so, is not.
-    let tally = gfm_tally();
+    //
+    // Destructured, and every field spent: an unused binding is a warning and
+    // warnings are denied, so the list below cannot fall a figure behind the
+    // measurement the way it did while the page spelled three as words.
+    let Tally {
+        total,
+        verbatim,
+        xml_equivalent,
+        re_specified,
+        autolinked,
+    } = gfm_tally();
+    let superseded = re_specified + autolinked;
     let commonmark = load(COMMONMARK_FIXTURE).len();
     let page = unwrapped(CRATE_README);
     let claims = [
         format!("renders all {commonmark} CommonMark 0.31.2 spec examples"),
-        format!("all {commonmark} CommonMark 0.31.2 examples pass verbatim"),
-        format!("renders all {} GFM 0.29 spec examples", tally.total),
-        format!(
-            "{} of the {} come out verbatim",
-            tally.verbatim, tally.total
-        ),
-        format!(
-            "all {} GFM 0.29 examples run under `Options::gfm()`: {} verbatim",
-            tally.total, tally.verbatim
-        ),
-        format!("the last {} are pinned", tally.superseded),
-        format!(
-            "{} pinned to what supersedes the 0.29 fixture",
-            tally.superseded
-        ),
-        format!("the list of {}", tally.superseded),
+        format!("renders all {total} GFM 0.29 spec examples"),
+        format!("{verbatim} of the {total} come out verbatim"),
+        format!("{xml_equivalent} more do once"),
+        format!("the last {superseded} are pinned"),
+        format!("{re_specified} emphasis cases"),
+        format!("{autolinked} bare URLs"),
+        format!("the list of {superseded}"),
         "Nothing is skipped".to_owned(),
     ];
     for claim in &claims {
@@ -648,11 +642,6 @@ fn the_crate_page_states_the_figures_this_file_measures() {
              the same number, in whatever words"
         );
     }
-    assert_eq!(
-        tally.xml_equivalent, 2,
-        "the page spells this one figure as the word `two`, so it cannot be formatted in above. \
-         Rewrite both READMEs and this assertion together"
-    );
 }
 
 #[test]

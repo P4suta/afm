@@ -17,16 +17,16 @@ four extensions on at once, and `Options::default()` is the Aozora dialect
 — GFM + 青空文庫記法 + hardbreaks.
 
 The GFM figure is the whole suite rather than a corner of it. 657 of the 672
-come out verbatim; two more do once `<input type="checkbox">`'s attribute
+come out verbatim; 2 more do once `<input type="checkbox">`'s attribute
 order is normalised; the last 13 are pinned to the version that supersedes
-the 0.29 fixture — nine emphasis cases CommonMark 0.30 re-specified, four
-bare URLs that GFM's own autolink extension links. Nothing is skipped.
+the 0.29 fixture — 9 emphasis cases CommonMark 0.30 re-specified, 4 bare
+URLs that GFM's own autolink extension links. Nothing is skipped.
 
 `default()` is the one that is not a *strict* superset, and deliberately so:
 hardbreaks turns every source newline into a `<br>`, because verse and
 dialogue boundaries are load-bearing in 青空文庫 source. Take it off with
 `Options::default().with_hardbreaks(false)` and the Aozora extensions apply
-only where the input uses them, on all 3 972 spec documents swept. One
+only where the input uses them, across both spec corpora swept whole. One
 reservation is left, and it is about input no CommonMark document has: the
 five private-use codepoints this crate substitutes one per 青空文庫 construct
 are not source text, so a source that types `U+E001`–`U+E004` gets `U+FFFD`
@@ -120,10 +120,6 @@ and specified by
 
 ## Guarantees
 
-- **CommonMark / GFM compatibility, measured** — all 652 CommonMark 0.31.2
-  examples pass verbatim under `Options::commonmark()`, and all 672 GFM 0.29
-  examples run under `Options::gfm()`: 657 verbatim, two normalised as XML,
-  13 pinned to what supersedes the 0.29 fixture. Nothing is skipped.
 - **Aozora Bunko compatibility target** — every notation listed at
   <https://www.aozora.gr.jp/annotation/> parses, and no unconsumed `［＃`
   marker reaches the rendered HTML.

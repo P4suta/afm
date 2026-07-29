@@ -228,9 +228,9 @@ prop-seed SEED TARGET="property_*":
 invariants:
     {{_dev}} cargo nextest run --locked --workspace --lib -E 'test(invariant_unit_)'
 
-# Both spec suites whole: CommonMark 0.31.2 (652 cases, pass = 652/652) and
-# GFM 0.29 (672, of which 13 are pinned to the spec version that supersedes
-# the 0.29 fixture rather than skipped — `conformance::expected` is the list).
+# Both spec suites whole: CommonMark 0.31.2 and GFM 0.29, the latter with the
+# examples a later spec version supersedes pinned rather than skipped
+# (`conformance::expected` is the list; the counts are on the crate page).
 # A `#[cfg(test)] mod` of the library, not an integration test: the spec's
 # expected output needs raw-HTML passthrough, which has no public switch.
 [group('gate')]
