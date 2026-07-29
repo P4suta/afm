@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use aozora::{ContainerKind, NodeKind, Snapshot};
-use comrak::nodes::{AstNode, NodeValue};
+use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::{fragment, verbatim_regions};
@@ -114,21 +114,20 @@ pub(crate) const fn block_sentinel_of(kind: NodeKind) -> Option<BlockSentinelKin
 /// Whether an inline construct is consumed and dropped rather than
 /// rendered. Both walkers ask here, so neither can decide it differently.
 ///
-/// * a directive or an indent marker inside a heading renders to a wrapper
-///   Tier C bars from a heading body.
+/// * a directive or a line-positioning marker inside a heading renders to a
+///   wrapper Tier C bars from a heading body. A heading is one line, so none
+///   of those markers has a line to move independently of the heading itself.
 /// * a heading hint reached *inline* has nothing to promote (the paragraph
 ///   case handles promotion), and rendering it would put a marker into the
 ///   very heading it was written to name.
 pub(crate) const fn inline_is_dropped(kind: NodeKind, in_heading: bool) -> bool {
     match kind {
         NodeKind::HeadingHint => true,
-        // `Indent` joins `Directive` here because `aozora-md-indent` is on
-        // Tier C's forbidden list for the same reason the directive wrapper
-        // is — and a heading is one line, so a marker that indents the line
-        // it sits on has nothing there to move. Reachable on `main` today
-        // through any ATX heading, no rule row involved; the row only added
-        // the setext spellings, which is what put it in front of a test.
-        NodeKind::Directive | NodeKind::Indent => in_heading,
+        NodeKind::Directive
+        | NodeKind::Indent
+        | NodeKind::AlignEnd
+        | NodeKind::Center
+        | NodeKind::LineGothic => in_heading,
         _ => false,
     }
 }
@@ -233,6 +232,7 @@ pub(crate) struct Constructs {
     entries: Vec<Construct>,
     diagnostics: Vec<Diagnostic>,
     runs: Runs,
+    coordinates: Option<CoordinateMap>,
 }
 
 impl Constructs {
@@ -254,8 +254,9 @@ impl Constructs {
         // parser reports still addresses the caller's own text
         // (`crate::verbatim_regions`).
         let hidden = verbatim_regions::hide_rule_rows(source);
-        let hiding = hidden.is_some();
-        let read = hidden.as_deref().unwrap_or(source);
+        let read = hidden
+            .as_ref()
+            .map_or(source, verbatim_regions::HiddenRuleRows::text);
         let Ok(document) = aozora::parse(read.to_owned()) else {
             // Beyond the parser's span budget. The entry points guard on
             // that first, so this is unreachable in practice and degrades
@@ -273,7 +274,12 @@ impl Constructs {
         // the ranges the parser reported address it and there is one
         // coordinate space for the whole render.
         if snapshot.normalized_source() == read {
-            return Self::from_read(&Reads::of(read, hiding), &snapshot, None, diagnostics);
+            return Self::from_read(
+                &Reads::of(read, hidden.as_ref()),
+                &snapshot,
+                None,
+                diagnostics,
+            );
         }
 
         // Otherwise comrak has to see the canonical text — that is what the
@@ -286,7 +292,7 @@ impl Constructs {
         let canonical = canonical.snapshot();
         let published = nodes_of(&snapshot);
         Self::from_read(
-            &Reads::of(canonical.source(), hiding),
+            &Reads::of(canonical.source(), hidden.as_ref()),
             &canonical,
             Some(&published),
             diagnostics,
@@ -300,6 +306,7 @@ impl Constructs {
             entries: Vec::new(),
             diagnostics: Vec::new(),
             runs: Runs::default(),
+            coordinates: None,
         }
     }
 
@@ -312,18 +319,32 @@ impl Constructs {
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         let runs = Runs::default();
+        let coordinates_are_original = published.is_none();
         let nodes = pair_reads(&nodes_of(snapshot), published);
         let nodes = coalesce(texts.read, &nodes, snapshot, &runs);
-        Self::tile(&texts.emit, &nodes, diagnostics, runs)
+        Self::tile(
+            &texts.emit,
+            &nodes,
+            diagnostics,
+            runs,
+            coordinates_are_original,
+        )
     }
 
     /// A range that does not address `text` — out of bounds, out of order,
     /// or landing mid-codepoint — drops its construct from *both* the tiling
     /// and the table, so the sentinel stream and the table stay in step; the
     /// render reports how many were dropped.
-    fn tile(text: &str, nodes: &[Node], mut diagnostics: Vec<Diagnostic>, runs: Runs) -> Self {
+    fn tile(
+        text: &str,
+        nodes: &[Node],
+        mut diagnostics: Vec<Diagnostic>,
+        runs: Runs,
+        coordinates_are_original: bool,
+    ) -> Self {
         let mut tiled = String::with_capacity(text.len());
         let mut entries = Vec::with_capacity(nodes.len());
+        let mut coordinate_segments = Vec::with_capacity(nodes.len().saturating_mul(2) + 1);
         let mut cursor = 0usize;
         let mut lost = 0usize;
         for node in nodes {
@@ -337,8 +358,18 @@ impl Constructs {
                 lost += 1;
                 continue;
             };
+            let gap_start = tiled.len();
             tiled.push_str(gap);
+            coordinate_segments.push(CoordinateSegment::exact(
+                gap_start..tiled.len(),
+                cursor..start,
+            ));
+            let sentinel_start = tiled.len();
             push_sentinel(&mut tiled, node.kind);
+            coordinate_segments.push(CoordinateSegment::collapsed(
+                sentinel_start..tiled.len(),
+                start..end,
+            ));
             cursor = end;
             entries.push(Construct {
                 kind: node.kind,
@@ -347,16 +378,24 @@ impl Constructs {
                 literal: literal.to_owned(),
             });
         }
+        let tail_start = tiled.len();
         tiled.push_str(text.get(cursor..).unwrap_or_default());
+        coordinate_segments.push(CoordinateSegment::exact(
+            tail_start..tiled.len(),
+            cursor..text.len(),
+        ));
         if lost > 0 {
             diagnostics.push(Diagnostic::constructs_unresolved(lost));
         }
+        let coordinates = coordinates_are_original
+            .then(|| CoordinateMap::new(text.to_owned(), tiled.clone(), coordinate_segments));
         Self {
             text: tiled,
             tiled: text.to_owned(),
             entries,
             diagnostics,
             runs,
+            coordinates,
         }
     }
 
@@ -399,6 +438,132 @@ impl Constructs {
             idx: idx.min(self.entries.len()),
         }
     }
+
+    /// Rebinds comrak's positions from the sentinel-bearing text to the
+    /// caller's source before any public projection or source-line anchor
+    /// reads them.
+    ///
+    /// When the sibling parser normalised the source, byte identity was
+    /// already lost and construct spans are withheld for the same reason;
+    /// those rare documents keep comrak's coordinates. On the ordinary path
+    /// every copied run maps exactly and every sentinel maps to the notation
+    /// it replaced.
+    pub(crate) fn remap_source_positions<'a>(&self, root: &'a AstNode<'a>) {
+        let Some(coordinates) = &self.coordinates else {
+            return;
+        };
+        for node in root.descendants() {
+            let sourcepos = node.data.borrow().sourcepos;
+            if let Some(mapped) = coordinates.map_sourcepos(sourcepos) {
+                node.data.borrow_mut().sourcepos = mapped;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CoordinateMap {
+    source: String,
+    generated: String,
+    source_line_starts: Vec<usize>,
+    generated_line_starts: Vec<usize>,
+    segments: Vec<CoordinateSegment>,
+}
+
+impl CoordinateMap {
+    fn new(source: String, generated: String, segments: Vec<CoordinateSegment>) -> Self {
+        Self {
+            source_line_starts: line_starts(&source),
+            generated_line_starts: line_starts(&generated),
+            source,
+            generated,
+            segments,
+        }
+    }
+
+    fn map_sourcepos(&self, sourcepos: Sourcepos) -> Option<Sourcepos> {
+        Some(Sourcepos {
+            start: self.map_line_column(sourcepos.start)?,
+            end: self.map_line_column(sourcepos.end)?,
+        })
+    }
+
+    fn map_line_column(&self, position: LineColumn) -> Option<LineColumn> {
+        let generated =
+            byte_at_line_column(&self.generated, &self.generated_line_starts, position)?;
+        let source = self.map_byte(generated)?;
+        line_column_at_byte(&self.source, &self.source_line_starts, source)
+    }
+
+    fn map_byte(&self, generated: usize) -> Option<usize> {
+        for segment in &self.segments {
+            if segment.generated.start <= generated && generated < segment.generated.end {
+                return Some(if segment.exact {
+                    segment.source.start + (generated - segment.generated.start)
+                } else {
+                    segment.source.start
+                });
+            }
+        }
+        (generated == self.generated.len()).then_some(self.source.len())
+    }
+}
+
+#[derive(Debug)]
+struct CoordinateSegment {
+    generated: core::ops::Range<usize>,
+    source: core::ops::Range<usize>,
+    exact: bool,
+}
+
+impl CoordinateSegment {
+    const fn exact(generated: core::ops::Range<usize>, source: core::ops::Range<usize>) -> Self {
+        Self {
+            generated,
+            source,
+            exact: true,
+        }
+    }
+
+    const fn collapsed(
+        generated: core::ops::Range<usize>,
+        source: core::ops::Range<usize>,
+    ) -> Self {
+        Self {
+            generated,
+            source,
+            exact: false,
+        }
+    }
+}
+
+fn line_starts(source: &str) -> Vec<usize> {
+    core::iter::once(0)
+        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .collect()
+}
+
+fn byte_at_line_column(source: &str, starts: &[usize], position: LineColumn) -> Option<usize> {
+    let start = *starts.get(position.line.checked_sub(1)?)?;
+    if position.column == 0 {
+        return Some(start);
+    }
+    let byte = start.checked_add(position.column.saturating_sub(1))?;
+    (byte <= source.len()).then_some(byte)
+}
+
+fn line_column_at_byte(source: &str, starts: &[usize], byte: usize) -> Option<LineColumn> {
+    if byte > source.len() {
+        return None;
+    }
+    let line_index = starts
+        .partition_point(|&start| start <= byte)
+        .checked_sub(1)?;
+    let line_start = starts[line_index];
+    Some(LineColumn {
+        line: line_index + 1,
+        column: byte - line_start + 1,
+    })
 }
 
 // One text in two readings: `read` is what the parser was handed and what a
@@ -414,12 +579,8 @@ struct Reads<'a> {
 impl<'a> Reads<'a> {
     // Borrowed where the read hid nothing, so a document without a rule row
     // pays nothing for the protection.
-    fn of(read: &'a str, hiding: bool) -> Self {
-        let emit = if hiding {
-            Cow::Owned(verbatim_regions::reveal_rule_rows(read))
-        } else {
-            Cow::Borrowed(read)
-        };
+    fn of(read: &'a str, hidden: Option<&verbatim_regions::HiddenRuleRows>) -> Self {
+        let emit = hidden.map_or_else(|| Cow::Borrowed(read), |rows| Cow::Owned(rows.reveal(read)));
         Self { read, emit }
     }
 }
@@ -773,6 +934,17 @@ impl ConstructHit<'_> {
     /// nothing was rendered, so nothing was opened or closed either.
     pub(crate) fn html(&self) -> Option<String> {
         self.table.fragment_of(self.idx)
+    }
+
+    /// The fragment as it may appear in a Markdown heading.
+    ///
+    /// Most inline notation is unchanged. A ruby whose reading contains a
+    /// directive is the exception: the directive wrapper would contaminate
+    /// the heading even though the ruby itself is allowed there. In that
+    /// shape the parent text survives and the reading is discarded.
+    pub(crate) fn heading_html(&self) -> Option<String> {
+        self.html()
+            .map(|html| fragment::for_markdown_heading(&html).into_owned())
     }
 
     /// `None` when the marker renders to nothing, which opens nothing.
@@ -1422,7 +1594,7 @@ mod tests {
             (vec![node(1, 3)], "mid-codepoint"),
             (vec![node(3, 6), node(0, 3)], "out of order"),
         ] {
-            let table = Constructs::tile("前後", &nodes, Vec::new(), Runs::default());
+            let table = Constructs::tile("前後", &nodes, Vec::new(), Runs::default(), true);
             assert!(
                 table.entries.len() < nodes.len(),
                 "{why} must drop a construct: {table:?}"
@@ -1436,7 +1608,7 @@ mod tests {
             );
         }
         // A range that fits keeps its construct and reports nothing.
-        let table = Constructs::tile("前後", &[node(0, 3)], Vec::new(), Runs::default());
+        let table = Constructs::tile("前後", &[node(0, 3)], Vec::new(), Runs::default(), true);
         assert_eq!(table.entries.len(), 1);
         assert_eq!(table.text(), "\u{E001}後");
         assert!(table.diagnostics().is_empty());

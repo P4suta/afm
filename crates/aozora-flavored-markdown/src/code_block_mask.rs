@@ -44,9 +44,21 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
     for line in source.split_inclusive('\n') {
         match phase {
             Phase::Outside => {
-                out.push_str(line);
                 if let Some(fence) = parse_fence_open(line) {
+                    // The info string is as literal as the body: comrak
+                    // carries its first word into `class="language-…"`.
+                    // Mask it on the opening line before the sibling lexer
+                    // can replace notation there with an inline sentinel.
+                    out.push_str(&line[..fence.info_start]);
+                    mask_triggers(
+                        &line[fence.info_start..],
+                        &mut out,
+                        &mut originals,
+                        &mut masked_anything,
+                    );
                     phase = Phase::InFence(fence);
+                } else {
+                    out.push_str(line);
                 }
             }
             Phase::InFence(open) => {
@@ -54,15 +66,7 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
                     out.push_str(line);
                     phase = Phase::Outside;
                 } else {
-                    for ch in line.chars() {
-                        if AOZORA_TRIGGERS.contains(&ch) {
-                            originals.push(ch);
-                            out.push(MASK_CHAR);
-                            masked_anything = true;
-                        } else {
-                            out.push(ch);
-                        }
-                    }
+                    mask_triggers(line, &mut out, &mut originals, &mut masked_anything);
                 }
             }
         }
@@ -72,6 +76,23 @@ pub(crate) fn mask_code_block_triggers(source: &str) -> (Cow<'_, str>, Vec<char>
         (Cow::Owned(out), originals)
     } else {
         (Cow::Borrowed(source), Vec::new())
+    }
+}
+
+fn mask_triggers(
+    text: &str,
+    out: &mut String,
+    originals: &mut Vec<char>,
+    masked_anything: &mut bool,
+) {
+    for ch in text.chars() {
+        if AOZORA_TRIGGERS.contains(&ch) {
+            originals.push(ch);
+            out.push(MASK_CHAR);
+            *masked_anything = true;
+        } else {
+            out.push(ch);
+        }
     }
 }
 
@@ -114,11 +135,15 @@ struct FenceOpen {
     /// Backtick or tilde, as chosen on the open line.
     marker: u8,
     width: usize,
+    /// Byte just past the opening run; everything after it is the info
+    /// string and is masked like the fence body.
+    info_start: usize,
 }
 
 /// CommonMark allows up to 3 leading spaces before the fence run.
 fn parse_fence_open(line: &str) -> Option<FenceOpen> {
     let stripped = trim_leading_indent(line, 3);
+    let indent = line.len() - stripped.len();
     let bytes = stripped.as_bytes();
     let &first = bytes.first()?;
     if first != b'`' && first != b'~' {
@@ -128,6 +153,7 @@ fn parse_fence_open(line: &str) -> Option<FenceOpen> {
     (width >= 3).then_some(FenceOpen {
         marker: first,
         width,
+        info_start: indent + width,
     })
 }
 
@@ -191,6 +217,26 @@ mod tests {
         let (out, originals) = mask_owned(src);
         assert!(!out.contains('［'));
         assert_eq!(originals, vec!['［', '］']);
+    }
+
+    #[test]
+    fn backtick_fence_info_string_is_masked() {
+        let src = "```漢字《かんじ》\nx\n```\n";
+        let (out, originals) = mask_owned(src);
+        assert_eq!(originals, vec!['《', '》']);
+        assert_eq!(unmask(&out, &originals), src);
+        assert!(
+            !out[..out.find('\n').unwrap_or(out.len())].contains(['《', '》']),
+            "an info-string trigger reached the lexer: {out:?}"
+        );
+    }
+
+    #[test]
+    fn tilde_fence_info_string_is_masked() {
+        let src = "  ~~~｜漢字《かんじ》\nx\n  ~~~\n";
+        let (out, originals) = mask_owned(src);
+        assert_eq!(originals, vec!['｜', '《', '》']);
+        assert_eq!(unmask(&out, &originals), src);
     }
 
     #[test]

@@ -281,49 +281,26 @@ fn a_rule_row_renders_in_the_block_that_owns_it() {
 }
 
 #[test]
-fn a_source_that_carries_the_substitution_gets_no_rule_row_protection() {
-    // THE SURVIVING DEFECT of the fix above, stated where it can be measured.
-    //
-    // `verbatim_regions::hide_rule_rows` substitutes one byte for one so the
-    // parser's offsets keep addressing the caller's own text, and the bytes it
-    // substitutes are U+0001..U+0003. A source that already carries one of the
-    // three would make the reveal claim a byte the author wrote, so the
-    // protection stands down for the whole document and the rule row goes back
-    // to leaving the block CommonMark gave it to. Same shape and same reason as
-    // `code_block_mask` standing down on a source-typed U+E000; unlike that
-    // one, this one is not a documented contract at the public surface, because
-    // a C0 control is not a codepoint this crate reserves — it is ordinary (if
-    // strange) CommonMark text.
-    //
-    // Asserted as an inequality, in the idiom `serialize_commonmark_identity`
-    // uses for the doubled BOM: a defect named by a green test is a defect that
-    // cannot be rediscovered as a surprise.
+fn author_control_bytes_do_not_disable_or_get_claimed_by_rule_row_protection() {
+    // The one-byte substitutions are tracked by range out-of-band. The reveal
+    // consequently restores only bytes the masker wrote, never an identical
+    // byte the author supplied elsewhere in the document.
     let dialect = strict_dialect();
     let gfm = Options::gfm();
     for hidden in ['\u{1}', '\u{2}', '\u{3}'] {
         let src = format!("{hidden}\nFoo\n----------\n");
-        assert_ne!(
+        assert_eq!(
             render(&src, &dialect).html,
             render(&src, &gfm).html,
-            "U+{:04X} in the source no longer switches the protection off — if the mechanism \
-             stopped needing to stand down, delete this test rather than weaken it",
+            "U+{:04X} in author text disabled the unrelated rule-row registry",
             hidden as u32
         );
         assert_eq!(
             render(&src, &dialect).html,
-            format!("<p>{hidden}\nFoo</p>\n<hr />\n"),
-            "and what it costs is exactly the pre-fix reading of the row"
+            format!("<h2>{hidden}\nFoo</h2>\n"),
+            "the author byte must survive while the long row remains CommonMark's underline"
         );
     }
-    // A neighbouring control character is not part of the substitution, so it
-    // costs nothing: the bail-out is keyed to the three bytes the reveal would
-    // claim rather than to C0 in general.
-    let src = "\u{4}\nFoo\n----------\n";
-    assert_eq!(
-        render(src, &dialect).html,
-        render(src, &gfm).html,
-        "the carve-out widened past the three bytes it is about"
-    );
 }
 
 #[test]

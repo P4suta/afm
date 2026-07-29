@@ -234,7 +234,11 @@ impl<'a> AstSplicer<'a, '_> {
                     // two kinds that are not, and the IR walker asks it
                     // the same question.
                     && !inline_is_dropped(hit.kind, self.in_heading_depth > 0)
-                    && let Some(html) = hit.html()
+                    && let Some(html) = if self.in_heading_depth > 0 {
+                        hit.heading_html()
+                    } else {
+                        hit.html()
+                    }
                 {
                     segments.push(self.new_raw_node(html));
                 }

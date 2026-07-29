@@ -3,7 +3,8 @@
 
 use aozora_flavored_markdown::ir::Block;
 use aozora_flavored_markdown::{
-    Diagnostic, Options, RenderedBlock, RenderedBlocks, render, render_blocks, sentinels,
+    Diagnostic, Options, RenderedBlock, RenderedBlocks, render, render_blocks, render_to_ir,
+    sentinels,
 };
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 
@@ -49,6 +50,34 @@ fn block_source_lines_are_one_based() {
     assert_eq!(blocks[0].source_line, 1);
     assert_eq!(blocks[1].source_line, 3);
     assert_eq!(blocks[2].source_line, 5);
+}
+
+#[test]
+fn block_notation_does_not_shift_following_source_coordinates() {
+    let src = "一行目\n\n［＃改ページ］\n\n五行目\n";
+    let (blocks, _) = render_blocks_checked(src, &Options::default());
+    let last = blocks.last().expect("the final paragraph is streamed");
+    assert_eq!(last.source_line, 5);
+    let Some(Block::Paragraph {
+        source_line: Some(line),
+        range: Some(range),
+        ..
+    }) = last.ir.first()
+    else {
+        panic!("the final streamed block must be a ranged paragraph: {last:?}");
+    };
+    assert_eq!((*line, range.start.line), (5, 5));
+
+    let document = render_to_ir(src, &Options::default());
+    let Some(Block::Paragraph {
+        source_line: Some(line),
+        range: Some(range),
+        ..
+    }) = document.ir.blocks.last()
+    else {
+        panic!("the final document block must be a ranged paragraph");
+    };
+    assert_eq!((*line, range.start.line), (5, 5));
 }
 
 #[test]

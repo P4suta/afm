@@ -365,8 +365,9 @@ pub fn check_no_sentinel_leak(src: &str, html: &str) -> Result<(), Violation> {
     Ok(())
 }
 
-/// Tier C — `<h1>`–`<h6>` bodies carry no indent marker or raw-directive
-/// wrapper. Other Aozora markup (bouten, gaiji, tcy, kaeriten) is fine.
+/// Tier C — `<h1>`–`<h6>` bodies carry no line-positioning marker or
+/// raw-directive wrapper. Other Aozora markup (ruby, bouten, gaiji, tcy,
+/// kaeriten) is fine.
 ///
 /// **A heading the parser rendered whole is exempt.**
 /// `［＃中見出し］…［＃中見出し終わり］` arrives as one fragment whose body is
@@ -384,6 +385,9 @@ pub fn check_heading_integrity(html: &str) -> Result<(), Violation> {
         "aozora-md-indent",
         "aozora-md-container-indent",
         "aozora-md-directive",
+        "aozora-md-align-end",
+        "aozora-md-center",
+        "aozora-md-line-goshikku",
     ];
     for level in 1u8..=6 {
         let open_marker = format!("<h{level}");

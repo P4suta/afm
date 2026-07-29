@@ -553,6 +553,7 @@ where
 
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, constructs.text(), &comrak_options);
+    constructs.remap_source_positions(root);
 
     // Both walkers cursor over the same construct table, each with its own
     // cursor, so they stay in lockstep without serial coupling.
@@ -670,6 +671,7 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
         builder.constructs().text(),
         &options.comrak(),
     );
+    builder.constructs().remap_source_positions(root);
     // IR projection runs before AST mutation so it walks the
     // sentinel-bearing Text nodes; AST splicing afterwards rewrites
     // the same nodes for `comrak::format_html` consumption. A single
@@ -679,7 +681,7 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     // Aozora projection against the table.
     let mut blocks_ir: Vec<Vec<ir::Block>> = root
         .children()
-        .map(|child| builder.walk_block(child))
+        .filter_map(|child| builder.walk_block(child))
         .collect();
     ast_splice::splice_into_ast(root, &comrak_arena, builder.constructs());
     // Read while the builder still owns the table.

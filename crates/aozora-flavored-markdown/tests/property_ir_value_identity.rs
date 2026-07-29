@@ -200,11 +200,6 @@ fn assert_the_streaming_path_agrees(src: &str) {
     );
 }
 
-/// `［＃ここで字下げ終わり］`, `［＃ここで罫囲み終わり］` and their kin.
-fn carries_a_container_close(src: &str) -> bool {
-    src.contains("終わり］")
-}
-
 /// Every span and range the IR carries, held to what its type promises.
 fn assert_coordinates_address_the_source(src: &str) {
     let coordinates = coordinates_of(&serialised(src));
@@ -224,6 +219,15 @@ fn assert_coordinates_address_the_source(src: &str) {
         assert!(
             range.start <= range.end,
             "range {range:?} ends before it starts: src={src:?}"
+        );
+        let line_count = src
+            .bytes()
+            .filter(|&byte| matches!(byte, b'\n' | b'\r'))
+            .count()
+            .saturating_add(1);
+        assert!(
+            range.start.line as usize <= line_count && range.end.line as usize <= line_count,
+            "range {range:?} names a line outside its source ({line_count} lines): src={src:?}"
         );
     }
 }
@@ -272,21 +276,10 @@ proptest! {
     /// difference is the per-block walker's own — which is exactly the walker
     /// that carries state (an open-container stack, a cursor) across blocks.
     ///
-    /// **Carved out**: a source carrying a container *close* marker. That is
-    /// not a design decision, it is a live defect this property found on its
-    /// first run — see
-    /// [`an_orphan_container_close_must_not_cost_the_next_block_its_ir`].
-    /// The filter is the broad form (any close marker, matched or not)
-    /// because deciding whether a particular one is orphaned means redoing
-    /// the parser's own pairing; the matched shapes are held to the full
-    /// property by
-    /// [`the_streaming_path_projects_the_document_path_s_ir_for_container_shapes`]
-    /// instead.
     #[test]
     fn the_streaming_path_projects_the_document_path_s_ir(
         src in prop_oneof![aozora_fragment(12), pathological_aozora(6), commonmark_adversarial()]
     ) {
-        prop_assume!(!carries_a_container_close(&src));
         assert_the_streaming_path_agrees(&src);
     }
 
@@ -365,18 +358,10 @@ fn the_streaming_path_projects_the_document_path_s_ir_for_container_shapes() {
     }
 }
 
-/// The defect the property above had to carve out, pinned as the assertion
-/// that *should* hold. A `［＃…終わり］` with no open is dropped by the parser,
-/// and the block that follows it comes back from `render_blocks` with
-/// its `html` intact and its `ir` empty — one paragraph of structure lost, on
-/// the path the editor bridge streams. `render_to_ir` keeps it, so the two
-/// public renders of one document disagree.
-///
-/// Ignored rather than deleted: it is the specification, and the day the
-/// walker stops losing the block it goes green and the `prop_assume!` above
-/// comes out with it.
+/// A `［＃…終わり］` with no open contributes no block of its own. Omitting
+/// that empty projection is what keeps the following HTML child zipped to
+/// its own IR rather than to the orphan's slot.
 #[test]
-#[ignore = "known defect: an orphan container close costs the next block its IR on the streaming path"]
 fn an_orphan_container_close_must_not_cost_the_next_block_its_ir() {
     for src in [
         "一\n\n［＃ここで字下げ終わり］\n\n二\n",

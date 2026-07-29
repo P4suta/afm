@@ -101,14 +101,14 @@ impl StreamingIrBuilder {
     }
 
     /// Walk a single comrak block, advancing the shared cursor.
-    pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Vec<Block> {
+    pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Option<Vec<Block>> {
         let cursor = self.constructs.cursor_at(self.consumed);
         let mut walker = IrWalker::new(cursor, mem::take(&mut self.open));
         walker.walk_top(node);
-        let (blocks, cursor, open) = walker.into_parts();
+        let (blocks, cursor, open, retain_top_level_block) = walker.into_parts();
         self.consumed = cursor.index();
         self.open = open;
-        blocks
+        retain_top_level_block.then_some(blocks)
     }
 
     /// End-of-document drain, matching what the HTML splicer appends in the
@@ -142,6 +142,11 @@ struct IrWalker<'t> {
     /// rendered HTML does not have.
     in_heading: u32,
     depth: usize,
+    /// False only for a block sentinel the HTML splicer detaches without a
+    /// replacement (most notably an orphan container close). The streaming
+    /// driver must omit the matching IR slot or every later block is zipped
+    /// against the previous slot.
+    retain_top_level_block: bool,
 }
 
 /// comrak can emit arbitrarily deep trees from a small input (nested
@@ -161,6 +166,7 @@ impl<'t> IrWalker<'t> {
             open,
             in_heading: 0,
             depth: 0,
+            retain_top_level_block: true,
         }
     }
 
@@ -173,8 +179,13 @@ impl<'t> IrWalker<'t> {
 
     /// Streaming exit: hands back the state [`StreamingIrBuilder`] threads
     /// into the next per-block walk.
-    fn into_parts(self) -> (Vec<Block>, ConstructCursor<'t>, Vec<String>) {
-        (self.top, self.cursor, self.open)
+    fn into_parts(self) -> (Vec<Block>, ConstructCursor<'t>, Vec<String>, bool) {
+        (
+            self.top,
+            self.cursor,
+            self.open,
+            self.retain_top_level_block,
+        )
     }
 
     fn walk_root<'a>(&mut self, root: &'a AstNode<'a>) {
@@ -224,23 +235,48 @@ impl<'t> IrWalker<'t> {
         kind: BlockSentinelKind,
         source_line: Option<u32>,
     ) -> Option<Block> {
-        let hit = self.cursor.next()?;
-        let html = match (kind, block_sentinel_of(hit.kind)?) {
-            (BlockSentinelKind::Leaf, BlockSentinelKind::Leaf) => hit.html()?,
+        let Some(hit) = self.cursor.next() else {
+            self.retain_top_level_block = false;
+            return None;
+        };
+        let Some(actual_kind) = block_sentinel_of(hit.kind) else {
+            self.retain_top_level_block = false;
+            return None;
+        };
+        let html = match (kind, actual_kind) {
+            (BlockSentinelKind::Leaf, BlockSentinelKind::Leaf) => {
+                let Some(html) = hit.html() else {
+                    self.retain_top_level_block = false;
+                    return None;
+                };
+                html
+            }
             (BlockSentinelKind::Open, BlockSentinelKind::Open) => {
                 // A marker that renders to nothing opens nothing — the
                 // mirror of the splicer's `block_html`, so the two drains
                 // owe the document the same number of closes.
-                let (open, close) = hit.container_halves()?;
+                let Some((open, close)) = hit.container_halves() else {
+                    self.retain_top_level_block = false;
+                    return None;
+                };
                 self.open.push(close);
                 open
             }
             // The close the matching open carried. An orphan close (no
             // matching open) emits nothing, in lockstep with the HTML
             // splicer's guard against unbalanced close tags.
-            (BlockSentinelKind::Close, BlockSentinelKind::Close) => self.open.pop()?,
+            (BlockSentinelKind::Close, BlockSentinelKind::Close) => {
+                let Some(close) = self.open.pop() else {
+                    self.retain_top_level_block = false;
+                    return None;
+                };
+                close
+            }
             // Table/AST drift: emit nothing.
-            _ => return None,
+            _ => {
+                self.retain_top_level_block = false;
+                return None;
+            }
         };
         Some(Block::Aozora {
             kind: hit.kind.as_json_tag().to_owned(),
@@ -600,7 +636,11 @@ impl<'t> IrWalker<'t> {
             if inline_is_dropped(hit.kind, self.in_heading > 0) {
                 continue;
             }
-            let Some(html) = hit.html() else {
+            let Some(html) = (if self.in_heading > 0 {
+                hit.heading_html()
+            } else {
+                hit.html()
+            }) else {
                 continue;
             };
             out.push(Inline::Aozora {
@@ -795,7 +835,10 @@ mod tests {
         let first = builder.walk_block(children.next().expect("first block"));
         let second = builder.walk_block(children.next().expect("second block"));
 
-        for (blocks, expected) in [(&first, "｜A《a》"), (&second, "｜B《b》")] {
+        for (blocks, expected) in [
+            (first.as_ref().expect("first block retained"), "｜A《a》"),
+            (second.as_ref().expect("second block retained"), "｜B《b》"),
+        ] {
             let [Block::Paragraph { children, .. }] = blocks.as_slice() else {
                 panic!("expected a single paragraph, got {blocks:#?}");
             };

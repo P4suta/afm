@@ -20,6 +20,8 @@
 // The two brands live next to the contract they define — the published
 // `classes::all()` is the parser's own list under the rewritten brand — so
 // the rewrite below cannot be changed without the contract following it.
+use std::borrow::Cow;
+
 use crate::classes::{BRAND, PREFIX};
 
 /// The wrapper the renderer puts around an all-inline document.
@@ -27,6 +29,7 @@ const PARAGRAPH_OPEN: &str = "<p>";
 const PARAGRAPH_CLOSE: &str = "</p>";
 /// The one attribute whose value carries the parser's brand.
 const CLASS_ATTRIBUTE: &str = "class=\"";
+const DIRECTIVE_CLASS: &str = "aozora-md-directive";
 
 /// Takes a snapshot rather than the run itself because the same reading
 /// answers the other question [`crate::constructs`] asks of a run.
@@ -51,6 +54,60 @@ pub(crate) fn halves(fragment: &str) -> (&str, &str) {
     fragment
         .rfind("</")
         .map_or((fragment, ""), |at| fragment.split_at(at))
+}
+
+/// Removes a directive-bearing ruby's reading while retaining its parent
+/// text, which is the only meaningful part of that notation in a Markdown
+/// heading.
+///
+/// The sibling renderer emits ruby fallback parentheses in `<rp>` and the
+/// reading in `<rt>`. Keeping only text outside those elements yields the
+/// parent text without teaching this crate how ruby bases are inferred.
+#[must_use]
+pub(crate) fn for_markdown_heading(fragment: &str) -> Cow<'_, str> {
+    if !fragment.contains(DIRECTIVE_CLASS) || !fragment.contains("<ruby") {
+        return Cow::Borrowed(fragment);
+    }
+
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    let mut skipped_depth = 0usize;
+    while let Some(at) = rest.find('<') {
+        if skipped_depth == 0 {
+            out.push_str(&rest[..at]);
+        }
+        rest = &rest[at..];
+        let Some(end) = rest.find('>') else {
+            if skipped_depth == 0 {
+                out.push_str(rest);
+            }
+            return Cow::Owned(out);
+        };
+        let tag = &rest[1..end];
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('/');
+        match (closing, name) {
+            (false, "rt" | "rp") => skipped_depth += 1,
+            (true, "rt" | "rp") => skipped_depth = skipped_depth.saturating_sub(1),
+            // The ruby framing itself is discarded; parent text between its
+            // tags is copied by the text arm above.
+            (_, "ruby") => {}
+            // A directive-bearing reading is wholly inside `rt`, so markup
+            // outside it belongs to the parent text and remains intact.
+            _ if skipped_depth == 0 => out.push_str(&rest[..=end]),
+            _ => {}
+        }
+        rest = &rest[end + 1..];
+    }
+    if skipped_depth == 0 {
+        out.push_str(rest);
+    }
+    Cow::Owned(out)
 }
 
 /// Scanning for the attribute rather than for the brand keeps the rewrite
@@ -153,5 +210,19 @@ mod tests {
         // Not markup this renderer produces, but the scan must terminate
         // and keep what it was given either way.
         assert_eq!(rebrand("<i class=\"aozora-x"), "<i class=\"aozora-x");
+    }
+
+    #[test]
+    fn a_directive_reading_in_a_heading_keeps_only_the_ruby_parent() {
+        let fragment = concat!(
+            "改<ruby>ページ<rp>(</rp><rt>",
+            r#"<span class="aozora-md-directive" hidden>［＃２字下げ］</span>"#,
+            "</rt><rp>)</rp></ruby>"
+        );
+        assert_eq!(for_markdown_heading(fragment), "改ページ");
+        assert!(matches!(
+            for_markdown_heading("<ruby>漢字<rt>かんじ</rt></ruby>"),
+            Cow::Borrowed(_)
+        ));
     }
 }
