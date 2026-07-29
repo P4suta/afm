@@ -184,8 +184,8 @@ impl Options {
     }
 
     /// Plain CommonMark 0.31.2: no GFM extension, no notation, no hardbreaks
-    /// — what the spec's 652 examples are rendered with, so this crate's
-    /// superset claim is checked rather than asserted.
+    /// — what the spec suite is rendered with, so this crate's superset
+    /// claim is checked rather than asserted.
     #[must_use]
     pub fn commonmark() -> Self {
         Self {
