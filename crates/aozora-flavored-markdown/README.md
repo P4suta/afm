@@ -99,7 +99,7 @@ Try it in the
 | `diagnose` | diagnostics alone, no rendering |
 | `render_to_ir` | HTML + a structural IR a host can render itself |
 | `render_blocks` | one IR block per top-level element, for incremental hosts |
-| `canonicalize` | the source reformatted, or an `Error` |
+| `canonicalize` | the source reformatted, or a `CanonicalizeError` |
 
 ## Features
 

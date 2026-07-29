@@ -538,8 +538,18 @@ impl CoordinateSegment {
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
     core::iter::once(0)
-        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .chain(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(at, &byte)| match byte {
+                    b'\n' => Some(at + 1),
+                    b'\r' if bytes.get(at + 1) != Some(&b'\n') => Some(at + 1),
+                    _ => None,
+                }),
+        )
         .collect()
 }
 

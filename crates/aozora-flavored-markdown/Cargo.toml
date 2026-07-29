@@ -112,7 +112,8 @@ comrak    = { workspace = true }
 # that renders HTML and never touches JSON does not build serde at all — the
 # sibling `aozora` crate draws the same line with its `json` feature.
 serde     = { workspace = true, optional = true }
-# `Error`, the one fallible entry point's error type (`canonicalize`). The
+# `CanonicalizeError`, the one fallible entry point's error type
+# (`canonicalize`). The
 # rendering entry points stay infallible, so nothing else in the crate has a
 # `Result` for this to describe.
 thiserror = { workspace = true }
@@ -138,6 +139,7 @@ proptest          = { workspace = true }
 pretty_assertions = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
+encoding_rs       = { workspace = true }
 criterion         = { workspace = true }
 dhat              = { workspace = true }
 # Snapshot assertions for the post-splice HTML golden tests
@@ -188,7 +190,7 @@ miette = ["dep:miette"]
 ignored = ["wasm-bindgen"]
 
 [[bench]]
-name    = "render_to_string"
+name    = "render"
 harness = false
 
 [[bench]]

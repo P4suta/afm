@@ -244,7 +244,7 @@ fuzz_target!(|data: &[u8]| {
     // with the dialect off there is no lexer pass and no substitution, so a
     // reserved codepoint the AUTHOR typed comes back as the author's own
     // byte — which is what `canonicalize`'s I8 states positively over on
-    // `serialize_round_trip`. This target found that within a minute of first
+    // `canonicalize_round_trip`. This target found that within a minute of first
     // running, which is the finding it was built for and not a defect: the
     // tier's precondition is the dialect, and no sweep had ever asked it
     // with the dialect off.

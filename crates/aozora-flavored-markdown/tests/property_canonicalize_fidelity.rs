@@ -2,7 +2,7 @@
 //!
 //! The canonicaliser had exactly one property: I3, the fixed point
 //! (`canonicalize(canonicalize(x)) == canonicalize(x)`), asserted by the
-//! `serialize_round_trip` fuzz target and by `tests/fuzz_regressions.rs`.
+//! `canonicalize_round_trip` fuzz target and by `tests/fuzz_regressions.rs`.
 //! I3 relates the output to *itself*, never to the input, so a rewrite that
 //! is consistently wrong satisfies it — which is how a canonicaliser that
 //! never called the code-block mask canonicalised `｜青梅《おうめ》` to
@@ -58,14 +58,11 @@ fn canonical(src: &str) -> String {
 /// A source with nothing in it *to* canonicalise, and the only shape allowed
 /// to come back as nothing.
 ///
-/// Whitespace, plus the BOM — which `canonicalize`'s own rustdoc names as one
-/// of the three document-wide normalisations the parser applies, beside the
-/// line endings and blank-line collapsing. A `\u{FEFF}`-only source is the
-/// input the property below shrank to, and it is that documented behaviour
-/// rather than a hole: the exemption is over the *whole* source, so
-/// `a\u{FEFF}b` still owes a document back.
-fn is_blank(src: &str) -> bool {
-    src.chars().all(|c| c.is_whitespace() || c == '\u{FEFF}')
+/// CommonMark content that produces an empty document. A BOM is deliberately
+/// absent: `canonicalize` preserves every leading BOM, so even a BOM-only
+/// source owes a non-empty answer.
+fn is_empty_document_source(src: &str) -> bool {
+    src.chars().all(char::is_whitespace)
 }
 
 /// I3, I5 as the fuzz target reads it, I9's second half, and I5 over every
@@ -78,7 +75,7 @@ fn assert_canonical_invariants(src: &str) {
     // single non-blank character owes one back — which is what makes the
     // check worth having rather than a restatement of `Ok`.
     assert!(
-        !first.is_empty() || is_blank(src),
+        !first.is_empty() || is_empty_document_source(src),
         "I9: an empty answer for a source with content in it: src={src:?}"
     );
     assert_eq!(
@@ -710,7 +707,7 @@ fn a_rule_row_is_held_wherever_commonmark_put_it_not_only_under_a_paragraph() {
     // block.
     //
     // The exhaustive matrix (three rule characters × five widths × eighteen
-    // block contexts) lives in `tests/serialize_commonmark_identity.rs`;
+    // block contexts) lives in `tests/canonicalize_commonmark_identity.rs`;
     // these are the shapes worth naming in the file that owns the invariant.
     for src in [
         "- aaa\n==========\n",
@@ -881,7 +878,7 @@ proptest! {
         );
         let out = answer.unwrap_or_default();
         prop_assert!(
-            !out.is_empty() || is_blank(&src),
+            !out.is_empty() || is_empty_document_source(&src),
             "I9: an empty answer for a source with content in it: src={src:?}"
         );
     }

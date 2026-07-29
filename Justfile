@@ -210,6 +210,8 @@ fuzz-seed:
         >"$work/seeds/eol-all-three-in-one-fence"
     printf '> ```\r> ｜青梅《おうめ》\r> ```\r\n\n    ｜青梅《おうめ》\r    ｜漢字《かんじ》\n' \
         >"$work/seeds/eol-cr-behind-a-container-and-an-indent"
+    cargo run --quiet -p xtask -- cp932-project \
+        --input-dir "$work/seeds" --output-dir "$work/cp932"
 
     cd crates/aozora-flavored-markdown
     while IFS= read -r target; do
@@ -219,8 +221,8 @@ fuzz-seed:
         for source in "$work"/seeds/*; do
             seed=$source
             if [[ "$target" == sjis_decode ]]; then
-                iconv -f UTF-8 -t CP932 <"$source" >"$work/encoded" 2>/dev/null || continue
-                seed="$work/encoded"
+                seed="$work/cp932/${source##*/}"
+                [[ -f "$seed" ]] || continue
             elif [[ "$target" == options_space ]]; then
                 (head -c 2 /dev/zero; cat "$source") >"$work/masked"
                 seed="$work/masked"

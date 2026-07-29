@@ -18,7 +18,7 @@
 //!     <hash>.expect.txt  ── (optional) the panic snippet that originally
 //!                            justified the regression case, kept for human
 //!                            archaeology; not parsed by the test runner
-//!   serialize_round_trip/
+//!   canonicalize_round_trip/
 //!     ...
 //! ```
 //!
@@ -53,6 +53,7 @@ use aozora_flavored_markdown::{
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
 };
+use encoding_rs::SHIFT_JIS;
 
 #[test]
 fn options_space_regressions_replay_cleanly() {
@@ -172,8 +173,8 @@ fn render_blocks_regressions_replay_cleanly() {
 }
 
 #[test]
-fn serialize_round_trip_regressions_replay_cleanly() {
-    replay_each("serialize_round_trip", |src| {
+fn canonicalize_round_trip_regressions_replay_cleanly() {
+    replay_each("canonicalize_round_trip", |src| {
         // Mirrors the target: I3 (`canonicalize(canonicalize(x)) ==
         // canonicalize(x)`) plus I5, which is the half a fixed point
         // cannot see — a consistently wrong rewrite satisfies I3 — plus
@@ -219,7 +220,7 @@ fn sjis_decode_regressions_replay_cleanly() {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum ReplayInput {
     /// Decode as UTF-8; skip artifact on invalid UTF-8 (mirrors the
-    /// `parse_render` / `serialize_round_trip` fuzz targets).
+    /// `parse_render` / `canonicalize_round_trip` fuzz targets).
     Utf8,
     /// Decode via Shift_JIS; skip artifact on decode failure (mirrors
     /// the `sjis_decode` fuzz target).
@@ -253,10 +254,10 @@ const OPTION_MASK_BYTES: usize = 2;
 /// so a new target lands here as an unanswered question rather than being
 /// replayed as UTF-8 because that is the common case.
 const INPUT_SHAPES: &[(&str, ReplayInput)] = &[
+    ("canonicalize_round_trip", ReplayInput::Utf8),
     ("options_space", ReplayInput::MaskedUtf8),
     ("parse_render", ReplayInput::Utf8),
     ("render_blocks", ReplayInput::Utf8),
-    ("serialize_round_trip", ReplayInput::Utf8),
     ("sjis_decode", ReplayInput::Sjis),
 ];
 
@@ -523,17 +524,16 @@ fn seed_source_documents() -> Vec<(String, String)> {
     out
 }
 
-/// The one place CP932 cannot hold what the documents say.
+/// The decoded text produced by the one CP932 projection used by the seeder.
 ///
-/// Shift_JIS has no U+2014 EM DASH. `iconv` writes it as 0x815C and the
-/// decoder reads 0x815C back as U+2015 HORIZONTAL BAR, so three of the seven
-/// dialect documents reach `sjis_decode` with a different dash than they were
-/// written with. That is the encoding's own ambiguity rather than a seeding
-/// defect — a real 青空文庫 file has the same 0x815C in it — but it is a
-/// carve-out, so it is one named substitution applied to one lossy shape and
-/// not a fuzzy comparison applied to all of them.
-fn without_the_cp932_dash_ambiguity(text: &str) -> String {
-    text.replace('\u{2015}', "\u{2014}")
+/// `encoding_rs` is both the executable contract in `xtask cp932-project` and
+/// the expectation here. This keeps platform `iconv` aliases and handwritten
+/// dash substitutions out of the corpus contract.
+fn cp932_projection(text: &str) -> Option<String> {
+    let (encoded, _, had_errors) = SHIFT_JIS.encode(text);
+    (!had_errors).then(|| {
+        decode_sjis(encoded.as_ref()).expect("encoding_rs emitted bytes the aozora decoder rejects")
+    })
 }
 
 /// One target's committed corpus, decoded through the shape that target
@@ -642,32 +642,25 @@ fn one_document_set_behind_every_corpus(corpora: &[Corpus]) {
         );
     }
 
-    // And the lossy one is the same set again, minus what its encoding refuses
-    // outright. Subset rather than equality: `iconv` fails on a document CP932
-    // cannot represent and `just fuzz-seed` skips it, which is a real hole in
-    // that target's corpus — but it is a hole in the SPEC half of it, and the
-    // dialect half is asserted document by document below.
+    // The lossy target is the exact representable projection of that same
+    // source set. Both the generator and this expectation use encoding_rs.
     let reference: BTreeSet<String> = first
         .texts
         .iter()
-        .map(|text| without_the_cp932_dash_ambiguity(text))
+        .filter_map(|text| cp932_projection(text))
         .collect();
     for corpus in corpora.iter().filter(|corpus| !corpus.how.is_lossless()) {
-        let strays: Vec<&String> = corpus
-            .texts
-            .iter()
-            .filter(|text| !reference.contains(&without_the_cp932_dash_ambiguity(text)))
-            .collect();
+        let extra: Vec<&String> = corpus.texts.difference(&reference).collect();
+        let missing: Vec<&String> = reference.difference(&corpus.texts).collect();
         assert!(
-            strays.is_empty(),
-            "{} of `{}`'s seeds decode to text that is not one of the documents every other \
-             target was seeded from, e.g. {:?}. Its seeds are transcoded rather than rewritten, \
-             so a decoded seed that is nobody's document means the transcoding does not round \
-             trip and this target is fuzzing on inputs the others never see.",
-            strays.len(),
+            extra.is_empty() && missing.is_empty(),
+            "`{}` is not the exact encoding_rs CP932 projection: {} extra, {} missing, e.g. {:?}",
             corpus.target,
-            strays
+            extra.len(),
+            missing.len(),
+            extra
                 .iter()
+                .chain(&missing)
                 .take(2)
                 .map(|text| text.chars().take(60).collect::<String>())
                 .collect::<Vec<_>>()
@@ -689,15 +682,15 @@ fn every_corpus_carries_the_dialect(corpora: &[Corpus]) {
     for corpus in corpora {
         let fold = |text: &str| {
             if corpus.how.is_lossless() {
-                text.to_owned()
+                Some(text.to_owned())
             } else {
-                without_the_cp932_dash_ambiguity(text)
+                cp932_projection(text)
             }
         };
-        let held: BTreeSet<String> = corpus.texts.iter().map(|text| fold(text)).collect();
+        let held: BTreeSet<String> = corpus.texts.iter().filter_map(|text| fold(text)).collect();
         let missing: Vec<&String> = documents
             .iter()
-            .filter(|(_, text)| !held.contains(&fold(text)))
+            .filter(|(_, text)| fold(text).is_some_and(|projected| !held.contains(&projected)))
             .map(|(name, _)| name)
             .collect();
         assert!(

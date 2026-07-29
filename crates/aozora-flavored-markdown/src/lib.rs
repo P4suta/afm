@@ -761,7 +761,7 @@ fn collect_rendered_blocks<'a>(
 /// they saw as [`Diagnostic`]s — a rustc warning's standing, not an error's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum CanonicalizeError {
     /// Refused ahead of the lexer, whose own `u32` span assert would abort
     /// the process under this workspace's `panic = "abort"`.
     #[error("source is {len} bytes; the parser addresses at most u32::MAX")]
@@ -769,10 +769,6 @@ pub enum Error {
         /// Length of the source that was refused, in bytes.
         len: usize,
     },
-    /// A pass handed the lexer text it would not take — reachable only
-    /// because lifting a verbatim region out can grow a source past the bound.
-    #[error("the source did not lex")]
-    ParseFailed,
 }
 
 /// Round-trip source through the parser back to canonical
@@ -787,7 +783,9 @@ pub enum Error {
 /// rule row and a codepoint this crate reserves come back as written, at any
 /// container depth. Plain CommonMark therefore passes through verbatim, up to
 /// what CommonMark does not itself distinguish and the parser normalises
-/// document-wide — any line ending becomes LF, a leading BOM goes, blank lines collapse.
+/// document-wide — prose line endings become LF and blank lines collapse.
+/// A leading run of byte-order marks is source text at this API boundary and
+/// is preserved in full.
 ///
 /// # Examples
 ///
@@ -798,14 +796,13 @@ pub enum Error {
 /// assert_eq!(canonical, "彼は青梅《おうめ》に行った。");
 /// assert_eq!(canonicalize(&canonical)?, canonical);
 /// assert_eq!(canonicalize("")?, String::new());
-/// # Ok::<(), aozora_flavored_markdown::Error>(())
+/// # Ok::<(), aozora_flavored_markdown::CanonicalizeError>(())
 /// ```
 ///
 /// # Errors
 ///
-/// [`Error::SourceTooLarge`] past `MAX_SOURCE_BYTES`, [`Error::ParseFailed`]
-/// when a pass hands the lexer text it will not take — never for empty input.
-pub fn canonicalize(input: &str) -> Result<String, Error> {
+/// [`CanonicalizeError::SourceTooLarge`] past `MAX_SOURCE_BYTES`.
+pub fn canonicalize(input: &str) -> Result<String, CanonicalizeError> {
     canonicalize_within(input, MAX_SOURCE_BYTES)
 }
 
@@ -815,13 +812,13 @@ pub fn canonicalize(input: &str) -> Result<String, Error> {
 // this guard. Same reason `len_within_span_budget` is split out from the
 // guard the render entry points share, and the boundary is the same one —
 // a source of exactly the budget is still addressable.
-fn canonicalize_within(input: &str, budget: usize) -> Result<String, Error> {
+fn canonicalize_within(input: &str, budget: usize) -> Result<String, CanonicalizeError> {
     if input.len() > budget {
-        return Err(Error::SourceTooLarge { len: input.len() });
+        return Err(CanonicalizeError::SourceTooLarge { len: input.len() });
     }
-    let mut current = canonicalise_pass(input).ok_or(Error::ParseFailed)?;
+    let mut current = canonicalise_pass(input);
     for _ in 1..MAX_CANONICAL_PASSES {
-        let next = canonicalise_pass(&current).ok_or(Error::ParseFailed)?;
+        let next = canonicalise_pass(&current);
         if next == current {
             return Ok(current);
         }
@@ -838,15 +835,20 @@ fn canonicalize_within(input: &str, budget: usize) -> Result<String, Error> {
 const MAX_CANONICAL_PASSES: usize = 4;
 
 // One pass: lift out what comrak claims, canonicalise the prose between,
-// splice the originals back; `None` when the source does not lex at all.
+// splice the originals back. The sibling grammar is total below its span
+// budget. If an internal placeholder expansion alone crosses that budget,
+// returning the caller's text is the only fixed-point-preserving answer and
+// avoids inventing a second public error for an internal representation.
 // Lifted whole rather than masked character by character as in
 // `drive_pipeline`, which has a byte span to keep aligned and this has not —
 // so here a region leaves the lexer's sight entirely (`verbatim_regions`).
-fn canonicalise_pass(source: &str) -> Option<String> {
+fn canonicalise_pass(source: &str) -> String {
     let (protected, originals) = verbatim_regions::protect(source);
-    let document = aozora::parse(protected).ok()?;
+    let Ok(document) = aozora::parse(protected) else {
+        return source.to_owned();
+    };
     let canonical = document.snapshot().to_source();
-    Some(verbatim_regions::restore(&canonical, &originals))
+    verbatim_regions::restore(&canonical, &originals)
 }
 
 #[cfg(test)]
@@ -1127,7 +1129,7 @@ mod tests {
             let expected = if len <= BUDGET {
                 Ok(src.clone())
             } else {
-                Err(Error::SourceTooLarge { len })
+                Err(CanonicalizeError::SourceTooLarge { len })
             };
             assert_eq!(
                 canonicalize_within(&src, BUDGET),

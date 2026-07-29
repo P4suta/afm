@@ -9,7 +9,7 @@
 //!
 //! Run:
 //!
-//!     cargo run --example serialize-round-trip -p aozora-flavored-markdown -- input.md
+//!     cargo run --example canonicalize-round-trip -p aozora-flavored-markdown -- input.md
 
 use std::env;
 use std::fs;
@@ -19,7 +19,7 @@ use aozora_flavored_markdown::canonicalize;
 
 fn main() -> ExitCode {
     let Some(path) = env::args().nth(1) else {
-        eprintln!("usage: serialize-round-trip <path/to/input.md>");
+        eprintln!("usage: canonicalize-round-trip <path/to/input.md>");
         return ExitCode::from(2);
     };
 

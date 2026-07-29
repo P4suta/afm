@@ -71,7 +71,7 @@ would run past its budget into the `timeout --kill-after=10s` backstop, exit
 request — which is #224 exactly, fixed by #251 the day before this was written,
 reappearing in a form no gate here would attribute to the engine.
 
-`-max_len` is load-bearing separately: `serialize_round_trip.rs` argues its I9
+`-max_len` is load-bearing separately: `canonicalize_round_trip.rs` argues its I9
 totality invariant from inputs being bounded well under the `u32` span budget,
 and that bound is libFuzzer's.
 

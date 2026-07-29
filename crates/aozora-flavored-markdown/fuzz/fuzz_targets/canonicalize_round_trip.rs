@@ -27,7 +27,7 @@
 //!   failure was spelled `""`, I3 held vacuously (`""` is a fixed point) and
 //!   I5 and I8 read a document with nothing in it as having lost nothing.
 //!
-//! Run with: `just fuzz serialize_round_trip -- -runs=10000`
+//! Run with: `just fuzz canonicalize_round_trip -- -runs=10000`
 
 #![no_main]
 

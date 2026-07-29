@@ -1,7 +1,7 @@
 //! `render` against every example in the CommonMark and GFM specs, through
 //! the dialect the README names.
 //!
-//! The other half of the claim `serialize_commonmark_identity.rs` opened.
+//! The other half of the claim `canonicalize_commonmark_identity.rs` opened.
 //! That file asks what `canonicalize` does to a pure-CommonMark source; this
 //! one asks what `render` does to it, which is the question the README's
 //! headline sentence is actually about.
@@ -37,7 +37,7 @@ const COMMONMARK: &str = include_str!("../spec/commonmark-0.31.2.json");
 const GFM: &str = include_str!("../spec/gfm-0.29-gfm.json");
 
 /// A `@` stands for the row under test. Copied from
-/// `serialize_commonmark_identity.rs` deliberately: the point of this file is
+/// `canonicalize_commonmark_identity.rs` deliberately: the point of this file is
 /// that the same cells behave differently on the other side of the crate, and
 /// a shared helper crate would let one list drift into covering only the half
 /// that passes.
@@ -226,7 +226,7 @@ fn a_rule_row_renders_in_the_block_that_owns_it() {
     // `crate::verbatim_regions` holds a rule row out of the reach of the
     // CommonMark-blind sibling parser, which would otherwise push one onto a
     // stanza of its own and split whichever block CommonMark had given the
-    // bytes to. `serialize_commonmark_identity`'s
+    // bytes to. `canonicalize_commonmark_identity`'s
     // `a_rule_row_stays_in_the_block_that_owns_it` runs exactly the matrix
     // below for `canonicalize`; this is the same matrix for `render`.
     //
@@ -305,7 +305,7 @@ fn author_control_bytes_do_not_disable_or_get_claimed_by_rule_row_protection() {
 
 #[test]
 fn every_reserved_codepoint_is_neutralised_on_the_render_path() {
-    // The render-side mirror of `serialize_commonmark_identity`'s
+    // The render-side mirror of `canonicalize_commonmark_identity`'s
     // `every_reserved_codepoint_in_the_source_comes_back_as_written`, over the
     // same five codepoints and the same 18 contexts.
     //

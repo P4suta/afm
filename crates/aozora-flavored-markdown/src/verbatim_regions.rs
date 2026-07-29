@@ -233,6 +233,7 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
             }
         })
         .chain(rule_rows(source).into_iter().map(|row| row.range))
+        .chain(leading_bom_run(source))
         .chain(reserved_codepoints(source))
         .collect();
     // Widest first where two of them start together, so the region that
@@ -245,6 +246,15 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
         }
     }
     disjoint
+}
+
+fn leading_bom_run(source: &str) -> Option<Range<usize>> {
+    let width = source
+        .chars()
+        .take_while(|&ch| ch == '\u{FEFF}')
+        .map(char::len_utf8)
+        .sum();
+    (width > 0).then_some(0..width)
 }
 
 // A rule row is markup to one grammar or the other — CommonMark's thematic
@@ -429,6 +439,14 @@ mod tests {
             .trim_start_matches('\u{FEFF}')
             .replace("\r\n", "\n");
         assert_eq!(hidden.reveal(&normalized), "Foo\n----------\n");
+    }
+
+    #[test]
+    fn every_leading_bom_is_one_verbatim_region() {
+        let source = "\u{FEFF}\u{FEFF}\u{FEFF}abc\n";
+        let (protected, originals) = protect(source);
+        assert_eq!(originals, ["\u{FEFF}\u{FEFF}\u{FEFF}"]);
+        assert_eq!(restore(&protected, &originals), source);
     }
 
     #[test]

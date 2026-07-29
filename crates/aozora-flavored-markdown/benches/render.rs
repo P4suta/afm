@@ -75,9 +75,9 @@ fn recovered(target_bytes: usize) -> String {
     s
 }
 
-fn bench_render_to_string(c: &mut Criterion) {
+fn bench_render(c: &mut Criterion) {
     let opts = Options::default();
-    let mut g = c.benchmark_group("render_to_string");
+    let mut g = c.benchmark_group("render");
     for (label, doc) in [
         ("representative_128k", representative(128 * 1024)),
         ("representative_1m", representative(1024 * 1024)),
@@ -134,7 +134,7 @@ fn bench_crime_and_punishment(c: &mut Criterion) {
     let opts = Options::default();
     let mut g = c.benchmark_group("crime_and_punishment");
     g.throughput(Throughput::Bytes(text.len() as u64));
-    g.bench_function("render_to_string", |b| {
+    g.bench_function("render", |b| {
         b.iter(|| black_box(render(black_box(&text), black_box(&opts))));
     });
     g.finish();
@@ -142,7 +142,7 @@ fn bench_crime_and_punishment(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_render_to_string,
+    bench_render,
     bench_small_doc,
     bench_render_to_ir,
     bench_crime_and_punishment

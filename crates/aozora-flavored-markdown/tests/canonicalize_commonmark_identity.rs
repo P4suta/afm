@@ -243,19 +243,14 @@ fn every_source_mutating_step_of_the_sibling_parser_is_protected() {
     // documents — so the family is closed against the parser's own list
     // rather than against what a corpus happened to contain.
 
-    // 1. BOM strip. A leading BOM is an encoding artefact, not content, and
-    //    comrak drops one too: the rendered HTML is unchanged. An interior
-    //    U+FEFF is a zero-width space and stays.
-    assert_eq!(canonical("\u{FEFF}abc\n"), "abc\n");
+    // 1. A leading BOM run is preserved as source text. comrak ignores one
+    //    at render time, but `canonicalize` is a source-to-source API and
+    //    does not silently shorten a longer run.
+    assert_eq!(canonical("\u{FEFF}abc\n"), "\u{FEFF}abc\n");
     assert_eq!(html("\u{FEFF}abc\n"), html("abc\n"));
     assert_eq!(canonical("a\u{FEFF}b\n"), "a\u{FEFF}b\n");
-    // …with one surviving defect: comrak strips exactly one BOM and the
-    // sibling strips every leading one, so a doubled BOM does change the
-    // rendered document. Degenerate, zero corpus presence, and protecting it
-    // needs "all but the first" machinery that still would not round-trip —
-    // asserted rather than hidden so the day it matters it is already named.
-    assert_eq!(canonical("\u{FEFF}\u{FEFF}abc\n"), "abc\n");
-    assert_ne!(
+    assert_eq!(canonical("\u{FEFF}\u{FEFF}abc\n"), "\u{FEFF}\u{FEFF}abc\n");
+    assert_eq!(
         html("\u{FEFF}\u{FEFF}abc\n"),
         html(canonical("\u{FEFF}\u{FEFF}abc\n").as_str())
     );

@@ -380,7 +380,7 @@ fn an_orphan_container_close_must_not_cost_the_next_block_its_ir() {
 // both sides, or drop a `#[serde(rename)]` that both sides then stop
 // applying, and every property above still holds. It is the same blind spot
 // I3 had for fence bodies — a consistently wrong rewrite is still a fixed
-// point — and the fix is the same one `property_serialize_fidelity` uses:
+// point — and the fix is the same one `property_canonicalize_fidelity` uses:
 // assert against bytes this file wrote, not against what the library wrote a
 // moment ago.
 //

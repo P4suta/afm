@@ -18,6 +18,7 @@ use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use encoding_rs::SHIFT_JIS;
 
 mod spec_refresh;
 
@@ -61,6 +62,16 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Project every UTF-8 file in a directory to the exact CP932 byte
+    /// sequence used by the fuzz corpus, omitting unrepresentable inputs.
+    Cp932Project {
+        /// Directory containing UTF-8 source documents.
+        #[arg(long)]
+        input_dir: PathBuf,
+        /// Directory that receives representable CP932 documents.
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -80,7 +91,45 @@ fn main() -> Result<()> {
         }
         Command::AozoraBump { version } => aozora_bump(&version),
         Command::GenDistAssets { check } => gen_dist_assets(check),
+        Command::Cp932Project {
+            input_dir,
+            output_dir,
+        } => cp932_project(&input_dir, &output_dir),
     }
+}
+
+/// Encode a seed directory through `encoding_rs`, the same WHATWG Shift_JIS
+/// implementation used by the `aozora` decoder. A source with an unmappable
+/// character is omitted instead of receiving an encoder replacement, so
+/// every emitted seed is a true projection of its UTF-8 source.
+fn cp932_project(input_dir: &Path, output_dir: &Path) -> Result<()> {
+    fs::create_dir_all(output_dir).with_context(|| format!("mkdir {}", output_dir.display()))?;
+    let mut entries = fs::read_dir(input_dir)
+        .with_context(|| format!("reading {}", input_dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+
+    let mut written = 0usize;
+    let mut omitted = 0usize;
+    for entry in entries {
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (encoded, _, had_errors) = SHIFT_JIS.encode(&source);
+        if had_errors {
+            omitted += 1;
+            continue;
+        }
+        let output = output_dir.join(entry.file_name());
+        fs::write(&output, encoded.as_ref())
+            .with_context(|| format!("writing {}", output.display()))?;
+        written += 1;
+    }
+    println!("cp932-project: wrote {written}, omitted {omitted} unrepresentable input(s)");
+    Ok(())
 }
 
 /// Shells (`clap_complete`) we ship completions for, with their conventional
