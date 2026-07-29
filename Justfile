@@ -6,7 +6,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
-_DOC_FLAGS := "-D warnings --cfg docsrs"
+_DOC_FLAGS := "-D warnings"
 _COV_FLOOR := "95"
 _COV_IGNORE := "(target/|xtask/|aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/)"
 _FUZZ_TOOLCHAIN := "nightly-2026-07-15"
@@ -21,6 +21,16 @@ default:
 [group('rust')]
 check:
     cargo check --locked --workspace --all-targets --all-features
+
+[group('rust')]
+check-features:
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features miette
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features serde
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features theme
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features tsify
+    cargo check --locked --package aozora-flavored-markdown-wasm --no-default-features
+    cargo check --locked --package aozora-flavored-markdown-wasm --all-features
 
 [group('rust')]
 build:
@@ -161,7 +171,7 @@ deny:
 
 [group('repo')]
 actionlint:
-    actionlint -no-color -shellcheck= -pyflakes=
+    actionlint -no-color -shellcheck=shellcheck -pyflakes=
 
 [group('repo')]
 zizmor:
@@ -393,7 +403,7 @@ docs-site: doc playground-build
 # --- Fixed CI entry points ---------------------------------------------------
 
 [group('ci')]
-ci-rust: fmt-check clippy coverage test-doc doc-public
+ci-rust: fmt-check check-features clippy coverage test-doc doc-public
 
 [group('ci')]
 ci-web: test-wasm playground-lint playground-test playground-build

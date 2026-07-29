@@ -70,7 +70,7 @@ jobs:
           printf '%s\n' "$state" | tee target/fuzz-status/state.txt
           {
             printf '## Fuzz termination state\n\n'
-            printf '`%s`\n' "$state"
+            printf '\140%s\140\n' "$state"
           } >> "$GITHUB_STEP_SUMMARY"
           case "$state" in
             success) ;;

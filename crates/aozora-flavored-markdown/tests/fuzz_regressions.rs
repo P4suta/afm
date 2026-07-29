@@ -448,26 +448,51 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("resolving the workspace root: {e}"))
 }
 
-/// The fuzz targets the crate registers. `fuzz/Cargo.toml` is the registry: a
-/// `[[bin]]` there is what `cargo fuzz run <name>` resolves, and reading it is
-/// what keeps this file from holding a second list of target names.
+/// The fuzz targets Cargo registers for the separate fuzz workspace.
+///
+/// Cargo's own metadata projection is the contract here; this test does not
+/// implement a second TOML parser.
 fn registered_targets() -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fuzz")
         .join("Cargo.toml");
-    let manifest =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let mut out = Vec::new();
-    let mut in_bin = false;
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            // `[package]` declares a `name` too, and it is not a target.
-            in_bin = trimmed == "[[bin]]";
-        } else if in_bin && let Some(rest) = trimmed.strip_prefix("name = \"") {
-            out.extend(rest.split('"').next().map(str::to_owned));
-        }
-    }
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = process::Command::new(cargo)
+        .args([
+            "metadata",
+            "--locked",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("running cargo metadata for {}: {e}", path.display()));
+    assert!(
+        output.status.success(),
+        "cargo metadata failed for {}:\n{}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Cargo metadata must be valid JSON");
+    let mut out: Vec<String> = metadata["packages"]
+        .as_array()
+        .expect("Cargo metadata packages must be an array")
+        .iter()
+        .flat_map(|package| {
+            package["targets"]
+                .as_array()
+                .expect("Cargo metadata package targets must be an array")
+        })
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|target| target["name"].as_str().map(str::to_owned))
+        .collect();
     out.sort();
     out
 }

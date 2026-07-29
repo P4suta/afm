@@ -49,13 +49,10 @@ include = [
 # `serde` derives and the `miette` impl, which is most of what a reader is
 # there to check. `just doc-public` is the local equivalent and already passes
 # `--all-features`, so this is what keeps the two builds asking the same
-# question. `--cfg docsrs` is the flag that identifies the docs.rs build to
-# rustdoc; no `cfg(docsrs)` is read in `src/` today, and it is set here so an
-# item that later wants a feature badge does not need a manifest change to get
-# one.
+# question. No `cfg(docsrs)` is read in `src/`, so this table enables the
+# feature surface without injecting an inert conditional-compilation name.
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 # Cutting `## [Unreleased]` into a dated section, which was step 1 of the
 # manual release and the step most likely to be skipped.

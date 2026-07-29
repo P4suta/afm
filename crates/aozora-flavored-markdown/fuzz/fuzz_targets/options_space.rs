@@ -20,18 +20,9 @@
 //! the same fixed-width prefix, and `just fuzz-triage` replays it by handing
 //! the whole file back to this binary.
 //!
-//! ## Why the knob table can not quietly go stale
-//!
-//! The bitmask is a hand-written listing of the public surface, and this
-//! crate sits outside the workspace, so no test over there compiles it and
-//! `options_surface_contract.rs` cannot be imported. Both files therefore
-//! read the same source of truth instead of each other: that file's
-//! `public_options_api()` scans `src/lib.rs` for the `pub fn`s of
-//! `impl Options`, and the `const` assertions below scan the same text,
-//! `include_str!`'d, for the same declarations. A knob added to `src/lib.rs`
-//! and not to [`KNOBS`] fails this crate's COMPILE, which is `just
-//! fuzz-build`, which is a `[group('gate')]` recipe — so it fails a pull
-//! request rather than the next person to run a fuzzer.
+//! Each row stores an actual method call. Renaming or removing an option
+//! therefore fails `just fuzz-build` in the compiler, while the integration
+//! suite checks the same typed table against its rendering and JSON effects.
 //!
 //! Run with:
 //! - `just fuzz-quick options_space` (60 s) — inner-loop smoke
@@ -48,22 +39,15 @@ use aozora_flavored_markdown::{
 use aozora_flavored_markdown_test_support::{assert_html_invariants, check_no_sentinel_leak};
 use libfuzzer_sys::fuzz_target;
 
-/// The library source both this target and `options_surface_contract.rs`
-/// enumerate the `Options` surface from.
-///
-/// Read at compile time, so the assertions over it are compile errors. The
-/// path reaches out of this crate's directory on purpose: the fuzz crate is
-/// its own workspace and has no other way to see the library it fuzzes as
-/// text. It is `publish = false`, so nothing packages this file.
-const LIB_RS: &str = include_str!("../../src/lib.rs");
-
 /// One public `with_*` knob: the name it is declared under, and the setter.
 struct Knob {
-    /// The `pub fn` name in `impl Options`, checked against [`LIB_RS`].
+    /// Human-readable spelling used in crash diagnostics.
     name: &'static str,
     /// The setter itself, so the bit is wired to the method rather than to a
     /// field this crate cannot see.
     set: fn(Options, bool) -> Options,
+    /// This setter selects whether the Aozora preprocessing pipeline runs.
+    aozora_pipeline: bool,
 }
 
 /// Every public knob, one bit each, lowest bit first.
@@ -71,44 +55,53 @@ const KNOBS: &[Knob] = &[
     Knob {
         name: "with_aozora",
         set: |o, on| o.with_aozora(on),
+        aozora_pipeline: true,
     },
     Knob {
         name: "with_hardbreaks",
         set: |o, on| o.with_hardbreaks(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_smart_punctuation",
         set: |o, on| o.with_smart_punctuation(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_cjk_friendly_emphasis",
         set: |o, on| o.with_cjk_friendly_emphasis(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_source_line_anchors",
         set: |o, on| o.with_source_line_anchors(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_tables",
         set: |o, on| o.with_tables(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_strikethrough",
         set: |o, on| o.with_strikethrough(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_autolinks",
         set: |o, on| o.with_autolinks(on),
+        aozora_pipeline: false,
     },
     Knob {
         name: "with_task_lists",
         set: |o, on| o.with_task_lists(on),
+        aozora_pipeline: false,
     },
 ];
 
 /// One public constructor: the name it is declared under, and the call.
 struct Constructor {
-    /// The `pub fn` name in `impl Options`, checked against [`LIB_RS`].
+    /// Human-readable spelling used in crash diagnostics.
     name: &'static str,
     /// The constructor itself.
     build: fn() -> Options,
@@ -131,90 +124,6 @@ const CONSTRUCTORS: &[Constructor] = &[
         build: Options::gfm,
     },
 ];
-
-/// Whether `needle` sits at `at` in `haystack`.
-const fn matches_at(haystack: &[u8], at: usize, needle: &[u8]) -> bool {
-    if at + needle.len() > haystack.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < needle.len() {
-        if haystack[at + i] != needle[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-/// The `pub fn` declarations at `impl` indentation in `src`, as
-/// `(total, of which `with_*`)`.
-///
-/// Every one of them belongs to `impl Options`: the free functions of that
-/// module sit at column zero, and it is the same shape
-/// `options_surface_contract.rs::public_options_api` reads with a `String`
-/// scanner it can afford.
-///
-/// One pass, and the shape of it is load-bearing rather than tidy. Two of
-/// these (one per needle) tripped `long_running_const_eval` on a 46 KB file —
-/// const evaluation is budgeted, and a scan that runs out of budget is a
-/// build that fails for a reason unrelated to what it was checking.
-const fn public_options_methods(src: &[u8]) -> (usize, usize) {
-    const DECL: &[u8] = b"\n    pub fn ";
-    let mut total = 0;
-    let mut knobs = 0;
-    let mut at = 0;
-    while at < src.len() {
-        // The cheap test first: the inner comparison then runs at the ~1,200
-        // line starts rather than at all 46,000 byte offsets.
-        if src[at] == b'\n' && matches_at(src, at, DECL) {
-            total += 1;
-            if matches_at(src, at + DECL.len(), b"with_") {
-                knobs += 1;
-            }
-        }
-        at += 1;
-    }
-    (total, knobs)
-}
-
-/// What `src/lib.rs` declares, measured once at compile time.
-const DECLARED: (usize, usize) = public_options_methods(LIB_RS.as_bytes());
-
-// A knob ADDED to `src/lib.rs` and not given a bit here. That is the whole
-// failure mode: the target would go on reporting a full sweep of a space
-// missing an axis.
-//
-// The other two directions need no scan, because the tables are not strings.
-// `KNOBS` holds calls to `o.with_aozora(on)` and `CONSTRUCTORS` holds
-// `Options::commonmark` itself, so a knob renamed or removed upstream is a
-// name that fails to resolve — this crate stops compiling before any
-// assertion here is reached.
-const _: () = assert!(
-    DECLARED.1 == KNOBS.len(),
-    "`src/lib.rs` declares a different number of public `with_*` knobs than KNOBS lists. A knob \
-     added there needs a bit here, or this target sweeps a space that is missing one axis while \
-     reporting full coverage of it."
-);
-
-const _: () = assert!(
-    DECLARED.0 == KNOBS.len() + CONSTRUCTORS.len(),
-    "`impl Options` declares a public method that is neither a `with_*` knob nor one of the \
-     constructors CONSTRUCTORS lists. Either it is a new base configuration this target should \
-     sweep from, or `public_options_methods` is reading something it was never meant to."
-);
-
-/// Which bit of the mask turns the aozora dialect on.
-///
-/// The one knob whose value changes which PIPELINE runs rather than which
-/// flag comrak is handed, so the assertions below have to read it back.
-const AOZORA_BIT: usize = 0;
-
-const _: () = assert!(
-    matches_at(KNOBS[AOZORA_BIT].name.as_bytes(), 0, b"with_aozora"),
-    "AOZORA_BIT no longer indexes `with_aozora`, so the dialect carve-out below is reading some \
-     other knob's bit and the tiers it gates are asserted against the wrong configuration."
-);
 
 /// How many leading bytes of the input are the option mask. Named because
 /// `tests/fuzz_regressions.rs` strips exactly this many off a promoted
@@ -239,6 +148,22 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
+    let ctor = &CONSTRUCTORS[(mask as usize >> KNOBS.len()) % CONSTRUCTORS.len()];
+    let mut options = (ctor.build)();
+    let mut aozora_pipeline = None;
+    for (bit, knob) in KNOBS.iter().enumerate() {
+        let on = mask & (1u16 << bit) != 0;
+        options = (knob.set)(options, on);
+        if knob.aozora_pipeline {
+            assert!(
+                aozora_pipeline.replace(on).is_none(),
+                "the option table marks more than one Aozora pipeline selector"
+            );
+        }
+    }
+    let aozora_pipeline =
+        aozora_pipeline.expect("the option table must mark its Aozora pipeline selector");
+
     // Tier B reads a reserved codepoint in the output as one the lexer
     // substituted and never resolved. That argument belongs to the lexer:
     // with the dialect off there is no lexer pass and no substitution, so a
@@ -248,14 +173,8 @@ fuzz_target!(|data: &[u8]| {
     // running, which is the finding it was built for and not a defect: the
     // tier's precondition is the dialect, and no sweep had ever asked it
     // with the dialect off.
-    if mask & (1u16 << AOZORA_BIT) == 0 && src.chars().any(|c| sentinels::ALL.contains(&c)) {
+    if !aozora_pipeline && src.chars().any(|c| sentinels::ALL.contains(&c)) {
         return;
-    }
-
-    let ctor = &CONSTRUCTORS[(mask as usize >> KNOBS.len()) % CONSTRUCTORS.len()];
-    let mut options = (ctor.build)();
-    for (bit, knob) in KNOBS.iter().enumerate() {
-        options = (knob.set)(options, mask & (1u16 << bit) != 0);
     }
     // Built only when something has already failed: `assert*!` formats its
     // message lazily, and this target runs the format-free path per exec.

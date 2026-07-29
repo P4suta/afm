@@ -31,7 +31,6 @@ dist = false
 # target.
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 # The `epub` version line, the same declaration the library beside this crate
 # makes and for the same reason — see its manifest. Both halves say it because

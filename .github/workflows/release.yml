@@ -15,7 +15,7 @@
 
 name: Release
 permissions:
-  "contents": "write"
+  contents: read
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -44,9 +44,14 @@ on:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
+    name: plan
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
@@ -71,8 +76,17 @@ jobs:
       # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
+        env:
+          DIST_TAG: ${{ github.ref_name }}
         run: |
-          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            scripts/cargo-lock-guard.sh \
+              dist plan --output-format=json > plan-dist-manifest.json
+          else
+            scripts/cargo-lock-guard.sh \
+              dist host --steps=create --tag="$DIST_TAG" --output-format=json \
+              > plan-dist-manifest.json
+          fi
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -131,9 +145,17 @@ jobs:
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
+        shell: bash
+        env:
+          DIST_ARGS: ${{ matrix.dist_args }}
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
+          read -r -a dist_args <<< "$DIST_ARGS"
+          read -r -a tag_args <<< "$DIST_TAG_FLAG"
           # Actually do builds and make zips and whatnot
-          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          scripts/cargo-lock-guard.sh \
+            dist build "${tag_args[@]}" --print=linkage --output-format=json \
+            "${dist_args[@]}" > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -143,9 +165,11 @@ jobs:
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -158,6 +182,7 @@ jobs:
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
+    name: build-global-artifacts
     needs:
       - plan
       - build-local-artifacts
@@ -184,14 +209,21 @@ jobs:
           merge-multiple: true
       - id: cargo-dist
         shell: bash
+        env:
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
-          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
+          read -r -a tag_args <<< "$DIST_TAG_FLAG"
+          scripts/cargo-lock-guard.sh \
+            dist build "${tag_args[@]}" --output-format=json "--artifacts=global" \
+            > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -203,6 +235,7 @@ jobs:
             ${{ env.BUILD_MANIFEST_NAME }}
   # Determines if we should publish/announce
   host:
+    name: host
     needs:
       - plan
       - build-local-artifacts
@@ -212,6 +245,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    permissions:
+      # `dist host` and `gh release create` publish the tag's GitHub Release.
+      contents: write
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -233,8 +269,13 @@ jobs:
           merge-multiple: true
       - id: host
         shell: bash
+        env:
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
-          dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          read -r -a tag_args <<< "$DIST_TAG_FLAG"
+          scripts/cargo-lock-guard.sh \
+            dist host "${tag_args[@]}" --steps=upload --steps=release \
+            --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -257,17 +298,25 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          IS_PRERELEASE: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          prerelease=()
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" \
+            "${prerelease[@]}" --title "$ANNOUNCEMENT_TITLE" \
+            --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:
+    name: announce
     needs:
       - plan
       - host
