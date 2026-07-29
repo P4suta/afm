@@ -269,6 +269,11 @@ impl Diagnostic {
     ///
     /// Non-empty source spans are checked for ordering, bounds, and UTF-8
     /// scalar boundaries before a miette report can be constructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiagnosticBindError`] when a source-origin span is inverted,
+    /// outside the supplied text, or lands between UTF-8 code units.
     pub fn bind_source(
         &self,
         name: impl AsRef<str>,

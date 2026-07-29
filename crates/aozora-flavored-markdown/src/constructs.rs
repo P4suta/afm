@@ -23,7 +23,8 @@
 //! are cached per run, so repeated notation is parsed once per spelling.
 
 use core::fmt;
-use core::ops::ControlFlow;
+use core::iter::once;
+use core::ops::{ControlFlow, Range};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -326,8 +327,10 @@ impl Constructs {
             &texts.emit,
             &nodes,
             diagnostics,
-            runs,
-            coordinates_are_original,
+            TileState {
+                runs,
+                coordinates_are_original,
+            },
         )
     }
 
@@ -339,8 +342,7 @@ impl Constructs {
         text: &str,
         nodes: &[Node],
         mut diagnostics: Vec<Diagnostic>,
-        runs: Runs,
-        coordinates_are_original: bool,
+        state: TileState,
     ) -> Self {
         let mut tiled = String::with_capacity(text.len());
         let mut entries = Vec::with_capacity(nodes.len());
@@ -387,14 +389,15 @@ impl Constructs {
         if lost > 0 {
             diagnostics.push(Diagnostic::constructs_unresolved(lost));
         }
-        let coordinates = coordinates_are_original
+        let coordinates = state
+            .coordinates_are_original
             .then(|| CoordinateMap::new(text.to_owned(), tiled.clone(), coordinate_segments));
         Self {
             text: tiled,
             tiled: text.to_owned(),
             entries,
             diagnostics,
-            runs,
+            runs: state.runs,
             coordinates,
         }
     }
@@ -462,6 +465,12 @@ impl Constructs {
 }
 
 #[derive(Debug)]
+struct TileState {
+    runs: Runs,
+    coordinates_are_original: bool,
+}
+
+#[derive(Debug)]
 struct CoordinateMap {
     source: String,
     generated: String,
@@ -511,13 +520,13 @@ impl CoordinateMap {
 
 #[derive(Debug)]
 struct CoordinateSegment {
-    generated: core::ops::Range<usize>,
-    source: core::ops::Range<usize>,
+    generated: Range<usize>,
+    source: Range<usize>,
     exact: bool,
 }
 
 impl CoordinateSegment {
-    const fn exact(generated: core::ops::Range<usize>, source: core::ops::Range<usize>) -> Self {
+    const fn exact(generated: Range<usize>, source: Range<usize>) -> Self {
         Self {
             generated,
             source,
@@ -525,10 +534,7 @@ impl CoordinateSegment {
         }
     }
 
-    const fn collapsed(
-        generated: core::ops::Range<usize>,
-        source: core::ops::Range<usize>,
-    ) -> Self {
+    const fn collapsed(generated: Range<usize>, source: Range<usize>) -> Self {
         Self {
             generated,
             source,
@@ -539,7 +545,7 @@ impl CoordinateSegment {
 
 fn line_starts(source: &str) -> Vec<usize> {
     let bytes = source.as_bytes();
-    core::iter::once(0)
+    once(0)
         .chain(
             bytes
                 .iter()
@@ -1607,7 +1613,15 @@ mod tests {
             (vec![node(1, 3)], "mid-codepoint"),
             (vec![node(3, 6), node(0, 3)], "out of order"),
         ] {
-            let table = Constructs::tile("前後", &nodes, Vec::new(), Runs::default(), true);
+            let table = Constructs::tile(
+                "前後",
+                &nodes,
+                Vec::new(),
+                TileState {
+                    runs: Runs::default(),
+                    coordinates_are_original: true,
+                },
+            );
             assert!(
                 table.entries.len() < nodes.len(),
                 "{why} must drop a construct: {table:?}"
@@ -1621,7 +1635,15 @@ mod tests {
             );
         }
         // A range that fits keeps its construct and reports nothing.
-        let table = Constructs::tile("前後", &[node(0, 3)], Vec::new(), Runs::default(), true);
+        let table = Constructs::tile(
+            "前後",
+            &[node(0, 3)],
+            Vec::new(),
+            TileState {
+                runs: Runs::default(),
+                coordinates_are_original: true,
+            },
+        );
         assert_eq!(table.entries.len(), 1);
         assert_eq!(table.text(), "\u{E001}後");
         assert!(table.diagnostics().is_empty());

@@ -74,6 +74,22 @@ fn build_in(dir: &Path, flags: &[&str]) -> (Output, PathBuf) {
     (output, out)
 }
 
+fn check_in(dir: &Path, flags: &[&str]) -> Output {
+    Command::new(epub_bin())
+        .args(flags)
+        .args([
+            "check",
+            "--input",
+            dir.join("manuscript").to_str().expect("utf8 input"),
+            "--metadata",
+            dir.join("book.toml").to_str().expect("utf8 metadata"),
+        ])
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .output()
+        .expect("spawn the epub binary")
+}
+
 fn stdout_of(out: &Output) -> &str {
     str::from_utf8(&out.stdout).expect("stdout must be UTF-8")
 }
@@ -106,6 +122,21 @@ fn a_clean_book_exits_zero_and_reports_nothing() {
         stderr_of(&out)
     );
     assert!(epub.exists(), "the .epub must be written");
+}
+
+#[test]
+fn check_runs_the_book_pipeline_without_creating_an_epub() {
+    let dir = fixture(&[("001.md", CLEAN_CHAPTER)]);
+    let out = check_in(dir.path(), &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        fs::read_dir(dir.path()).unwrap().all(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "epub")),
+        "check must not write a package"
+    );
 }
 
 #[test]

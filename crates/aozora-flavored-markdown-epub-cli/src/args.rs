@@ -16,7 +16,7 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) cmd: Cmd,
 
-    /// Exit 2 if any chapter raised a diagnostic. The EPUB is still written.
+    /// Exit 2 if any chapter raised a diagnostic. For `build`, the EPUB is still written.
     #[arg(long, global = true)]
     pub(crate) strict: bool,
 
@@ -38,6 +38,15 @@ pub(crate) enum Cmd {
         /// Output `.epub` path.
         #[arg(long, short = 'o')]
         output: PathBuf,
+    },
+    /// Validate and render a manuscript without writing an EPUB.
+    Check {
+        /// Input directory or single Aozora Flavored Markdown file.
+        #[arg(long)]
+        input: PathBuf,
+        /// `book.toml` metadata path.
+        #[arg(long)]
+        metadata: PathBuf,
     },
 }
 

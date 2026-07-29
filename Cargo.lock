@@ -160,6 +160,7 @@ dependencies = [
  "miette",
  "serde",
  "serde_json",
+ "similar",
  "tracing-subscriber",
 ]
 

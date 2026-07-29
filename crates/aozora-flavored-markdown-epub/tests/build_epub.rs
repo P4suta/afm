@@ -22,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Options, render};
-use aozora_flavored_markdown_epub::{BuildOptions, BuildReport, Error, build};
+use aozora_flavored_markdown_epub::{BuildOptions, BuildReport, CheckOptions, Error, build, check};
 use common::{Entry, entry_text, fixture, fixture_bytes, read_epub};
 
 const HORIZONTAL_BOOK: &str = "\
@@ -301,8 +301,87 @@ fn a_spine_beside_a_single_file_input_is_refused() {
     ))
     .unwrap_err();
     assert!(
-        matches!(err, Error::MetadataInvalid { field: "spine", .. }),
+        matches!(err, Error::SpineInvalid { .. }),
         "a configured spine must not be silently unused, got {err:?}"
+    );
+}
+
+#[test]
+fn an_explicitly_empty_spine_is_not_the_unspecified_default() {
+    let dir = fixture(&book_with_spine(""), THREE_CHAPTERS);
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::SpineInvalid { .. }), "{err:?}");
+}
+
+#[test]
+fn rooted_and_parent_spine_paths_are_refused_before_they_are_read() {
+    for entry in [r#""/tmp/outside.md""#, r#""../outside.md""#] {
+        let dir = fixture(&book_with_spine(entry), THREE_CHAPTERS);
+        let err = build(&BuildOptions::new(
+            &dir.path().join("manuscript"),
+            &dir.path().join("book.toml"),
+            &dir.path().join("o.epub"),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::SpineInvalid { .. }),
+            "{entry}: {err:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_spine_symlink_cannot_escape_the_manuscript_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = fixture(&book_with_spine(r#""escape.md""#), THREE_CHAPTERS);
+    let outside = dir.path().join("outside.md");
+    fs::write(&outside, "secret").unwrap();
+    symlink(&outside, dir.path().join("manuscript").join("escape.md")).unwrap();
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::SpineInvalid { .. }), "{err:?}");
+}
+
+#[test]
+fn an_xml_10_forbidden_source_character_is_refused_with_its_path() {
+    let dir = fixture(HORIZONTAL_BOOK, &[("001.md", "before\0after")]);
+    let chapter = dir.path().join("manuscript").join("001.md");
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::XmlCharacter { ref path, codepoint: 0, .. } if path == &chapter),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn check_runs_every_prepackage_phase_without_writing_an_epub() {
+    let dir = fixture(HORIZONTAL_BOOK, &[("001.md", "# 本文\n")]);
+    let output = dir.path().join("must-not-exist.epub");
+    let report = check(&CheckOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+    ))
+    .expect("the manuscript checks");
+    assert!(report.is_empty());
+    assert!(
+        !output.exists(),
+        "check has no output path and writes nothing"
     );
 }
 

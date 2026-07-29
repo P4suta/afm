@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 use crate::discover::{Manuscript, Metadata, WritingMode};
 use crate::render::RenderOutput;
+#[cfg(test)]
+use crate::validate::{is_bcp47_subset, validate_metadata};
 use crate::{Error, Result};
 
 /// Files to write into the EPUB ZIP, in their canonical order.
@@ -48,8 +50,6 @@ pub(crate) struct NamedFile {
 }
 
 pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Result<Bundle> {
-    validate_metadata(&manuscript.metadata)?;
-
     let id = manuscript
         .metadata
         .identifier
@@ -92,62 +92,6 @@ pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Resul
         spine,
         assets,
     })
-}
-
-/// Reject metadata that would leave the EPUB unreadable on the major
-/// reading systems. Narrow on purpose.
-fn validate_metadata(meta: &Metadata) -> Result<()> {
-    if meta.title.trim().is_empty() {
-        return Err(Error::MetadataInvalid {
-            field: "title",
-            reason: "dc:title must be a non-empty string".to_owned(),
-        });
-    }
-    if meta.creator.trim().is_empty() {
-        return Err(Error::MetadataInvalid {
-            field: "creator",
-            reason: "dc:creator must be a non-empty string".to_owned(),
-        });
-    }
-    if !is_bcp47_subset(&meta.language) {
-        return Err(Error::MetadataInvalid {
-            field: "language",
-            reason: format!(
-                "dc:language must be a BCP 47 tag (e.g. `ja`, `ja-JP`); got {:?}",
-                meta.language
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Permissive BCP 47 subset check: accepts a primary subtag of 2-3
-/// ASCII alphabetic characters, optionally followed by `-` and one or
-/// more 2-8 alphanumeric subtags. Covers `ja`, `en-US`, `zh-Hant-TW`,
-/// `ja-Jpan-JP-x-private` etc. Stricter than `regex` for the trivial
-/// invariants downstream readers care about.
-fn is_bcp47_subset(tag: &str) -> bool {
-    if tag.is_empty() {
-        return false;
-    }
-    let mut subtags = tag.split('-');
-    // `str::split` always yields at least one element, so `next` is `Some`.
-    let primary = subtags.next().unwrap_or_default();
-    if primary.len() < 2 || primary.len() > 3 {
-        return false;
-    }
-    if !primary.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return false;
-    }
-    for sub in subtags {
-        if sub.len() < 2 || sub.len() > 8 {
-            return false;
-        }
-        if !sub.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return false;
-        }
-    }
-    true
 }
 
 fn container_xml() -> Result<String> {
@@ -468,7 +412,7 @@ mod tests {
             language: language.to_owned(),
             identifier: None,
             writing_mode,
-            spine: Vec::new(),
+            spine: None,
         }
     }
 

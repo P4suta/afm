@@ -2,7 +2,7 @@
 //! `book.toml` overrides it) and parse that manifest into [`Metadata`].
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -12,6 +12,7 @@ use crate::{BuildOptions, Error, Result};
 #[derive(Debug, Clone)]
 pub(crate) struct Manuscript {
     pub metadata: Metadata,
+    pub metadata_path: PathBuf,
     pub sources: Vec<SourceFile>,
 }
 
@@ -29,12 +30,11 @@ pub(crate) struct Metadata {
     pub identifier: Option<String>,
     #[serde(default = "default_mode")]
     pub writing_mode: WritingMode,
-    // Chapter files in reading order, each relative to the manuscript
-    // directory. Authoritative when present: exactly these files, in this
-    // order. Empty — the default — leaves the order to the directory sweep,
-    // which is lexicographic.
+    // `None` means no explicit order and selects the directory sweep.
+    // `Some([])` is deliberately distinct: an explicitly empty EPUB spine is
+    // invalid rather than another spelling of the default.
     #[serde(default)]
-    pub spine: Vec<PathBuf>,
+    pub spine: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -98,25 +98,30 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
         // nothing here for it to order. Refusing beats the alternative:
         // building the one file the caller named while the list of chapters
         // the manifest asked for goes unread, without a word.
-        if !metadata.spine.is_empty() {
-            return Err(Error::MetadataInvalid {
-                field: "spine",
-                reason: format!(
-                    "`spine` orders the files of a manuscript directory, but the input is the \
-                     single file {}",
-                    opts.input.display()
-                ),
+        if metadata.spine.is_some() {
+            return Err(Error::SpineInvalid {
+                path: opts.input.to_path_buf(),
+                reason: "`spine` cannot be used with a single-file input".to_owned(),
             });
         }
         vec![read_source(opts.input)?]
-    } else if metadata.spine.is_empty() {
-        sweep(opts.input)?
     } else {
-        metadata
-            .spine
-            .iter()
-            .map(|entry| read_source(&opts.input.join(entry)))
-            .collect::<Result<Vec<_>>>()?
+        match metadata.spine.as_deref() {
+            None => sweep(opts.input)?,
+            Some([]) => {
+                return Err(Error::SpineInvalid {
+                    path: opts.input.to_path_buf(),
+                    reason: "an explicit `spine` must contain at least one chapter".to_owned(),
+                });
+            }
+            Some(entries) => entries
+                .iter()
+                .map(|entry| {
+                    let path = validate_spine_path(opts.input, entry)?;
+                    read_source(&path)
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }
     };
 
     // An empty book is not a book. Left to run, `compose` writes a package
@@ -128,7 +133,48 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
         });
     }
 
-    Ok(Manuscript { metadata, sources })
+    Ok(Manuscript {
+        metadata,
+        metadata_path: opts.metadata.to_path_buf(),
+        sources,
+    })
+}
+
+fn validate_spine_path(root: &Path, entry: &Path) -> Result<PathBuf> {
+    if entry.components().any(|part| {
+        matches!(
+            part,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(Error::SpineInvalid {
+            path: entry.to_path_buf(),
+            reason: "entries must be relative paths contained by the manuscript root".to_owned(),
+        });
+    }
+
+    let canonical_root = fs::canonicalize(root).map_err(|source| Error::DiscoverIo {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let candidate = root.join(entry);
+    let canonical = fs::canonicalize(&candidate).map_err(|source| Error::DiscoverIo {
+        path: candidate.clone(),
+        source,
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(Error::SpineInvalid {
+            path: candidate,
+            reason: "the resolved path escapes the manuscript root".to_owned(),
+        });
+    }
+    if !canonical.is_file() {
+        return Err(Error::SpineInvalid {
+            path: candidate,
+            reason: "the resolved path is not a regular file".to_owned(),
+        });
+    }
+    Ok(candidate)
 }
 
 // Lexicographic by full path, which is what zero-padded chapter numbers are

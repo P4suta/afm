@@ -7,6 +7,7 @@ use std::str;
 use aozora_flavored_markdown::{Options, escape_html, render};
 
 use crate::discover::{Encoding, Manuscript, SourceFile, encoding_of};
+use crate::validate::validate_xml_text;
 use crate::{ChapterReport, Error, Result};
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,7 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
     let mut chapters = Vec::new();
     for (idx, source) in manuscript.sources.iter().enumerate() {
         let text = decode_source(source)?;
+        validate_xml_text(&source.path, "chapter source", &text)?;
         let rendered = render(&text, &opts);
         let title = source
             .path
@@ -40,6 +42,7 @@ pub(crate) fn render_all(manuscript: &Manuscript) -> Result<RenderOutput> {
             .and_then(|s| s.to_str())
             .unwrap_or("untitled")
             .to_owned();
+        validate_xml_text(&source.path, "chapter title", &title)?;
         let xhtml = wrap_xhtml(&title, &rendered.html, &manuscript.metadata.language);
         items.push(SpineItem {
             href: format!("chapter-{:03}.xhtml", idx + 1),
@@ -80,7 +83,7 @@ fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
     // The renderer owns the escape table; a copy here could gain a character
     // on its own and leave one of the two sides open.
     let title = escape_html(title);
-    let lang = escape_html(lang);
+    let lang = escape_xml_attribute(lang);
     // The body opts into the bundled theme via `aozora-md-root`. The
     // writing mode (horizontal vs. vertical) is decided by which theme
     // `aozora-md.css` carries, selected per book in `compose`, so the
@@ -100,6 +103,23 @@ fn wrap_xhtml(title: &str, body_html: &str, lang: &str) -> String {
 </html>
 "#,
     )
+}
+
+// XML 1.0 §3.3.3 normalises literal TAB/LF/CR in attributes. Numeric
+// references preserve the authored scalar value, while the renderer's escape
+// table handles the five markup-significant characters.
+fn escape_xml_attribute(value: &str) -> String {
+    let escaped = escape_html(value);
+    let mut output = String::with_capacity(escaped.len());
+    for ch in escaped.chars() {
+        match ch {
+            '\t' => output.push_str("&#9;"),
+            '\n' => output.push_str("&#10;"),
+            '\r' => output.push_str("&#13;"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -292,6 +312,18 @@ mod tests {
         assert!(xhtml.contains("href=\"css/aozora-md.css\""), "{xhtml}");
         assert!(theme::HORIZONTAL_CSS.contains(".aozora-md-root"));
         assert!(theme::VERTICAL_CSS.contains(".aozora-md-root"));
+    }
+
+    #[test]
+    fn xml_attribute_whitespace_survives_as_numeric_references() {
+        let language = "ja\tJpan\nJP\rprivate";
+        let xhtml = wrap_xhtml("title", "", language);
+        assert!(
+            xhtml.contains(r#"lang="ja&#9;Jpan&#10;JP&#13;private""#),
+            "{xhtml}"
+        );
+        let (_, read_language) = read_back(&xhtml);
+        assert_eq!(read_language, language);
     }
 
     /// A `.sjis` source is decoded through the `Shift_JIS` branch:

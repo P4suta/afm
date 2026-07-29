@@ -152,7 +152,7 @@ fn find_hidden_row(text: &str, from: usize, hidden: u8, width: usize) -> Option<
         let line_is_only_the_run = bytes[line_start..at]
             .iter()
             .chain(&bytes[end..line_end])
-            .all(|byte| byte.is_ascii_whitespace());
+            .all(u8::is_ascii_whitespace);
         if run_matches && bounded && line_is_only_the_run {
             return Some(at..end);
         }
