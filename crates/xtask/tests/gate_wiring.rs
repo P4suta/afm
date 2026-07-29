@@ -7906,24 +7906,77 @@ const TWO_CHANNEL_JOB: &str = "dependabot";
 /// of the two.
 const SECOND_REPORTER: &str = "steps.posture.outputs.posture != 'off'";
 
+const TWO_CHANNEL_LABEL: &str = "<fixture: a job reporting through two channels>";
+
+/// The shape the mutation tests below measure the readers against. It was
+/// `audit.yml`'s `dependabot` job until #267 deleted it. A literal rather than
+/// a live workflow because a mutation test stops measuring its reader the day
+/// somebody edits that workflow for an unrelated reason — which is what
+/// happened here. No job carries two reporters today; the reader still has to
+/// answer when one does.
+const TWO_CHANNEL_FIXTURE: &str = r#"name: audit
+
+on:
+  schedule:
+    - cron: "40 15 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  dependabot:
+    name: dependabot alerts and security updates still on
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ask the repository what SECURITY.md says about it
+        id: posture
+        run: |
+          set -euo pipefail
+          printf 'posture=off\n' >> "$GITHUB_OUTPUT"
+
+      - name: Say that the posture stopped matching
+        if: ${{ failure() && github.event_name == 'schedule' && steps.posture.outputs.posture == 'off' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: Dependabot alerts or security updates are no longer on"
+          body: |
+            The posture this job watches stopped matching what SECURITY.md
+            claims. Turn it back on, then close this issue — the next failing
+            run files it again.
+
+      - name: Say that the posture could not be read
+        if: ${{ failure() && github.event_name == 'schedule' && steps.posture.outputs.posture != 'off' }}
+        uses: ./.github/actions/report-failure
+        with:
+          title: "audit: the Dependabot posture check cannot see the settings it watches"
+          body: |
+            This job could not read the settings it watches, so the claim is
+            unverified rather than false. Fix the run, then close this issue —
+            the next failing run files it again.
+"#;
+
 #[test]
 fn a_second_reporter_that_cannot_run_is_not_covered_by_the_first() {
-    // The hole the fourth job of audit.yml opened in the rule above it. That
-    // rule asked each `Filer` for the FIRST step using it and stopped there, so
-    // a job with two reporters was judged on one: break the second and the
-    // first still answers, the workflow still reads as having a channel, and
-    // the finding the second exists for — a posture that could not be read,
-    // as against read and wrong — silently stops being filed.
-    //
-    // The failure mode is the one the test above this section already
-    // measures, one level down: `if: ${{ failure() && … }}` is what puts a
-    // reporter on the failing run, and GitHub supplies `success()` for an
-    // expression that names no status function.
-    let text = read(LICENCE_WATCH);
+    // The hole a two-reporter job opens in the rule above it. That rule asked
+    // each `Filer` for the FIRST step using it and stopped there, so break the
+    // second and the first still answers: the workflow reads as having a
+    // channel while the finding the second exists for stops being filed.
+    // `if: ${{ failure() && … }}` is what puts a reporter on the failing run,
+    // and GitHub supplies `success()` for an expression naming no status
+    // function.
+    let text = TWO_CHANNEL_FIXTURE.to_owned();
     assert_eq!(
         reporting_channel(&text, TWO_CHANNEL_JOB).as_deref(),
         Ok("opens a rolling issue"),
-        "the tree this mutation starts from does not have the channel it is about to break"
+        "the fixture this mutation starts from does not have the channel it is about to break"
     );
     let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the job the channel was just read off");
     assert_eq!(
@@ -7951,7 +8004,7 @@ fn a_second_reporter_that_cannot_run_is_not_covered_by_the_first() {
         reporting_channel(&broken, TWO_CHANNEL_JOB)
     );
 
-    let silent = jobs_with_no_channel(&one_workflow(LICENCE_WATCH, broken));
+    let silent = jobs_with_no_channel(&one_workflow(TWO_CHANNEL_LABEL, broken));
     assert!(
         named(&silent, TWO_CHANNEL_JOB),
         "the rule did not name the job whose second channel is gone:\n{silent:?}"
@@ -7966,12 +8019,12 @@ fn reporters_that_all_narrow_leave_whatever_neither_names_unreported() {
     // ways the job fails. `== 'off'` and `!= 'off'` partition every run;
     // `== 'off'` and `== 'blind'` leave the third answer reaching nobody, and
     // `== 'off'` twice files two issues for one failure.
-    let text = read(LICENCE_WATCH);
+    let text = TWO_CHANNEL_FIXTURE.to_owned();
     let lines = job_lines(&text, TWO_CHANNEL_JOB).expect("the two-channel job");
     assert_eq!(
         every_failure_reaches_a_channel(&lines),
         Ok(()),
-        "the tree this mutation starts from is already uncovered, so nothing below is about the \
+        "the fixture this mutation starts from is already uncovered, so nothing below is about the \
          mutation"
     );
 
@@ -8458,14 +8511,11 @@ fn unresolved_outputs(workflows: &[(String, String)]) -> Vec<String> {
 
 #[test]
 fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
-    // The seam the two-channel job runs on, and the quietest one in this
-    // repository. An unset `steps.<id>.outputs.<name>` is not an error at run
-    // time: it is the empty string. So a renamed `id:`, or a script that stops
-    // writing the output, leaves `== 'off'` false for ever and `!= 'off'` true
-    // for ever — and the job goes on reporting, through the wrong one of its
-    // two channels, on every failure it ever has. Every gate stays green: the
-    // steps are all there, the guards all name `failure()`, and the reporters
-    // still hold `issues: write`.
+    // The quietest seam in this repository. An unset
+    // `steps.<id>.outputs.<name>` is not an error at run time: it is the empty
+    // string, so a renamed `id:` or a script that stops writing the output
+    // leaves every condition reading it answering the same way for ever, with
+    // every gate green — the steps are all there and the guards all parse.
     let workflows = read_workflows();
     let references: Vec<(String, String, String)> = workflows
         .iter()
@@ -8478,15 +8528,6 @@ fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
         references.len(),
         workflows.len()
     );
-    assert!(
-        references
-            .iter()
-            .any(|(_, id, name)| id == "posture" && name == "posture"),
-        "the reference the two reporting channels of audit.yml split on was not among the {} \
-         found",
-        references.len()
-    );
-
     let dangling = unresolved_outputs(&workflows);
     assert!(
         dangling.is_empty(),
@@ -8499,16 +8540,16 @@ fn every_step_output_a_condition_reads_is_one_the_step_it_names_writes() {
 
 #[test]
 fn a_renamed_step_and_an_unwritten_output_are_both_read_as_dangling() {
-    let text = read(LICENCE_WATCH);
+    let text = TWO_CHANNEL_FIXTURE.to_owned();
     assert!(
-        unresolved_outputs(&one_workflow(LICENCE_WATCH, text.clone())).is_empty(),
-        "the workflow these mutations start from already reads as dangling"
+        unresolved_outputs(&one_workflow(TWO_CHANNEL_LABEL, text.clone())).is_empty(),
+        "the fixture these mutations start from already reads as dangling"
     );
 
     // The `id:` moves and the two conditions reading it do not.
     let renamed = text.replace("id: posture", "id: settings");
     assert_ne!(renamed, text, "no `id: posture` was found to rename");
-    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, renamed));
+    let dangling = unresolved_outputs(&one_workflow(TWO_CHANNEL_LABEL, renamed));
     assert!(
         dangling
             .iter()
@@ -8523,7 +8564,7 @@ fn a_renamed_step_and_an_unwritten_output_are_both_read_as_dangling() {
         silent, text,
         "no write to `$GITHUB_OUTPUT` was found to cut"
     );
-    let dangling = unresolved_outputs(&one_workflow(LICENCE_WATCH, silent));
+    let dangling = unresolved_outputs(&one_workflow(TWO_CHANNEL_LABEL, silent));
     assert!(
         dangling
             .iter()
