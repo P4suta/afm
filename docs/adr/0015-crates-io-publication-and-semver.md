@@ -111,14 +111,12 @@ a change to rendered HTML for any CommonMark/GFM input, the
 `aozora-md.diagnostics.v1` schema (ADR-0012), the public IR enums (ADR-0013), or
 `Options::default`. Patch = additive features and fixes.
 
-**Semver enforcement (amended).** `cargo semver-checks` runs as `just semver`:
-a `[group('gate')]` recipe, so a per-PR CI leg, and a step of the
-`publish-crates.yml` preflight. This ADR first said the check "cannot run until
-a baseline exists on crates.io" and deferred it past the first publish. That
-was wrong, and the correction is the reason for this amendment:
-`--baseline-rev <tag>` takes the baseline out of this repository's git
-history and needs no registry presence at all. The check was available the
-whole time the public surface was being rebuilt.
+**Semver enforcement (amended).** This ADR first deferred `cargo semver-checks`
+past the first publish, on the stated grounds that it needed a baseline on
+crates.io. That was wrong, and the correction is the reason for this amendment:
+`--baseline-rev <tag>` takes the baseline out of this repository's git history
+and needs no registry presence at all. The check was available the whole time
+the public surface was being rebuilt.
 
 The baseline is `v0.4.1`, the newest tag, and the flag is scaffolding — after
 the first publish it comes out and the registry version, cargo-semver-checks'

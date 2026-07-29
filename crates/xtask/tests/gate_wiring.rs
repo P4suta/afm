@@ -6947,23 +6947,11 @@ fn a_new_advisory_arrives_as_an_issue_and_not_only_as_a_red_square() {
     }
 }
 
-/// Files that describe this repository's own CI to a reader. History is out:
-/// `CHANGELOG.md` records what was true when it was written, and editing it to
-/// match today is how a record stops being one.
-///
-/// The ADRs used to be out on the same reasoning, and that was the hole. An
-/// ADR is not a log entry — `- Status: accepted` means the decision is in
-/// force, which is exactly the authority that makes a wrong sentence in one
-/// expensive. ADR-0015 carried "`cargo semver-checks` cannot run until a
-/// baseline exists on crates.io" for as long as the check went unwired, and
-/// the reason it went unwired is that somebody read it. So an accepted ADR is
-/// read here, and a superseded, deprecated or proposed one is not: those are
-/// the ADRs that genuinely record rather than instruct.
-const CI_PROSE_ROOTS: &[&str] = &["", "docs", "docs/adr"];
-const CI_PROSE_HISTORY: &[&str] = &["CHANGELOG.md"];
+/// The ADR every other one is copied from, and so the file that spells the
+/// status vocabulary.
+const ADR_TEMPLATE: &str = "docs/adr/0000-template.md";
 
-/// The `- Status:` an ADR declares, lower-cased. `None` for a document with
-/// no such line, which is every `.md` outside `docs/adr`.
+/// The `- Status:` a document declares, lower-cased. `None` outside `docs/adr`.
 fn adr_status(text: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.trim().strip_prefix("- Status:"))
@@ -6971,14 +6959,39 @@ fn adr_status(text: &str) -> Option<String> {
 }
 
 /// Is this document in force, as opposed to recording something that was?
-/// Everything outside `docs/adr` is; an ADR is when its status is `accepted`.
-/// The template's placeholder status names all four states at once and is
-/// therefore none of them.
+///
+/// An ADR is when it is `accepted`: that status means the decision is in
+/// force, which is the authority that makes a wrong sentence in one expensive
+/// — see the section on the check ADR-0015 said could not run. Anything else
+/// with a status, and the records `crates/xtask/src/main.rs` already names,
+/// record rather than instruct.
+///
+/// The statuses come off [`ADR_TEMPLATE`]'s placeholder line rather than a
+/// list here, because a status this reader did not recognise used to read as
+/// not-in-force in silence — taking the whole document out of every rule
+/// below with every gate still green.
 fn describes_this_repo_now(label: &str, text: &str) -> bool {
-    if !label.starts_with("docs/adr/") {
-        return true;
-    }
-    adr_status(text).is_some_and(|status| status.starts_with("accepted"))
+    let Some(status) = adr_status(text) else {
+        return !history_paths()
+            .iter()
+            .any(|history| label == history || label.starts_with(&format!("{history}/")));
+    };
+    // `superseded by ADR-XXXX` is offered with a number the writer supplies,
+    // so an offer is matched on the literal half of itself.
+    let placeholder = adr_status(&read(ADR_TEMPLATE))
+        .unwrap_or_else(|| panic!("`{ADR_TEMPLATE}` declares no `- Status:` line to read"));
+    let offered: Vec<&str> = placeholder
+        .trim_matches(|ch| ch == '{' || ch == '}')
+        .split('|')
+        .map(|offer| offer.split("adr-").next().unwrap_or_default().trim())
+        .collect();
+    assert!(
+        label == ADR_TEMPLATE || offered.iter().any(|offer| status.starts_with(offer)),
+        "{label} declares `- Status: {status}` and `{ADR_TEMPLATE}` offers {offered:?}. A status \
+         nothing recognises reads as not-in-force, so a typo takes the document out of every rule \
+         below and fails nothing."
+    );
+    status == "accepted"
 }
 
 /// Words that deny, and the scheduled-run nouns they must not be attached to.
@@ -7009,100 +7022,152 @@ fn prose_words(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every line of `text` on which a word from `negations` reaches a word from
-/// `nouns`, one-based line number and the line itself.
+/// Words that hand the sentence to a new subject, which is what makes a comma
+/// the end of a clause rather than an interruption in one.
+const CONJUNCTIONS: &[&str] = &[
+    "and", "but", "or", "yet", "though", "although", "whereas", "while",
+];
+
+/// The clauses of one unwrapped paragraph, outside backticks so a command
+/// keeps its own punctuation.
 ///
-/// A denial inside straight double quotes is a quotation, not a claim, and the
-/// distinction has to be made or the rule cannot be obeyed: the amendment that
-/// closed ADR-0015 quotes the sentence it retired, and the only thing that
-/// stopped the quotation from reading as a fresh assertion was where the line
-/// happened to wrap. Quote parity is counted from the start of the paragraph
-/// rather than the file, so an unbalanced `"` costs one paragraph.
-fn denials_in(text: &str, negations: &[&str], nouns: &[&str]) -> Vec<(usize, String)> {
+/// A comma cuts only when a conjunction follows it. Cutting at every comma
+/// was the boundary a negation's reach could not cross, and an interrupted
+/// negation — "does not, on any pull request, run `just test`" — landed on the
+/// far side of one. What the cut is really for is CONTRIBUTING.md's two native
+/// gates, which "need a toolchain the dev image has not got, AND they run the
+/// same recipe there": the conjunction is the word doing that work, so it is
+/// the word asked for.
+fn clauses_of(paragraph: &str) -> Vec<&str> {
+    let characters: Vec<(usize, char)> = paragraph.char_indices().collect();
     let mut out = Vec::new();
-    let mut quoted = false;
+    let mut code = false;
+    let mut start = 0;
+    for (at, &(offset, ch)) in characters.iter().enumerate() {
+        code ^= ch == '`';
+        // A full stop ends a sentence unless a word runs on through it, so
+        // `crates.io`, `docs.yml` and `0.4.1` stay in one piece.
+        let stop = matches!(ch, '.' | '!' | '?')
+            && !characters
+                .get(at + 1)
+                .is_some_and(|&(_, next)| next.is_ascii_alphanumeric());
+        let hands_over = ch == ','
+            && paragraph[offset + ch.len_utf8()..]
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| CONJUNCTIONS.contains(&word.to_lowercase().as_str()));
+        if !code && (stop || hands_over || matches!(ch, ';' | ':' | '(' | ')' | '—' | '–')) {
+            out.push(paragraph[start..offset].trim());
+            start = offset + ch.len_utf8();
+        }
+    }
+    out.push(paragraph[start..].trim());
+    out.retain(|clause| !clause.is_empty());
+    out
+}
+
+/// Every clause of `text` in which a word from `negations` reaches a word from
+/// `nouns`, with the line its paragraph starts at.
+///
+/// Paragraphs, because where a sentence wraps is a typesetting decision: a
+/// line-at-a-time reader could attribute a denial to the tool it was about
+/// only when both landed on one physical line, so reflowing defeated it.
+/// [`clauses_of`] then bounds the reach. Fenced blocks are dropped: a
+/// transcript is not a claim.
+fn denials_in(text: &str, negations: &[&str], nouns: &[&str]) -> Vec<(usize, String)> {
+    let mut paragraphs: Vec<(usize, String)> = Vec::new();
+    let (mut fenced, mut open) = (false, false);
     for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            quoted = false;
+        let line = line.trim();
+        let fence = line.starts_with("```");
+        fenced ^= fence;
+        if line.is_empty() || fence || fenced {
+            open = false;
+        } else if open {
+            let (_, paragraph) = paragraphs.last_mut().expect("open implies a paragraph");
+            paragraph.push(' ');
+            paragraph.push_str(line);
+        } else {
+            paragraphs.push((index + 1, line.to_owned()));
+            open = true;
         }
-        let mut words: Vec<(bool, String)> = Vec::new();
-        let mut word = String::new();
-        for ch in line.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '-' {
-                word.push(ch.to_ascii_lowercase());
-                continue;
+    }
+
+    let mut out = Vec::new();
+    for (line, paragraph) in &paragraphs {
+        for clause in clauses_of(paragraph) {
+            let words = prose_words(clause);
+            let denies = words.iter().enumerate().any(|(at, word)| {
+                negations.contains(&word.as_str())
+                    && words
+                        .iter()
+                        .skip(at + 1)
+                        .take(NEGATION_REACH)
+                        .any(|later| nouns.contains(&later.as_str()))
+            });
+            if denies {
+                out.push((*line, clause.to_owned()));
             }
-            if !word.is_empty() {
-                words.push((quoted, mem::take(&mut word)));
-            }
-            if ch == '"' {
-                quoted = !quoted;
-            }
-        }
-        if !word.is_empty() {
-            words.push((quoted, word));
-        }
-        let denies = words.iter().enumerate().any(|(at, (in_quotes, word))| {
-            !in_quotes
-                && negations.contains(&word.as_str())
-                && words
-                    .iter()
-                    .skip(at + 1)
-                    .take(NEGATION_REACH)
-                    .any(|(_, later)| nouns.contains(&later.as_str()))
-        });
-        if denies {
-            out.push((index + 1, line.trim().to_owned()));
         }
     }
     out
 }
 
-/// Does this line deny that a scheduled run exists?
-fn denies_a_schedule(line: &str) -> bool {
-    !denials_in(line, NEGATIONS, SCHEDULE_NOUNS).is_empty()
-}
-
-/// Every `.md` that describes this repo rather than recording its past.
+/// Every `.md` in force that describes this repository to a reader: the prose
+/// at the root, everything under `docs/` and `.github/`, and each workspace
+/// member's own page.
+///
+/// Walked rather than listed, for the reason the conformance-figure reader is
+/// walked: the defect these rules exist for is a copy nobody knew about. The
+/// three listed roots this replaced missed all five crate READMEs — the pages
+/// a reader meets first, published inside the packages themselves — and
+/// `.github/`, whose pull-request template addresses a contributor at the
+/// moment the claims in it are being acted on.
+///
+/// A directory predicate rather than every tracked `.md`, because the rest are
+/// content: `playground/examples/` and the EPUB sample manuscript are input
+/// this suite renders, and a denial written into one of those is a sentence
+/// nobody is being told.
 fn ci_prose_files() -> Vec<(String, String)> {
-    let root = repo_root();
-    let mut out = Vec::new();
-    for directory in CI_PROSE_ROOTS {
-        let path = root.join(directory);
-        let mut entries: Vec<PathBuf> = fs::read_dir(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        entries.sort();
-        for file in entries {
-            let label = label_of(&file);
-            if CI_PROSE_HISTORY
-                .iter()
-                .any(|history| label.starts_with(history))
-            {
-                continue;
-            }
-            let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("reading {label}: {e}"));
-            if !describes_this_repo_now(&label, &text) {
-                continue;
-            }
-            out.push((label, text));
-        }
-    }
+    let members: BTreeSet<String> = workspace_members()
+        .iter()
+        .map(|member| crate_dir(&member.path).to_owned())
+        .collect();
+    let out: Vec<(String, String)> = git_tracked(&[])
+        .into_iter()
+        .filter(|label| {
+            let at = label.rsplit_once('/').map_or("", |(head, _)| head);
+            let addresses_a_reader = |root: &str| at == root || at.starts_with(&format!("{root}/"));
+            Path::new(label)
+                .extension()
+                .is_some_and(|kind| kind == "md")
+                && (at.is_empty()
+                    || addresses_a_reader("docs")
+                    || addresses_a_reader(".github")
+                    || members.contains(at))
+        })
+        .map(|label| {
+            let text = read(&label);
+            (label, text)
+        })
+        .filter(|(label, text)| describes_this_repo_now(label, text))
+        .collect();
+    // Asked here rather than in each of the three rules that read this, since
+    // a reader that has stopped finding the documents passes all of them at
+    // once. An accepted ADR is the class whose excusal as history let
+    // ADR-0015's own sentence stand.
+    assert!(
+        out.iter().any(|(label, _)| label == "SECURITY.md")
+            && out.iter().any(|(label, _)| label.starts_with("docs/adr/")),
+        "the prose reader found {:?}",
+        out.iter().map(|(label, _)| label).collect::<Vec<_>>()
+    );
     out
 }
 
 #[test]
 fn no_document_denies_a_scheduled_run_this_repo_makes() {
     let documents = ci_prose_files();
-    assert!(
-        documents.iter().any(|(label, _)| label == "SECURITY.md"),
-        "the reader is not finding the documents; it found {:?}",
-        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
-    );
-
     let mut denials = Vec::new();
     for (label, text) in &documents {
         for (line, denial) in denials_in(text, NEGATIONS, SCHEDULE_NOUNS) {
@@ -7117,31 +7182,13 @@ fn no_document_denies_a_scheduled_run_this_repo_makes() {
          authority of policy and the lifespan of a guess.",
         denials.join("\n")
     );
-
-    // The other direction, because deleting the sentence is not the same as
-    // describing what replaced it: the document that discusses the advisory
-    // gates has to name the workflow that schedules them, or the reader is
-    // simply told less than before.
-    let security = read("SECURITY.md");
-    let scheduling: Vec<String> = read_workflows()
-        .into_iter()
-        .filter(|(_, text)| {
-            runs_on_a_cron(text)
-                && CLOCK_DEPENDENT_GATES
-                    .iter()
-                    .any(|&(gate, _)| recipes_invoked(text).contains(gate))
-        })
-        .map(|(label, _)| label)
-        .collect();
-    assert!(
-        scheduling
-            .iter()
-            .any(|label| security.contains(label.as_str())),
-        "SECURITY.md discusses `just audit` and `just deny` and names none of {scheduling:?}, the \
-         workflows that actually re-run them. It described the gap when the gap was real; it has \
-         to describe the control now that the control is."
-    );
 }
+
+// The other direction of this rule used to require SECURITY.md to contain the
+// literal string `.github/workflows/audit.yml`. That is a gate compelling a
+// document to restate a config file, which is the defect above with the sign
+// flipped; the sentence it compelled has gone with it. SECURITY.md keeps only
+// why the schedule is not redundant with the pull request, which no file says.
 
 /// Where the per-package licence waivers live, and where the watch over them
 /// does.
@@ -8339,28 +8386,6 @@ fn a_trigger_is_read_off_the_on_block_and_a_job_named_alike_is_not() {
     );
 }
 
-#[test]
-fn a_denial_of_a_schedule_is_read_and_a_description_of_one_is_not() {
-    for denial in [
-        "request; there is no cron workflow.",
-        "These do not run on a schedule.",
-        "The advisory scan never runs nightly.",
-    ] {
-        assert!(denies_a_schedule(denial), "a denial went unread: {denial}");
-    }
-    for description in [
-        "The schedule is not redundant with the pull request: an advisory is",
-        "That nightly run also files a GitHub issue per newly disclosed advisory,",
-        "published against a `Cargo.lock` nobody has touched, which is the one case",
-        "Not a PR gate: it depends on upstream release timing, so it must never redden",
-    ] {
-        assert!(
-            !denies_a_schedule(description),
-            "prose describing a schedule was read as denying one: {description}"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // a control that is a SETTING rather than a file
 // ---------------------------------------------------------------------------
@@ -8529,11 +8554,6 @@ fn settings_nothing_reads(
 #[test]
 fn every_repository_setting_this_repos_prose_rests_on_is_one_a_scheduled_job_reads() {
     let documents = ci_prose_files();
-    assert!(
-        documents.iter().any(|(label, _)| label == "SECURITY.md"),
-        "the reader is not finding the documents; it found {:?}",
-        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
-    );
     assert!(
         !REPOSITORY_SETTINGS.is_empty(),
         "the settings this repo's prose rests on are the whole net of this rule, and there are \
@@ -10035,16 +10055,6 @@ const RUN_NOUNS: &[&str] = &[
     "invoked",
 ];
 
-/// Sub-command and gate names that are also ordinary English. A document
-/// saying something "cannot run" or "is not gated" while the word `build` or
-/// `check` happens to appear on the line is discussing work, not asserting
-/// that a named tool is unavailable — and a reader that took these as names
-/// would fire on most sentences about a compile.
-const TOOL_WORDS_THAT_ARE_ALSO_PROSE: &[&str] = &[
-    "add", "bench", "build", "check", "clean", "coverage", "doc", "fuzz", "install", "metadata",
-    "pin", "prop", "publish", "remove", "run", "spec", "test", "tree", "update",
-];
-
 /// The tools this repo drives, as a document would spell them: the
 /// sub-command for a `cargo` call, the command name for anything else.
 ///
@@ -10063,49 +10073,60 @@ fn tool_vocabulary(justfile: &str) -> BTreeSet<String> {
             }
         }
     }
-    out.retain(|word| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&word.as_str()));
     out
 }
 
-/// The words of `line` that appear in `vocabulary`.
-fn names_any(line: &str, vocabulary: &BTreeSet<String>) -> Vec<String> {
-    let mut named: Vec<String> = prose_words(line)
-        .into_iter()
-        .filter(|word| vocabulary.contains(word))
-        .collect();
-    named.sort();
-    named.dedup();
-    named
+/// The names from `vocabulary` that `clause` puts in COMMAND position: a
+/// backticked span read as a command line, minus the driver that opens it.
+///
+/// Position rather than spelling. Reading bare words meant subtracting a
+/// hand-written list of nineteen tool names that are also ordinary English —
+/// `build`, `check`, `run`, `test`, `doc`, `spec` — and every one of the
+/// nineteen was then invisible to the rule. Markup settles the same question
+/// without a list, because it is what the list was approximating: a document
+/// discussing a build writes build, one naming the recipe writes `just build`.
+///
+/// The drivers are [`BUILD_TOOLS`] — already this file's answer to "which
+/// invocation IS the call" — plus `just`, which runs the recipes. A path is
+/// read to its first flag or argument, so `cargo xtask comment-discipline`
+/// names the sub-command two deep that a `<tool> <sub>` pair could not reach,
+/// and `cargo test --features build` still does not name `build`.
+fn names_in_command_position(clause: &str, vocabulary: &BTreeSet<String>) -> Vec<String> {
+    let mut named = BTreeSet::new();
+    for span in clause.split('`').skip(1).step_by(2) {
+        let path: Vec<String> = span
+            .split_whitespace()
+            .take_while(|token| is_subcommand_word(token))
+            .map(str::to_lowercase)
+            .collect();
+        // A lone backticked word is its own command path. Anything longer is
+        // read only if it opens as a call, which is also what keeps a
+        // backticked quotation of prose from naming everything inside it.
+        let mut driven = path.len() == 1;
+        for word in &path {
+            if driven && vocabulary.contains(word) {
+                named.insert(word.clone());
+            }
+            driven |= BUILD_TOOLS.contains(&word.as_str()) || word == "just";
+        }
+    }
+    named.into_iter().collect()
 }
 
 #[test]
 fn no_document_denies_a_check_this_repo_can_run() {
+    // That the vocabulary still holds `semver-checks` — that this is reading
+    // the recipes at all — is asserted by the reader's own test below, which
+    // takes the sentence this rule was written for all the way to the name.
     let justfile = read("Justfile");
     let tools = tool_vocabulary(&justfile);
-    assert!(
-        tools.contains("semver-checks"),
-        "the tool reader came out as {tools:?} and does not hold the tool this rule was written \
-         for; it is no longer reading the recipes"
-    );
-    let gates: BTreeSet<String> = recipes_in_group(&justfile, "gate")
-        .into_iter()
-        .filter(|gate| !TOOL_WORDS_THAT_ARE_ALSO_PROSE.contains(&gate.as_str()))
-        .collect();
-
+    let gates = recipes_in_group(&justfile, "gate");
     let documents = ci_prose_files();
-    assert!(
-        documents
-            .iter()
-            .any(|(label, _)| label.starts_with("docs/adr/")),
-        "the reader is not finding the accepted ADRs; it found {:?}. Excusing them as history \
-         is what let this rule's own sentence stand.",
-        documents.iter().map(|(label, _)| label).collect::<Vec<_>>()
-    );
 
     let mut claims = Vec::new();
     for (label, text) in &documents {
         for (line, denial) in denials_in(text, CAPABILITY_DENIALS, RUN_NOUNS) {
-            let named = names_any(&denial, &tools);
+            let named = names_in_command_position(&denial, &tools);
             if !named.is_empty() {
                 claims.push(format!(
                     "  {label}:{line}: {denial}\n    a recipe here runs {named:?}"
@@ -10113,7 +10134,7 @@ fn no_document_denies_a_check_this_repo_can_run() {
             }
         }
         for (line, denial) in denials_in(text, NEGATIONS, RUN_NOUNS) {
-            let named = names_any(&denial, &gates);
+            let named = names_in_command_position(&denial, &gates);
             if !named.is_empty() {
                 claims.push(format!(
                     "  {label}:{line}: {denial}\n    {named:?} is in the gate manifest"
@@ -10133,48 +10154,77 @@ fn no_document_denies_a_check_this_repo_can_run() {
 }
 
 #[test]
-fn a_capability_denial_is_read_and_a_quotation_of_one_is_not() {
-    // The sentence, as ADR-0015 carried it. The wrapping is the ADR's own:
-    // the tool and the denial share the first line, which is the only reason
-    // a line-at-a-time reader could attribute one to the other.
-    let before = concat!(
-        "`cargo semver-checks` cannot run until a baseline exists on crates.io, so it\n",
-        "is wired into the `publish-crates.yml` preflight *after* the first publish,\n",
-        "not into per-PR CI.\n",
-    );
-    let found = denials_in(before, CAPABILITY_DENIALS, RUN_NOUNS);
-    assert_eq!(
-        found.len(),
-        1,
-        "the reader no longer sees the sentence it was written for: {found:?}"
-    );
-    assert!(
-        !names_any(&found[0].1, &tool_vocabulary(&read("Justfile"))).is_empty(),
-        "the denial no longer reads as being about a tool this repo drives"
-    );
+fn a_denial_is_read_where_it_is_made_and_not_where_the_line_happens_to_wrap() {
+    // Run at the scope the rules run at — a whole document. The two readers
+    // this replaced were asked one line at a time, a different reach and a
+    // different quote scope from the call they stood in for, so they agreed
+    // with a rule whose contract they did not share.
+    //
+    // ADR-0015's sentence, wrapped as the ADR wrapped it, and again with the
+    // wrap moved one clause along. The old reader saw the first and not the
+    // second: the tool and the denial had to land on the same physical line.
+    let tools = tool_vocabulary(&read("Justfile"));
+    for claim in [
+        concat!(
+            "`cargo semver-checks` cannot run until a baseline exists on crates.io, so it\n",
+            "is wired into the `publish-crates.yml` preflight *after* the first publish,\n",
+            "not into per-PR CI.\n",
+        ),
+        concat!(
+            "Until a baseline exists on crates.io, `cargo semver-checks`\n",
+            "cannot run at all.\n",
+        ),
+    ] {
+        let found = denials_in(claim, CAPABILITY_DENIALS, RUN_NOUNS);
+        assert_eq!(
+            found.len(),
+            1,
+            "the reader no longer sees the sentence it was written for: {found:?}"
+        );
+        assert_eq!(
+            names_in_command_position(&found[0].1, &tools),
+            vec!["semver-checks".to_owned()],
+            "the denial no longer reads as being about a tool this repo drives"
+        );
+    }
 
-    // The amendment quotes it, deliberately on one line with the tool name, so
-    // that what excuses the quotation is the quoting and not the wrapping.
-    let after = concat!(
-        "This ADR first said `cargo semver-checks` \"cannot run until a baseline\n",
-        "exists on crates.io\", and that was wrong the whole time.\n",
-    );
-    assert!(
-        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS).is_empty(),
-        "a quoted denial read as a fresh one: {:?}\n\
-         Recording a retired claim is how an amendment explains itself; a rule that forbids the \
-         quotation forbids the explanation.",
-        denials_in(after, CAPABILITY_DENIALS, RUN_NOUNS)
-    );
-
-    // And the quoting is not a way out: reopen the quote and the claim is the
-    // document's own again.
-    let unquoted = after.replace('"', "");
-    assert_eq!(
-        denials_in(&unquoted, CAPABILITY_DENIALS, RUN_NOUNS).len(),
-        1,
-        "the same sentence without its quotation marks stopped reading as a claim"
-    );
+    // The sentence the schedule half exists for; a denial whose negation is
+    // interrupted rather than ended by its commas, which a clause cut at every
+    // one of them put out of reach; then two that describe what this repo
+    // runs: CONTRIBUTING.md's two native gates, whose negation is handed over
+    // by a conjunction and which name both gates in command position, so a
+    // paragraph read whole would convict it; and a pasted transcript, which is
+    // evidence rather than a claim.
+    for (prose, nouns, denials) in [
+        (
+            "Both ride every PR; there is no cron workflow.\n",
+            SCHEDULE_NOUNS,
+            1,
+        ),
+        ("`just test` does not, on a PR, run.\n", RUN_NOUNS, 1),
+        (
+            concat!(
+                "The two `[group('native')]` gates (`msrv`, `commitlint`) keep a dedicated CI\n",
+                "job because they need a toolchain the dev image has not got, and they run\n",
+                "the same recipe there.\n",
+            ),
+            RUN_NOUNS,
+            0,
+        ),
+        (
+            concat!(
+                "It printed:\n\n",
+                "```text\n",
+                "there is no cron workflow\n",
+                "```\n"
+            ),
+            SCHEDULE_NOUNS,
+            0,
+        ),
+    ] {
+        let found = denials_in(prose, NEGATIONS, nouns);
+        assert_eq!(found.len(), denials, "{prose:?} was read as {found:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

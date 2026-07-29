@@ -38,13 +38,10 @@ Out of scope:
 
 ## Advisory tracking
 
-Every dependency, comrak included, resolves from crates.io and appears in
-`Cargo.lock` with a `source` and a `checksum` (ADR-0024), so `just audit`
-(RustSec) and `just deny` walk the complete graph. Both ride every pull
-request, and `.github/workflows/audit.yml` re-runs both nightly. The
-schedule is not redundant with the pull request: an advisory is normally
-published against a `Cargo.lock` nobody has touched, which is the one case
-a scan triggered by a diff can never see.
+`just audit` (RustSec) and `just deny` ride every pull request and re-run
+on a nightly schedule. The schedule is not redundant with the pull request:
+an advisory is normally published against a `Cargo.lock` nobody has
+touched, which is the one case a scan triggered by a diff can never see.
 
 That nightly run also **files a GitHub issue per newly disclosed
 advisory** (`rustsec/audit-check`), rather than only turning a workflow
@@ -55,16 +52,12 @@ repository settings rather than files, so the same workflow asks GitHub
 for them on every run and fails when either is switched off or paused:
 the sentence before this one is checked rather than asserted.
 
-That reporter answers for RustSec advisories and stops there, so every
-other job of that workflow — the cargo-deny leg, the watch over
-`dependency-review.yml`'s per-package licence exemptions, and the
-Dependabot posture check — files a rolling issue of its own on a failed
-scheduled run. Every leg of the nightly has somewhere to report, and a
-repeat failure updates nothing while the first issue is still open.
+Every other leg of that nightly files a rolling issue of its own on the
+same reasoning.
 
-`just audit` runs with `--deny warnings`, so an `unmaintained`, `unsound`
-or `yanked` crate fails it too and not just a live vulnerability —
-matching `yanked = "deny"` on the cargo-deny side.
+An `unmaintained`, `unsound` or `yanked` crate fails these gates too, not
+only a live vulnerability: an advisory that has not been written yet is
+still the likeliest way this dependency graph goes wrong.
 
 On a hit the gate prints the matching `RUSTSEC-…` id, and the fix is
 normally a version bump. An advisory that provably does not apply to how
