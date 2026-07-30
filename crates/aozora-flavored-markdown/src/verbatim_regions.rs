@@ -220,10 +220,10 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
             let pos = data.sourcepos;
             match data.value {
                 NodeValue::Code(_)
-                | NodeValue::CodeBlock(_)
                 | NodeValue::HtmlBlock(_)
                 | NodeValue::HtmlInline(_)
                 | NodeValue::ThematicBreak => byte_range(source, &line_starts, pos),
+                NodeValue::CodeBlock(_) => code_block_byte_range(source, &line_starts, pos),
                 // A setext heading's own text is prose; the row under it is
                 // the one that also reads as a rule.
                 NodeValue::Heading(NodeHeading { setext: true, .. }) => {
@@ -246,6 +246,29 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
         }
     }
     disjoint
+}
+
+/// A code block whose last source position has column zero ends on a blank
+/// line. comrak points at that line's start, so [`byte_range`] deliberately
+/// trims it like any other block boundary. For code, however, the line ending
+/// is literal payload: letting the sibling canonicaliser see it rewrites CRLF
+/// or lone CR to LF. Extend only this node kind through the end of that line.
+fn code_block_byte_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: Sourcepos,
+) -> Option<Range<usize>> {
+    let mut range = byte_range(source, line_starts, pos)?;
+    if pos.end.column == 0 {
+        let after_end_line = line_starts
+            .get(pos.end.line)
+            .copied()
+            .unwrap_or(source.len());
+        if source.get(range.end..after_end_line).is_some() {
+            range.end = after_end_line;
+        }
+    }
+    Some(range)
 }
 
 fn leading_bom_run(source: &str) -> Option<Range<usize>> {
@@ -474,6 +497,20 @@ mod tests {
         let (protected, originals) = protect(source);
         assert_eq!(originals, ["\u{FEFF}\u{FEFF}\u{FEFF}"]);
         assert_eq!(restore(&protected, &originals), source);
+    }
+
+    #[test]
+    fn a_code_block_ending_on_a_blank_line_keeps_its_line_terminator() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!("-\n  ```\n{ending}```");
+            let (protected, originals) = protect(&source);
+            let expected = format!("```\n{ending}");
+            assert!(
+                originals.contains(&expected.as_str()),
+                "the literal blank line was not lifted for {ending:?}: {originals:?}"
+            );
+            assert_eq!(restore(&protected, &originals), source);
+        }
     }
 
     #[test]
