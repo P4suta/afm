@@ -54,6 +54,7 @@ const CONSTRUCTORS: &[Constructor] = &[
 /// this space, opened when `Options` became `Deserialize`.
 struct Knob {
     name: &'static str,
+    #[cfg(feature = "serde")]
     wire: &'static str,
     set: fn(Options, bool) -> Options,
     probe: &'static str,
@@ -64,6 +65,7 @@ struct Knob {
 const KNOBS: &[Knob] = &[
     Knob {
         name: "with_aozora",
+        #[cfg(feature = "serde")]
         wire: "aozora",
         set: |o, on| o.with_aozora(on),
         probe: "｜青梅《おうめ》",
@@ -72,6 +74,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_hardbreaks",
+        #[cfg(feature = "serde")]
         wire: "hardbreaks",
         set: |o, on| o.with_hardbreaks(on),
         probe: "a\nb",
@@ -80,6 +83,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_smart_punctuation",
+        #[cfg(feature = "serde")]
         wire: "smartPunctuation",
         set: |o, on| o.with_smart_punctuation(on),
         probe: "\"quoted\"",
@@ -94,6 +98,7 @@ const KNOBS: &[Knob] = &[
         // (neither whitespace nor punctuation), so vanilla CommonMark denies
         // it right-flanking status and emits the asterisks literally.
         name: "with_cjk_friendly_emphasis",
+        #[cfg(feature = "serde")]
         wire: "cjkFriendlyEmphasis",
         set: |o, on| o.with_cjk_friendly_emphasis(on),
         probe: "これは**「強調」**です",
@@ -102,6 +107,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_source_line_anchors",
+        #[cfg(feature = "serde")]
         wire: "sourceLineAnchors",
         set: |o, on| o.with_source_line_anchors(on),
         probe: "para",
@@ -110,6 +116,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_tables",
+        #[cfg(feature = "serde")]
         wire: "tables",
         set: |o, on| o.with_tables(on),
         probe: "| a |\n| - |\n| b |\n",
@@ -118,6 +125,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_strikethrough",
+        #[cfg(feature = "serde")]
         wire: "strikethrough",
         set: |o, on| o.with_strikethrough(on),
         probe: "~~x~~",
@@ -126,6 +134,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_autolinks",
+        #[cfg(feature = "serde")]
         wire: "autolinks",
         set: |o, on| o.with_autolinks(on),
         probe: "see https://example.com/ ok",
@@ -134,6 +143,7 @@ const KNOBS: &[Knob] = &[
     },
     Knob {
         name: "with_task_lists",
+        #[cfg(feature = "serde")]
         wire: "taskLists",
         set: |o, on| o.with_task_lists(on),
         probe: "- [ ] todo\n",
