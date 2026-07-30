@@ -162,7 +162,7 @@ const BLOCK_TRAVERSAL: Record<
       html: '<h2>大見出し</h2>',
     },
     headings: [],
-    why: 'the IR walker promotes a 青空文庫 heading hint to a `heading` block \
+    why: 'the IR walker promotes an Aozora heading hint to a `heading` block \
 (crates/aozora-flavored-markdown/src/ir/mod.rs), so what is left in this \
 variant is the notations that are not headings',
   },
@@ -250,7 +250,7 @@ test('a heading with no visible text falls back rather than vanishing', () => {
     document(heading([{ kind: 'lineBreak', hard: false }])),
   );
   expect(outline).toStrictEqual([
-    { level: 1, text: '(無題)', sourceLine: null },
+    { level: 1, text: '（無題）', sourceLine: null },
   ]);
 });
 

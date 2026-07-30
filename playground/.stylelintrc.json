@@ -1,0 +1,35 @@
+{
+  "//": {
+    "no-descending-specificity": "Disabled because the renderer-owned theme files intentionally repeat state selectors inside media queries.",
+    "media-feature-range-notation": "Prefix notation keeps the declared Safari 16.2 transpilation floor.",
+    "unit-ban": "Only dynamic viewport units may size the full application frame.",
+    "renderer-override": "Renderer theme assets ship as raw CSS, so intentional vendor fallbacks must survive."
+  },
+  "extends": "stylelint-config-standard",
+  "ignoreFiles": ["dist/**", "node_modules/**"],
+  "rules": {
+    "no-descending-specificity": null,
+    "media-feature-range-notation": "prefix",
+    "declaration-property-unit-disallowed-list": {
+      "height": ["vh", "svh", "lvh"],
+      "min-height": ["vh", "svh", "lvh"],
+      "max-height": ["vh", "svh", "lvh"],
+      "block-size": ["vh", "svh", "lvh"],
+      "min-block-size": ["vh", "svh", "lvh"],
+      "max-block-size": ["vh", "svh", "lvh"]
+    },
+    "declaration-property-value-disallowed-list": {
+      "/color$/": ["/\\b(white|black)\\b/"],
+      "background": ["/\\b(white|black)\\b/"]
+    }
+  },
+  "overrides": [
+    {
+      "files": ["../crates/aozora-flavored-markdown/theme/*.css"],
+      "rules": {
+        "property-no-vendor-prefix": null,
+        "value-no-vendor-prefix": null
+      }
+    }
+  ]
+}

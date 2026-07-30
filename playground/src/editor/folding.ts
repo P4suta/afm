@@ -1,7 +1,8 @@
 // Code folding for container blocks.
 //
 // Ported from aozora's editor/folding.ts. Container open/close annotations
-// (e.g. ［＃ここから2字下げ］ … ［＃ここで字下げ終わり］) are foldable: the
+// (for example, an Aozora indent-open marker followed by its close marker)
+// are foldable: the
 // region between the end of the open marker's line and the start of the close
 // marker collapses to a single placeholder.
 //

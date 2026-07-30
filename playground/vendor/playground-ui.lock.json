@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "state": "locked",
+  "upstreamRepository": "git@github.com:P4suta/aozora.git",
+  "upstreamCommit": "87ab88ba6021770b6209b35350cd89974f7b90e5",
+  "upstreamRepositoryTree": "8ea356db2d001828801d31e83e0b12cac35baa1f",
+  "upstreamPackagePath": "playground-ui",
+  "upstreamPackageTree": "0716a352a880affd8f81bafb505e013f524299d2",
+  "snapshotSha256": "6f3adfecc6e776dc18ed5ff101de51302dc2d79ef73af957ce0323e172bd4b7f",
+  "files": [
+    "package.json",
+    "src/PlaygroundApp.test.tsx",
+    "src/PlaygroundApp.tsx",
+    "src/catalog.ts",
+    "src/index.ts",
+    "src/share.test.ts",
+    "src/share.ts",
+    "src/storage.test.ts",
+    "src/storage.ts",
+    "src/testing/adapterContract.ts",
+    "src/types.ts"
+  ]
+}

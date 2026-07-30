@@ -1,14 +1,4 @@
-// CodeMirror 6 wiring.
-//
-// Beyond the base editor (line numbers, history, bracket matching,
-// folding), this assembles the 青空文庫 editor assists ported from the
-// sibling aozora playground. They all hang off `parserStateField`, which
-// owns one aozora-flavored-markdown-wasm `AozoraDocument` per source revision and exposes the parse
-// results (nodes / pairs / diagnostics / gaiji) in source coordinates.
-//
-// Toggleable features (structural highlight, gaiji inlay hints) live in
-// Compartments so the settings panel can flip them on a live view.
-
+import type { EditorController, TextRange } from '@aozora/playground-ui';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
 import {
@@ -18,7 +8,7 @@ import {
   indentOnInput,
 } from '@codemirror/language';
 import { searchKeymap } from '@codemirror/search';
-import { Compartment, EditorState } from '@codemirror/state';
+import { Annotation, EditorState } from '@codemirror/state';
 import {
   drawSelection,
   EditorView,
@@ -27,49 +17,35 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
-  ViewPlugin,
+  placeholder,
 } from '@codemirror/view';
 
-import { aozoraMdEditorTheme } from './cm-theme';
-import { aozoraMdCompletion } from './editor/completion';
-import { aozoraDecorations } from './editor/decorations';
-import { aozoraFolding } from './editor/folding';
-import { aozoraMdHover } from './editor/hover';
-import { aozoraInlayHints } from './editor/inlayHints';
-import { linkedRangesFilter } from './editor/linkedRanges';
-import { aozoraMdLinter, aozoraMdLintGutter } from './editor/linter';
-import { parserStateField } from './editor/parserState';
-import { aozoraMdWrapKeymap } from './editor/wrapCommands';
+import {
+  type EngineFeatureFactory,
+  type EngineFeatures,
+  engineFeaturesCompartment,
+  inlayHintsCompartment,
+  structureHighlightCompartment,
+} from './editor/compartments';
+import {
+  aozoraMdWrapKeymap,
+  WRAP_SHAPES,
+  wrapCommand,
+} from './editor/wrapCommands';
+import { t } from './i18n';
 
-// StateField values have no disposal hook. Revisions free their predecessor
-// in `computeParserState`; this view plugin releases the final WASM document
-// when CodeMirror itself is destroyed.
-const parserDocumentOwner = ViewPlugin.fromClass(
-  class {
-    constructor(readonly view: EditorView) {}
-
-    destroy(): void {
-      this.view.state.field(parserStateField).doc?.free();
-    }
-  },
-);
-
-// Toggleable features (flipped by the settings panel). Default ON so the
-// editor's initial state matches the panel's initial signal values.
-export const structureHighlightCompartment = new Compartment();
-export const inlayHintsCompartment = new Compartment();
-
-export interface EditorHandle {
-  readonly view: EditorView;
-  getValue(): string;
-  setValue(value: string): void;
+export interface EngineAwareEditorController extends EditorController {
+  enableEngineFeatures(factory: EngineFeatureFactory): void;
 }
+
+const externalUpdate = Annotation.define<true>();
 
 export function createEditor(
   parent: HTMLElement,
   initialValue: string,
   onChange: (value: string) => void,
-): EditorHandle {
+  engineFeatureFactory: EngineFeatureFactory | null = null,
+): EngineAwareEditorController {
   const view = new EditorView({
     parent,
     state: EditorState.create({
@@ -85,6 +61,10 @@ export function createEditor(
         bracketMatching(),
         foldGutter(),
         EditorView.lineWrapping,
+        EditorView.contentAttributes.of({
+          'aria-label': t('editorPaneTitle'),
+        }),
+        placeholder(t('editorPlaceholder')),
         keymap.of([
           ...aozoraMdWrapKeymap,
           ...defaultKeymap,
@@ -93,34 +73,91 @@ export function createEditor(
           ...foldKeymap,
         ]),
         markdown(),
-        aozoraMdEditorTheme,
-        // Parser backbone — every assist below reads from this field.
-        parserStateField,
-        parserDocumentOwner,
-        structureHighlightCompartment.of(aozoraDecorations),
-        aozoraMdLinter,
-        aozoraMdLintGutter,
-        aozoraMdCompletion,
-        aozoraMdHover,
-        aozoraFolding,
-        linkedRangesFilter,
-        inlayHintsCompartment.of(aozoraInlayHints),
+        engineFeaturesCompartment.of([]),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            onChange(update.state.doc.toString());
-          }
+          if (!update.docChanged) return;
+          if (
+            update.transactions.some((transaction) =>
+              transaction.annotation(externalUpdate),
+            )
+          )
+            return;
+          onChange(update.state.doc.toString());
         }),
       ],
     }),
   });
+  let destroyed = false;
+  let engineFeaturesEnabled = false;
+  let engineFeatures: EngineFeatures | null = null;
+  let structureHighlightEnabled = true;
+  let gaijiInlayHintsEnabled = true;
+
+  const enableEngineFeatures = (factory: EngineFeatureFactory): void => {
+    if (destroyed || engineFeaturesEnabled) return;
+    engineFeatures = factory({
+      structureHighlight: structureHighlightEnabled,
+      gaijiInlayHints: gaijiInlayHintsEnabled,
+    });
+    view.dispatch({
+      effects: engineFeaturesCompartment.reconfigure(engineFeatures.extension),
+    });
+    engineFeaturesEnabled = true;
+  };
+  if (engineFeatureFactory) enableEngineFeatures(engineFeatureFactory);
 
   return {
-    view,
-    getValue: () => view.state.doc.toString(),
+    enableEngineFeatures,
     setValue: (value: string) => {
+      if (destroyed) return;
+      if (view.state.doc.toString() === value) return;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: value },
+        annotations: externalUpdate.of(true),
       });
+    },
+    focus: () => {
+      if (!destroyed) view.focus();
+    },
+    revealRange: (range: TextRange) => {
+      if (destroyed) return;
+      const from = Math.max(0, Math.min(range.start, view.state.doc.length));
+      const to = Math.max(from, Math.min(range.end, view.state.doc.length));
+      view.dispatch({
+        selection: { anchor: from, head: to },
+        effects: EditorView.scrollIntoView(from, {
+          y: 'center',
+        }),
+      });
+    },
+    runCommand: (commandId: string) => {
+      if (destroyed) return false;
+      const shape = WRAP_SHAPES.find((candidate) => candidate.id === commandId);
+      return shape ? wrapCommand(shape)(view) : false;
+    },
+    setSetting: (settingId: string, enabled: boolean) => {
+      if (settingId === 'structureHighlight') {
+        structureHighlightEnabled = enabled;
+        if (destroyed || !engineFeaturesEnabled) return;
+        view.dispatch({
+          effects: structureHighlightCompartment.reconfigure(
+            enabled ? (engineFeatures?.structureHighlight ?? []) : [],
+          ),
+        });
+      } else if (settingId === 'gaijiInlayHints') {
+        gaijiInlayHintsEnabled = enabled;
+        if (destroyed || !engineFeaturesEnabled) return;
+        view.dispatch({
+          effects: inlayHintsCompartment.reconfigure(
+            enabled ? (engineFeatures?.gaijiInlayHints ?? []) : [],
+          ),
+        });
+      }
+    },
+    destroy: () => {
+      if (destroyed) return;
+      destroyed = true;
+      view.destroy();
     },
   };
 }

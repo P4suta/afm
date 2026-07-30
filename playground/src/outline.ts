@@ -1,12 +1,13 @@
 // Derive a heading outline from the aozora-md IR.
 //
 // aozora-md already ships heading positions in its IR — Markdown `#` and
-// 青空文庫 `［＃大見出し］` both arrive as `heading` blocks carrying a
+// Aozora `［＃大見出し］` both arrive as `heading` blocks carrying a
 // `sourceLine` — so the outline needs no extra WASM call, unlike the sibling
 // aozora playground, which reads a dedicated nodes_json. We walk the block
 // tree (descending into blockquote / list) and flatten the headings in
 // document order.
 
+import { t } from './i18n';
 import type { IrBlock, IrDocument, IrInline } from './wasm-loader';
 
 export interface OutlineEntry {
@@ -17,7 +18,7 @@ export interface OutlineEntry {
 }
 
 /**
- * Visible text of one 青空文庫 fragment, with ruby readings dropped.
+ * Visible text of one Aozora fragment, with ruby readings dropped.
  *
  * The IR hands every notation over as rendered HTML rather than as a typed
  * node, so the heading text is read back out of the fragment. Two kinds of
@@ -68,7 +69,7 @@ function collect(blocks: readonly IrBlock[], acc: OutlineEntry[]): void {
       case 'heading':
         acc.push({
           level: block.level,
-          text: inlineText(block.children).trim() || '(無題)',
+          text: inlineText(block.children).trim() || t('outlineUntitled'),
           sourceLine: block.sourceLine ?? null,
         });
         break;

@@ -6,13 +6,18 @@
     "includes": [
       "src/**/*.ts",
       "src/**/*.tsx",
+      "e2e/**/*.ts",
+      "scripts/**/*.ts",
       "*.ts",
       "package.json",
       "tsconfig.json",
+      "tsconfig.node.json",
+      ".stylelintrc.json",
       "biome.json",
       "!dist",
       "!node_modules",
-      "!.vite"
+      "!.vite",
+      "!vendor"
     ]
   },
   "formatter": {

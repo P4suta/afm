@@ -43,16 +43,48 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Resolve canonical playground UI commit
+        id: playground-ui-lock
+        run: |
+          commit="$(jq -er '.upstreamCommit' playground/vendor/playground-ui.lock.json)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: P4suta/aozora
+          ref: ${{ steps.playground-ui-lock.outputs.commit }}
+          path: .upstream-aozora
+          fetch-depth: 1
+          persist-credentials: false
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14  # v4.2.3
         with:
           version: 2026.7.13
           cache: true
           install_args: >-
-            rust@1.96.0 bun node just cargo:wasm-pack
+            rust@1.96.0 bun node just cargo:wasm-pack npm:binaryen
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: ci-web
+      - name: Install web dependencies
+        working-directory: playground
+        run: bun install --frozen-lockfile
+      - name: Install Playwright system dependencies
+        working-directory: playground
+        run: bun x --no-install playwright install --with-deps chromium firefox webkit
+      - name: Verify canonical playground UI snapshot
+        working-directory: playground
+        run: bun run vendor:verify -- ../.upstream-aozora
       - run: just ci-web
+      - name: Upload web test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-test-reports-${{ github.sha }}
+          path: |
+            playground/playwright-report/
+            playground/test-results/
+            playground/.lighthouseci/reports/
+          retention-days: 14
+          if-no-files-found: ignore
 
   repo:
     name: repo
