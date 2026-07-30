@@ -36,7 +36,6 @@ use crate::{Error, Result};
 /// Files to write into the EPUB ZIP, in their canonical order.
 #[derive(Debug, Clone)]
 pub(crate) struct Bundle {
-    pub mimetype: &'static str,
     pub container: String,
     pub package_opf: String,
     pub nav_xhtml: String,
@@ -86,7 +85,6 @@ pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Resul
     }];
 
     Ok(Bundle {
-        mimetype: "application/epub+zip",
         container,
         package_opf,
         nav_xhtml,

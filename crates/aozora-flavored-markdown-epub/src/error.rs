@@ -316,10 +316,11 @@ mod tests {
     }
 
     // Nothing can drive `build` to a zip failure — the archive is assembled
-    // in memory through a sink whose writes cannot fail, which is the same
-    // reason `package.rs` sits outside the coverage gate (ADR-0018). The
-    // constructor still has a contract, so it is exercised directly rather
-    // than left as the one arm of this module nothing reaches.
+    // in memory through a sink whose writes cannot fail, fixed entry names and
+    // methods cannot be rejected, and the known content sizes reserve ZIP64
+    // before Deflate could cross the classic limit. The constructor still has
+    // a contract, so it is exercised directly rather than left as the one arm
+    // of this module nothing reaches.
     #[test]
     fn the_packaging_constructor_keeps_the_path_and_the_cause() {
         let err = Error::package(PathBuf::from("out.epub"), Outer(Inner));

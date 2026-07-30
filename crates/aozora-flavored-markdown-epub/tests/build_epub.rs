@@ -940,7 +940,8 @@ const ERROR_KIND_REGISTRY: &[(ErrorKind, BuildReachability)] = &[
     (
         ErrorKind::Package,
         BuildReachability::StructurallyUnreachable(
-            "zip assembly writes into an in-memory Cursor<Vec<u8>> whose writes cannot fail",
+            "fixed ZIP operations write to an infallible Cursor<Vec<u8>>, while known entry sizes \
+             reserve ZIP64 before the Deflate upper bound can cross the classic limit",
         ),
     ),
     (ErrorKind::PackageIo, BuildReachability::Reachable),
@@ -975,9 +976,10 @@ fn error_kind(error: &Error) -> Option<ErrorKind> {
 /// pipeline raised.
 ///
 /// `Error::Package` and `Error::XmlBuild` are missing because nothing can
-/// drive `build` to them — the ZIP and the XML are written into an in-memory
-/// sink whose `io::Write` cannot fail (ADR-0018 records the same reasoning for
-/// the coverage carve-out on those two modules).
+/// drive `build` to them. XML writes into an in-memory sink whose `io::Write`
+/// cannot fail. ZIP additionally uses fixed-valid names/methods and reserves
+/// ZIP64 from the known entry size before Deflate can cross the classic limit
+/// (ADR-0018 records the same reasoning for the coverage carve-out).
 fn reachable_failures() -> Vec<Failure> {
     let mut all = manifest_failures();
     all.extend(source_failures());
@@ -1151,7 +1153,7 @@ fn the_build_failure_sweep_and_error_kind_registry_are_exactly_the_same_set() {
     assert_eq!(
         unreachable,
         BTreeSet::from([ErrorKind::Package, ErrorKind::XmlBuild]),
-        "only the two in-memory infallible-writer variants are excluded from the build sweep"
+        "only the two preflighted in-memory writer variants are excluded from the build sweep"
     );
     for (kind, reachability) in ERROR_KIND_REGISTRY {
         if let BuildReachability::StructurallyUnreachable(reason) = reachability {
