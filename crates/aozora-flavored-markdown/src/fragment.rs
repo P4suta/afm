@@ -10,12 +10,16 @@
 //! owner of the notation, and every notation the parser grew would silently
 //! render as something else here.
 //!
-//! Two adjustments follow, and they are the whole module: the paragraph
-//! wrapper an inline construct arrives in is dropped (block structure is
-//! comrak's here, not the sub-document's), and classes are rebranded
-//! `aozora-*` → `aozora-md-*` (ADR-0011). Only class attribute values are
-//! rewritten, because the author's own text may say `aozora-` for reasons of
-//! its own — this crate's name does.
+//! Two adjustments follow: the paragraph wrapper an inline construct arrives
+//! in is dropped (block structure is comrak's here, not the sub-document's),
+//! and classes are rebranded `aozora-*` → `aozora-md-*` (ADR-0011). Only class
+//! attribute values are rewritten, because the author's own text may say
+//! `aozora-` for reasons of its own — this crate's name does.
+//!
+//! The same rule the first adjustment rests on is also a question this module
+//! answers, [`is_inline_unit`]: a run whose render carries block structure of
+//! its own has no paragraph wrapper to drop and no inline position to be
+//! spliced into. Both live here because both read the same markup.
 
 // The two brands live next to the contract they define — the published
 // `classes::all()` is the parser's own list under the rewritten brand — so
@@ -27,6 +31,22 @@ use crate::classes::{BRAND, PREFIX};
 /// The wrapper the renderer puts around an all-inline document.
 const PARAGRAPH_OPEN: &str = "<p>";
 const PARAGRAPH_CLOSE: &str = "</p>";
+/// Every block-level tag the sibling renderer opens. A fragment carrying one
+/// is a document in its own right rather than a phrase, which is what
+/// [`is_inline_unit`] is asked about. Headings are spelled out because the
+/// renderer computes the level, and `<p>` is only ever emitted bare.
+const BLOCK_TAGS: &[&str] = &[
+    PARAGRAPH_OPEN,
+    PARAGRAPH_CLOSE,
+    "<div",
+    "<figure",
+    "<h1",
+    "<h2",
+    "<h3",
+    "<h4",
+    "<h5",
+    "<h6",
+];
 /// The one attribute whose value carries the parser's brand.
 const CLASS_ATTRIBUTE: &str = "class=\"";
 const DIRECTIVE_CLASS: &str = "aozora-md-directive";
@@ -42,8 +62,28 @@ pub(crate) fn of(snapshot: &aozora::Snapshot) -> String {
     let body = html
         .strip_prefix(PARAGRAPH_OPEN)
         .and_then(|inner| inner.strip_suffix(PARAGRAPH_CLOSE))
+        // A *single* paragraph's wrapper is the only one that is ours to
+        // drop. Taking the outermost pair off a document that renders as
+        // several paragraphs leaves the boundary between them behind —
+        // `A</p>\n<p>B` — which is no longer a fragment at all: spliced into
+        // a line, its stray close closes whatever comrak had open, and a
+        // `<li>` ends up closed by a `</p>` (Tier D). A run reaches that
+        // shape by covering a blank line, which one aozora node's own span
+        // can do without the fold ever widening it.
+        .filter(|inner| !inner.contains(PARAGRAPH_CLOSE))
         .unwrap_or(html);
     rebrand(body)
+}
+
+/// Whether `fragment` can be woven into a line comrak owns.
+///
+/// Block structure is comrak's — the rule [`crate::constructs`]'s fold states
+/// as "a fold never crosses a line". A run can carry block structure without
+/// the fold widening it, though: a single node's span may cover a blank line,
+/// or a block notation. Reading it back off the rendered fragment catches both
+/// spellings, and is what keeps our tags from interleaving with comrak's.
+pub(crate) fn is_inline_unit(fragment: &str) -> bool {
+    !BLOCK_TAGS.iter().any(|tag| fragment.contains(tag))
 }
 
 /// A container marker with nothing inside renders as one empty element, so
@@ -174,6 +214,44 @@ mod tests {
     #[test]
     fn halves_of_an_unpaired_fragment_are_the_whole_and_nothing() {
         assert_eq!(halves("plain"), ("plain", ""));
+    }
+
+    /// A run reaching over a blank line renders as two paragraphs, and the
+    /// wrapper of the first is not the wrapper of the document.
+    #[test]
+    fn a_multi_paragraph_run_keeps_the_paragraphs_it_rendered() {
+        let two = render("あ\n\nい");
+        assert_eq!(two, "<p>あ</p>\n<p>い</p>");
+        assert!(
+            !is_inline_unit(&two),
+            "two paragraphs cannot be woven into a line: {two}"
+        );
+
+        // A single newline is still one paragraph, so the wrapper is ours to
+        // drop — the case `of` exists for.
+        let one = render("あ\nい");
+        assert_eq!(one, "あ<br />\nい");
+        assert!(is_inline_unit(&one), "one paragraph is a phrase: {one}");
+    }
+
+    #[test]
+    fn is_inline_unit_reads_every_block_tag_the_renderer_opens() {
+        assert!(is_inline_unit(""));
+        assert!(is_inline_unit("<ruby>青梅<rt>おうめ</rt></ruby>"));
+        assert!(is_inline_unit(
+            r#"<span class="aozora-md-directive" hidden>［＃改丁］</span>"#
+        ));
+        assert!(is_inline_unit("あ<br />\nい"));
+        // The shape this guard was written for: a stray close and a stray
+        // open, left behind by unwrapping a two-paragraph document.
+        assert!(!is_inline_unit("あ</p>\n<p>い"));
+        // A block notation the run swallowed, in every spelling the sibling
+        // renderer emits.
+        assert!(!is_inline_unit(&render("［＃改ページ］")));
+        for level in 1..=6 {
+            assert!(!is_inline_unit(&format!("<h{level}>章</h{level}>")));
+        }
+        assert!(!is_inline_unit("<figure><img /></figure>"));
     }
 
     #[test]

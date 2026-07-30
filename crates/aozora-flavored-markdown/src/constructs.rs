@@ -177,6 +177,13 @@ impl Runs {
     fn renders_to_nothing(&self, run: &str) -> bool {
         self.with(run, |facts| facts.html.is_empty())
     }
+
+    /// Asked of a run before it is tiled, so a fragment that cannot be woven
+    /// into a line is refused while the source it was read from is still
+    /// there to fall back on.
+    fn is_inline_unit(&self, run: &str) -> bool {
+        self.with(run, |facts| fragment::is_inline_unit(&facts.html))
+    }
 }
 
 /// A run past the parser's span budget reads as nothing — unreachable from a
@@ -378,6 +385,18 @@ impl Constructs {
                 lost += 1;
                 continue;
             };
+            // An inline-position construct is woven into a line comrak owns,
+            // so its fragment has to be one phrase. A run that reaches over a
+            // blank line renders as several paragraphs instead, and no
+            // splicing of that into a line is well-formed — so the construct
+            // is dropped here, where the run's own source is still in front of
+            // the cursor and reaches the reader as the text it was written as.
+            // A block-position construct is spliced between blocks, where a
+            // block is exactly what belongs.
+            if block_sentinel_of(node.kind).is_none() && !state.runs.is_inline_unit(literal) {
+                lost += 1;
+                continue;
+            }
             let gap_start = tiled.len();
             tiled.push_str(gap);
             coordinate_segments.push(CoordinateSegment::exact(
@@ -1224,6 +1243,43 @@ mod tests {
     /// `check`.
     fn with_constructs<R>(src: &str, check: impl FnOnce(&Constructs) -> R) -> R {
         check(&Constructs::build(src))
+    }
+
+    /// The shape the `sjis_decode` fuzz target reduced to 14 characters: one
+    /// `Directive` node whose own span reaches over a blank line, so reading
+    /// its run alone renders two paragraphs. The fold's line rule never sees
+    /// this run — the node arrives that wide — so the table is where it has to
+    /// be refused, while the source it was read from is still in front of the
+    /// cursor and reaches the reader as the text the author wrote.
+    #[test]
+    fn an_inline_run_reaching_over_a_blank_line_is_not_claimed() {
+        let src = "［「\n- ［＃「］\n\n［］」";
+        with_constructs(src, |table| {
+            assert!(
+                table.entries.is_empty(),
+                "the run renders as two paragraphs and cannot be tiled: {:?}",
+                table.entries
+            );
+            // Nothing was tiled, so no sentinel stands in for the notation and
+            // the emitted text is the source itself.
+            assert_eq!(table.text(), src);
+        });
+    }
+
+    /// The same reach with no blank line in it stays a construct: one
+    /// paragraph is a phrase, and `<br />` is not block structure.
+    #[test]
+    fn an_inline_run_reaching_over_one_newline_is_still_claimed() {
+        with_constructs(
+            "可哀想\nな人［＃「可哀想」に傍点］",
+            |table| {
+                assert!(
+                    table.entries.iter().any(|e| e.kind == NodeKind::Bouten),
+                    "entries: {:?}",
+                    table.entries
+                );
+            },
+        );
     }
 
     #[test]

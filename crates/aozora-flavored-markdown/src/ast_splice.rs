@@ -554,6 +554,26 @@ mod tests {
         );
     }
 
+    /// The minimised `sjis_decode` artifact, end to end. Its one construct's
+    /// run reaches over a blank line, so the table refuses it (see
+    /// `constructs::tests::an_inline_run_reaching_over_a_blank_line_is_not_claimed`)
+    /// and the bracket run reaches this walk as an orphan instead. Before
+    /// that, the two-paragraph fragment was spliced into the list item and its
+    /// stray `</p>` closed the `<li>` comrak had open — Tier D, tag balance.
+    #[test]
+    fn a_run_reaching_over_a_blank_line_leaves_comraks_blocks_intact() {
+        let html = render_via_ast_splice("［「\n- ［＃「］\n\n［］」");
+        assert_eq!(
+            html,
+            concat!(
+                "<p>［「</p>\n<ul>\n<li>",
+                r#"<span class="aozora-md-directive" hidden>［＃「］</span>"#,
+                "</li>\n</ul>\n<p>［］」</p>\n"
+            ),
+            "html: {html}"
+        );
+    }
+
     #[test]
     fn orphan_close_does_not_emit_div() {
         let html = render_via_ast_splice("［＃ここで字下げ終わり］");

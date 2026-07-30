@@ -1,0 +1,6 @@
+Tier D (tag balance) violated:
+  details = UnbalancedTag(MisorderedClose { opened: "li", closed: "p", .. })
+
+One Directive node whose own span reached over a blank line: reading that run
+alone rendered two paragraphs, and unwrapping the outer <p> left `A</p>\n<p>B`.
+Spliced into a list item, the stray close closed the <li> comrak had open.
