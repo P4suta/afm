@@ -571,7 +571,10 @@ where
     // masked source is the single coordinate space from here on: it is
     // char-for-char the caller's input, so a construct's byte range is one
     // the caller can slice (see `crate::constructs`).
-    let constructs = Constructs::build(&masked_source);
+    let mut constructs = Constructs::build(&masked_source);
+    if fenced.introduced_masks() {
+        constructs.neutralize_fence_masks();
+    }
 
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, constructs.text(), comrak_options);
@@ -692,6 +695,9 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     // The builder owns the construct table; the splice below borrows the
     // same one, so both outputs of this call describe the same document.
     let mut builder = ir::StreamingIrBuilder::new(&masked_source);
+    if fenced.introduced_masks() {
+        builder.neutralize_fence_masks();
+    }
     let comrak_arena = comrak::Arena::new();
     let root = comrak::parse_document(&comrak_arena, builder.constructs().text(), &comrak_options);
     builder.constructs().remap_source_positions(root);

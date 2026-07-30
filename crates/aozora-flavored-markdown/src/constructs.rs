@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 use aozora::{ContainerKind, NodeKind, Snapshot};
 use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
 
+use crate::code_block_mask::MASK_CHAR;
 use crate::diagnostics::{ByteSpan, Diagnostic};
 use crate::{fragment, verbatim_regions};
 
@@ -298,6 +299,23 @@ impl Constructs {
             Some(&published),
             diagnostics,
         )
+    }
+
+    /// Fail closed when a malformed construct spans a fenced block.
+    ///
+    /// A normal fenced mask is restored structurally in the final comrak
+    /// `CodeBlock`. A construct that starts before the fence and closes after
+    /// it can instead claim an introduced U+E000 as part of its own literal.
+    /// Neutralising every construct-owned copy here keeps that internal
+    /// codepoint out of HTML and IR without a flat cursor or an output-wide
+    /// unmask pass. U+FFFD has the same UTF-8 width, so source coordinates
+    /// remain valid.
+    pub(crate) fn neutralize_fence_masks(&mut self) {
+        self.text = self.text.replace(MASK_CHAR, "\u{FFFD}");
+        self.tiled = self.tiled.replace(MASK_CHAR, "\u{FFFD}");
+        for entry in &mut self.entries {
+            entry.literal = entry.literal.replace(MASK_CHAR, "\u{FFFD}");
+        }
     }
 
     fn verbatim(source: &str) -> Self {

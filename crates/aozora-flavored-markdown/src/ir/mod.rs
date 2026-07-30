@@ -103,6 +103,11 @@ impl StreamingIrBuilder {
         &self.constructs
     }
 
+    /// Replace fence masks claimed by a malformed cross-boundary construct.
+    pub(crate) fn neutralize_fence_masks(&mut self) {
+        self.constructs.neutralize_fence_masks();
+    }
+
     /// Walk a single comrak block, advancing the shared cursor.
     pub(crate) fn walk_block<'a>(&mut self, node: &'a AstNode<'a>) -> Option<Vec<Block>> {
         let cursor = self.constructs.cursor_at(self.consumed);

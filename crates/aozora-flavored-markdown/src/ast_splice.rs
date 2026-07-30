@@ -503,7 +503,10 @@ mod tests {
     fn render_via_ast_splice(input: &str) -> String {
         let opts = comrak::Options::default();
         let (masked, fenced) = code_block_mask::mask_code_block_triggers(input, &opts);
-        let constructs = Constructs::build(&masked);
+        let mut constructs = Constructs::build(&masked);
+        if fenced.introduced_masks() {
+            constructs.neutralize_fence_masks();
+        }
         let comrak_arena: Arena<'_> = Arena::new();
         let root = comrak::parse_document(&comrak_arena, constructs.text(), &opts);
         constructs.remap_source_positions(root);

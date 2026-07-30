@@ -51,6 +51,19 @@ pub(crate) struct FencedCodeBlocks {
     introduced_masks: bool,
 }
 
+impl FencedCodeBlocks {
+    /// Whether downstream construct-owned strings must neutralise U+E000.
+    ///
+    /// The mask normally never leaves a restored fenced `CodeBlock`, but a
+    /// malformed Aozora construct can begin before a fence and end after it.
+    /// Such a construct owns the intervening mask bytes rather than the final
+    /// AST block. Callers use this bit to replace only masks introduced by
+    /// this pass; an author-written U+E000 keeps the stand-down contract.
+    pub(crate) const fn introduced_masks(&self) -> bool {
+        self.introduced_masks
+    }
+}
+
 #[derive(Debug)]
 struct FencedCodeBlock {
     range: Range<usize>,

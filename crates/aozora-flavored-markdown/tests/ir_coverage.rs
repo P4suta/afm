@@ -180,6 +180,13 @@ fn assert_fenced_front_doors_agree(src: &str) -> Vec<Block> {
         "a construct sentinel leaked from {src:?}: {:?}",
         rendered.html
     );
+    if !src.contains(sentinels::MASK) {
+        assert!(
+            !rendered.html.contains(sentinels::MASK),
+            "a fenced mask leaked from {src:?}: {:?}",
+            rendered.html
+        );
+    }
     projected.ir.blocks
 }
 
@@ -209,6 +216,17 @@ fn unclosed_cr_fence_restores_double_angle_info_without_a_reserved_leak() {
     };
     assert_eq!(lang.as_deref(), Some("≪\u{12}≫\u{80}"));
     assert!(value.is_empty());
+}
+
+#[test]
+fn a_construct_spanning_a_fence_fails_closed_without_leaking_its_mask() {
+    let src = "# ｶ門《m}\n```》}\n```\n》`";
+    assert_fenced_front_doors_agree(src);
+    let html = render(src, &Options::default()).html;
+    assert!(
+        html.contains('\u{FFFD}'),
+        "the malformed cross-boundary construct must fail closed: {html:?}"
+    );
 }
 
 #[test]
