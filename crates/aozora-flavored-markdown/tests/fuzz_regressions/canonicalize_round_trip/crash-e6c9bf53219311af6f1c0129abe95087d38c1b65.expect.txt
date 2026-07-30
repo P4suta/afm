@@ -1,0 +1,8 @@
+I5 (fence fidelity) violated:
+  details = FenceRewritten { interior: "\r_\n", .. }
+
+A false positive, not a canonicaliser bug. The two-space fence sits inside a
+list item and `_` at column zero ends that item, so comrak gives the code
+block no interior; the checker read the opener as top-level, the last line as
+its close, and the prose CR as code. `canonicalize` turns a prose line ending
+into LF, which is its documented contract.

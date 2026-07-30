@@ -639,7 +639,7 @@ pub fn check_fence_fidelity(src: &str, out: &str) -> Result<(), Violation> {
 // character mask cannot reach and lifting the region out whole does.
 fn fence_interiors(src: &str) -> Vec<&str> {
     let mut interiors = Vec::new();
-    let mut open: Option<(u8, usize, usize)> = None;
+    let mut open: Option<(u8, usize, usize, usize)> = None;
     let mut pos = 0;
     for line in lines_inclusive(src) {
         let end = pos + line.len();
@@ -648,13 +648,24 @@ fn fence_interiors(src: &str) -> Vec<&str> {
             // block parser can measure, so a fence read past one would be
             // prose. Stop reading rather than guess where the block ends.
             None if line.trim_start().starts_with('<') => return interiors,
-            None => open = fence_open(line).map(|(marker, width)| (marker, width, end)),
-            Some((marker, width, start)) if fence_close(line, marker, width) => {
+            None => {
+                open = fence_open(line).map(|(marker, width, indent)| (marker, width, indent, end));
+            }
+            Some((marker, width, _, start)) if fence_close(line, marker, width) => {
                 if start < pos {
                     interiors.push(&src[start..pos]);
                 }
                 open = None;
             }
+            // An indented fence may be one a container holds, and a line
+            // indented less than the opener is where that container ends —
+            // `"-\n  ```\n\r_\n```"`, whose `_` comrak reads as a paragraph
+            // after the list, not as code. Which of the two it is takes the
+            // block parser this deliberately is not, so stop reading rather
+            // than demand fidelity for lines that may not be an interior at
+            // all. Under-reading costs a case; this cost a false positive on
+            // correct output, which wedges the fuzz target it guards.
+            Some((_, _, indent, _)) if dedented_below(line, indent) => return interiors,
             // An unterminated fence is dropped rather than run to EOF: its
             // tail is where the trailing-newline trim lands.
             Some(_) => {}
@@ -662,6 +673,16 @@ fn fence_interiors(src: &str) -> Vec<&str> {
         pos = end;
     }
     interiors
+}
+
+// Blank lines do not close a container, and a tab is worth four columns, so
+// neither is read as leaving the opener's indent.
+fn dedented_below(line: &str, indent: usize) -> bool {
+    let body = line.trim_end_matches(['\n', '\r']);
+    if indent == 0 || body.trim().is_empty() || body.starts_with('\t') {
+        return false;
+    }
+    body.bytes().take_while(|&b| b == b' ').count() < indent
 }
 
 // CommonMark §2.1 ends a line at LF, at CRLF, or at a lone CR, and comrak
@@ -697,8 +718,9 @@ fn lines_inclusive(src: &str) -> Vec<&str> {
 // tabs excluded. Column-anchored, so a fence behind a container prefix is
 // simply not read here — deciding one needs the block parser this is not, and
 // under-reading costs a case rather than inventing one.
-fn fence_open(line: &str) -> Option<(u8, usize)> {
+fn fence_open(line: &str) -> Option<(u8, usize, usize)> {
     let stripped = trim_fence_indent(line);
+    let indent = line.len() - stripped.len();
     let bytes = stripped.as_bytes();
     let &first = bytes.first()?;
     if first != b'`' && first != b'~' {
@@ -710,7 +732,7 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
     if first == b'`' && bytes[width..].contains(&b'`') {
         return None;
     }
-    (width >= 3).then_some((first, width))
+    (width >= 3).then_some((first, width, indent))
 }
 
 fn fence_close(line: &str, marker: u8, width: usize) -> bool {
@@ -1789,6 +1811,37 @@ mod tests {
         // marker from a lazy continuation, so it reads neither.
         let src = "> ```\n> ｜青梅《おうめ》\n> ```\n";
         check_fence_fidelity(src, "> ```\n> 青梅《おうめ》\n> ```\n").unwrap();
+    }
+
+    /// `canonicalize_round_trip` reduced a 266-byte artifact to this. The
+    /// fence is indented two spaces inside a list item, and `_` at column zero
+    /// is where the list ends: comrak reads `_` as a paragraph and gives the
+    /// code block no interior at all, while this scanner used to read the
+    /// opener as a top-level fence, the last line as its close, and `"\r_\n"`
+    /// as an interior owed byte-for-byte. `canonicalize` turns that prose CR
+    /// into an LF, exactly as documented, so the checker fired on correct
+    /// output.
+    #[test]
+    fn invariant_unit_check_fence_fidelity_reads_no_interior_past_a_container_exit() {
+        let src = "-\n  ```\n\r_\n```";
+        assert!(
+            fence_interiors(src).is_empty(),
+            "{:?}",
+            fence_interiors(src)
+        );
+        check_fence_fidelity(src, "-\n  ```\n\n_\n```").unwrap();
+    }
+
+    /// The other half of the same rule: an indented fence whose lines stay
+    /// inside the opener's indent is still read, so the guard buys the false
+    /// positive back without giving up the case.
+    #[test]
+    fn invariant_unit_check_fence_fidelity_reads_an_indented_fence_that_stays_indented() {
+        let src = "  ```\n  ｜青梅《おうめ》\n  ```\n";
+        assert_eq!(fence_interiors(src), vec!["  ｜青梅《おうめ》\n"]);
+        let err = check_fence_fidelity(src, "  ```\n  青梅《おうめ》\n  ```\n")
+            .expect_err("a rewritten indented interior must still fire");
+        assert!(matches!(err, Violation::FenceRewritten { .. }), "{err:?}");
     }
 
     #[test]
