@@ -102,7 +102,9 @@ that is not bound to a lockfile, and there is no in-repo substitute (#215).
   the crate exists. One `cargo publish --workspace` carries one token, which
   makes that a fact about the whole ladder rather than about those two rungs:
   the run that first uploads them cannot use OIDC. `publish-crates.yml` carries
-  the bootstrap order.
+  that boundary directly: `use_oidc` defaults to false for the token-backed
+  bootstrap and may be enabled only after every selected crate has a Trusted
+  Publisher.
 
 ## Alternatives considered
 

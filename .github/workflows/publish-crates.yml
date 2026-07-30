@@ -8,9 +8,11 @@ on:
         type: boolean
         default: true
       use_oidc:
-        description: "Use crates.io OIDC trusted publishing"
+        description: "Use crates.io OIDC only after every selected crate has a Trusted Publisher"
         type: boolean
-        default: true
+        # The unpublished EPUB pair cannot register Trusted Publishers until
+        # after its token-authenticated bootstrap upload.
+        default: false
       skip_crates:
         description: "Comma-separated publishable package names already uploaded by an earlier attempt"
         type: string

@@ -87,13 +87,16 @@ git push --follow-tags
 ```
 
 `publish-crates.yml` publishes the four public crates in workspace dependency
-order. A live publish is protected by the `release` environment and uses a
-short-lived crates.io OIDC credential. Its preflight checks the changelog,
-package tarballs and public semver baseline. To resume a partial upload, pass
-the comma-separated names already published as the workflow's `skip_crates`
-input. The preflight applies that exact selection to `just package-smoke`, so a
-retry cannot validate a different crate set from the live command. Locally the
-same contract can be checked with, for example:
+order. A live publish is protected by the `release` environment. The initial
+upload of a crate that has no crates.io Trusted Publisher yet must keep
+`use_oidc=false` and use the release environment's token; after every selected
+crate has a Trusted Publisher, a later dispatch may opt into the short-lived
+OIDC credential. Its preflight checks the changelog, package tarballs and
+public semver baseline. To resume a partial upload, pass the comma-separated
+names already published as the workflow's `skip_crates` input. The preflight
+applies that exact selection to `just package-smoke`, so a retry cannot validate
+a different crate set from the live command. Locally the same contract can be
+checked with, for example:
 
 ```sh
 just package-smoke "aozora-flavored-markdown"
