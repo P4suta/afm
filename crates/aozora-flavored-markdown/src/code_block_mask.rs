@@ -49,6 +49,15 @@ pub(crate) struct FencedCodeBlocks {
     snapshots: Vec<FencedCodeBlock>,
     /// True only when this call introduced at least one [`MASK_CHAR`].
     introduced_masks: bool,
+    /// Whether a fence marker occurs in the source at all — the one thing
+    /// that has to be true for the *rendered* text to hold a fenced block.
+    /// Substitution only ever replaces a run of source with one sentinel, so
+    /// it cannot add a marker; a source without one cannot grow a fence, and
+    /// [`restore_ast`] can skip its walk. It can, however, *remove* the
+    /// backtick that CommonMark §4.5 forbids in a backtick fence's info
+    /// string, and that turns a line the source read as prose into a fence
+    /// nothing snapshotted.
+    source_may_fence: bool,
 }
 
 impl FencedCodeBlocks {
@@ -93,6 +102,7 @@ pub(crate) fn mask_code_block_triggers<'a>(
             FencedCodeBlocks {
                 snapshots,
                 introduced_masks: false,
+                source_may_fence: true,
             },
         );
     }
@@ -119,6 +129,7 @@ pub(crate) fn mask_code_block_triggers<'a>(
             FencedCodeBlocks {
                 snapshots,
                 introduced_masks,
+                source_may_fence: true,
             },
         )
     } else {
@@ -127,6 +138,7 @@ pub(crate) fn mask_code_block_triggers<'a>(
             FencedCodeBlocks {
                 snapshots,
                 introduced_masks,
+                source_may_fence: true,
             },
         )
     }
@@ -192,8 +204,16 @@ fn mask_triggers(text: &str, out: &mut String, replacement: char) -> bool {
 /// Exact lookup makes restoration independent of traversal depth and output
 /// shape. In particular, an IR walker that truncates an over-deep container
 /// cannot shift a later code block's values.
+///
+/// The walk is skipped only when the source holds no fence marker at all.
+/// Skipping it whenever there was nothing to *restore* was the same mistake
+/// in the other direction: a source with no fenced block still reaches this
+/// with an unmatched one whenever substitution removed the backtick §4.5
+/// forbids from a backtick fence's info string, and that block is exactly the
+/// one whose fail-closed pass below is the only thing standing between a
+/// construct sentinel and the HTML.
 pub(crate) fn restore_ast<'a>(root: &'a AstNode<'a>, source: &str, fenced: &FencedCodeBlocks) {
-    if fenced.snapshots.is_empty() {
+    if !fenced.source_may_fence {
         return;
     }
     let line_starts = verbatim_regions::line_starts(source);
@@ -395,6 +415,41 @@ mod tests {
         assert_eq!(
             code_fields(root),
             vec![(String::new(), "｜trigger\u{E000}\n".to_owned())]
+        );
+    }
+
+    /// `render_blocks` reduced a 61-byte artifact to a lone fence line whose
+    /// info string is a ruby whose reading is a backtick. The line
+    /// is prose in the source — CommonMark §4.5 admits no backtick in a
+    /// backtick fence's info string — so nothing is snapshotted. Substituting
+    /// the ruby takes that backtick away, and the text comrak parses opens a
+    /// fence whose info string *is* the sentinel. The fail-closed pass covers
+    /// it; skipping the walk when there was nothing to restore is what let it
+    /// through to the HTML.
+    #[test]
+    fn a_fence_substitution_created_is_neutralized_though_nothing_was_snapshotted() {
+        let src = "```｜⢅《`》";
+        let (masked, fenced) = mask_owned(src);
+        assert_eq!(masked, src, "prose holds no fenced range to mask");
+        assert!(fenced.snapshots.is_empty());
+        assert!(fenced.source_may_fence, "the source does hold a marker");
+
+        // What the render pass hands comrak: the ruby replaced by its
+        // sentinel, which leaves a line that reads as a fence.
+        let tiled = "```\u{E001}";
+        let arena = comrak::Arena::new();
+        let opts = options();
+        let root = comrak::parse_document(&arena, tiled, &opts);
+        restore_ast(root, src, &fenced);
+        assert_eq!(code_fields(root), vec![("�".to_owned(), String::new())]);
+    }
+
+    #[test]
+    fn a_source_without_a_fence_marker_skips_the_walk() {
+        let (_, fenced) = mask_owned("｜青梅《おうめ》");
+        assert!(
+            !fenced.source_may_fence,
+            "substitution cannot add a marker the source lacks"
         );
     }
 
