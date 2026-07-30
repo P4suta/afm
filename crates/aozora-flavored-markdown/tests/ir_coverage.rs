@@ -220,13 +220,52 @@ fn unclosed_cr_fence_restores_double_angle_info_without_a_reserved_leak() {
 
 #[test]
 fn a_construct_spanning_a_fence_fails_closed_without_leaking_its_mask() {
-    let src = "# ｶ門《m}\n```》}\n```\n》`";
-    assert_fenced_front_doors_agree(src);
-    let html = render(src, &Options::default()).html;
-    assert!(
-        html.contains('\u{FFFD}'),
-        "the malformed cross-boundary construct must fail closed: {html:?}"
-    );
+    for authored_mask in [false, true] {
+        let prefix = if authored_mask {
+            format!("{}\n\n", sentinels::MASK)
+        } else {
+            String::new()
+        };
+        let src = format!("{prefix}# ｶ門《m}}\n```》}}\n```\n》`\n\n｜外《そと》\n");
+        let blocks = assert_fenced_front_doors_agree(&src);
+        let html = render(&src, &Options::default()).html;
+        assert!(
+            html.contains('\u{FFFD}'),
+            "the malformed cross-boundary construct must fail closed: {html:?}"
+        );
+        assert_eq!(
+            html.matches(sentinels::MASK).count(),
+            usize::from(authored_mask),
+            "only an author-written U+E000 may survive: {html:?}"
+        );
+
+        let Some(Block::Paragraph { children, .. }) = blocks.last() else {
+            panic!("the later ruby must remain a paragraph: {blocks:?}");
+        };
+        let [
+            Inline::Aozora {
+                kind,
+                html: ruby_html,
+                ..
+            },
+        ] = children.as_slice()
+        else {
+            panic!("the later ruby must remain one Aozora inline: {children:?}");
+        };
+        assert_eq!(kind, "ruby");
+        assert!(
+            ruby_html.contains('外') && ruby_html.contains("そと"),
+            "the later ruby consumed the cross-boundary construct: {ruby_html:?}"
+        );
+        assert!(
+            !ruby_html.contains('門'),
+            "the later ruby reused the earlier construct: {ruby_html:?}"
+        );
+        assert!(
+            html.contains(ruby_html),
+            "HTML and IR disagree about the later ruby: {html:?}"
+        );
+    }
 }
 
 #[test]
