@@ -5,7 +5,7 @@
 //! was pinned on one hand-written document, again as HTML
 //! (`streaming_blocks::concatenated_block_html_matches_the_document_render`).
 //! Both stopped at the HTML because HTML was the only output that could be
-//! compared: `Document`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
+//! compared: `MarkdownDocument`, `RenderedIr`, `RenderedBlock` and `Diagnostic` had
 //! no `PartialEq`, so an IR that differed run to run — or between the document
 //! and the streaming path — had nothing to fail.
 //!
@@ -14,7 +14,7 @@
 //! was asserted for 青空文庫 constructs over a fixture corpus
 //! (`construct_spans`) and nowhere else. Here it is asserted for *every* span
 //! and every range the IR carries, over generated input, through the
-//! `From<Span> for Range<usize>` a consumer is meant to use.
+//! `From<ByteSpan> for SourceRange<usize>` a consumer is meant to use.
 //!
 //! The coordinate walk goes through the serialised form on purpose: a new
 //! `Block` / `Inline` variant joins these properties without anyone
@@ -31,7 +31,9 @@ use core::hash::Hash;
 use core::ops::Range as ByteRange;
 use std::hash::{DefaultHasher, Hasher};
 
-use aozora_flavored_markdown::ir::{Block, Document, Inline, Position, Range, Span};
+use aozora_flavored_markdown::ir::{
+    Block, ByteSpan, Inline, MarkdownDocument, SourcePosition, SourceRange,
+};
 use aozora_flavored_markdown::{
     Diagnostic, Options, RenderedBlocks, render, render_blocks, render_to_ir,
 };
@@ -54,8 +56,8 @@ fn hash_of<T: Hash>(value: &T) -> u64 {
 
 #[derive(Debug, Default)]
 struct Coordinates {
-    spans: Vec<Span>,
-    ranges: Vec<Range>,
+    spans: Vec<ByteSpan>,
+    ranges: Vec<SourceRange>,
 }
 
 fn coordinates_of(document: &Value) -> Coordinates {
@@ -84,22 +86,22 @@ fn collect(value: &Value, out: &mut Coordinates) {
 
 /// A byte span serialises as two numbers; a source range as two objects, so
 /// neither reader can mistake the other's shape for its own.
-fn span_at(value: &Value) -> Option<Span> {
+fn span_at(value: &Value) -> Option<ByteSpan> {
     let start = coordinate(value.get("start")?)?;
     let end = coordinate(value.get("end")?)?;
-    Some(Span::new(start, end))
+    Some(ByteSpan::new(start, end))
 }
 
-fn range_at(value: &Value) -> Option<Range> {
+fn range_at(value: &Value) -> Option<SourceRange> {
     let start = position_at(value.get("start")?)?;
     let end = position_at(value.get("end")?)?;
-    Some(Range::new(start, end))
+    Some(SourceRange::new(start, end))
 }
 
-fn position_at(value: &Value) -> Option<Position> {
+fn position_at(value: &Value) -> Option<SourcePosition> {
     let line = coordinate(value.get("line")?)?;
     let column = coordinate(value.get("column")?)?;
-    Some(Position::new(line, column))
+    Some(SourcePosition::new(line, column))
 }
 
 fn coordinate(value: &Value) -> Option<u32> {
@@ -135,14 +137,14 @@ fn serialised(src: &str) -> Value {
 ///   neither direction, and re-serialising is the only thing that says so.
 /// * `Diagnostic` is asserted beside the IR rather than separately. It is a
 ///   second derive over a second envelope (`aozora-md.diagnostics.v1`), it
-///   travels with every render, and a property that stopped at `Document`
+///   travels with every render, and a property that stopped at `MarkdownDocument`
 ///   would leave the type this crate hands back in an *error* position as the
 ///   only public value nobody could read back.
 fn assert_the_wire_round_trips(src: &str) {
     let rendered = render_to_ir(src, &Options::default());
 
     let json = serde_json::to_value(&rendered.ir).expect("the IR must serialise");
-    let document: Document = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
+    let document: MarkdownDocument = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
         panic!("the IR did not read back for src={src:?}: {e}\n  json = {json}")
     });
     assert_eq!(
@@ -200,11 +202,6 @@ fn assert_the_streaming_path_agrees(src: &str) {
     );
 }
 
-/// `［＃ここで字下げ終わり］`, `［＃ここで罫囲み終わり］` and their kin.
-fn carries_a_container_close(src: &str) -> bool {
-    src.contains("終わり］")
-}
-
 /// Every span and range the IR carries, held to what its type promises.
 fn assert_coordinates_address_the_source(src: &str) {
     let coordinates = coordinates_of(&serialised(src));
@@ -224,6 +221,15 @@ fn assert_coordinates_address_the_source(src: &str) {
         assert!(
             range.start <= range.end,
             "range {range:?} ends before it starts: src={src:?}"
+        );
+        let line_count = src
+            .bytes()
+            .filter(|&byte| matches!(byte, b'\n' | b'\r'))
+            .count()
+            .saturating_add(1);
+        assert!(
+            range.start.line as usize <= line_count && range.end.line as usize <= line_count,
+            "range {range:?} names a line outside its source ({line_count} lines): src={src:?}"
         );
     }
 }
@@ -272,26 +278,15 @@ proptest! {
     /// difference is the per-block walker's own — which is exactly the walker
     /// that carries state (an open-container stack, a cursor) across blocks.
     ///
-    /// **Carved out**: a source carrying a container *close* marker. That is
-    /// not a design decision, it is a live defect this property found on its
-    /// first run — see
-    /// [`an_orphan_container_close_must_not_cost_the_next_block_its_ir`].
-    /// The filter is the broad form (any close marker, matched or not)
-    /// because deciding whether a particular one is orphaned means redoing
-    /// the parser's own pairing; the matched shapes are held to the full
-    /// property by
-    /// [`the_streaming_path_projects_the_document_path_s_ir_for_container_shapes`]
-    /// instead.
     #[test]
     fn the_streaming_path_projects_the_document_path_s_ir(
         src in prop_oneof![aozora_fragment(12), pathological_aozora(6), commonmark_adversarial()]
     ) {
-        prop_assume!(!carries_a_container_close(&src));
         assert_the_streaming_path_agrees(&src);
     }
 
     /// A `Some` span slices the caller's own source, and the width it reports
-    /// is the width of that slice. Asserted through `Range::from`, the
+    /// is the width of that slice. Asserted through `SourceRange::from`, the
     /// conversion a consumer is pointed at, so the cast lives in one place
     /// instead of at every call site.
     #[test]
@@ -323,6 +318,7 @@ proptest! {
 const HARD_SOURCES: &[&str] = &[
     "可哀想［＃「可哀想」に傍点］だ",
     "本文\r\n｜青梅《おうめ》",
+    "｜\r------------",
     "\u{feff}｜青梅《おうめ》",
     "本文\n----------\n｜青梅《おうめ》",
     "〔e'tude〕｜青梅《おうめ》",
@@ -365,18 +361,10 @@ fn the_streaming_path_projects_the_document_path_s_ir_for_container_shapes() {
     }
 }
 
-/// The defect the property above had to carve out, pinned as the assertion
-/// that *should* hold. A `［＃…終わり］` with no open is dropped by the parser,
-/// and the block that follows it comes back from `render_blocks` with
-/// its `html` intact and its `ir` empty — one paragraph of structure lost, on
-/// the path the editor bridge streams. `render_to_ir` keeps it, so the two
-/// public renders of one document disagree.
-///
-/// Ignored rather than deleted: it is the specification, and the day the
-/// walker stops losing the block it goes green and the `prop_assume!` above
-/// comes out with it.
+/// A `［＃…終わり］` with no open contributes no block of its own. Omitting
+/// that empty projection is what keeps the following HTML child zipped to
+/// its own IR rather than to the orphan's slot.
 #[test]
-#[ignore = "known defect: an orphan container close costs the next block its IR on the streaming path"]
 fn an_orphan_container_close_must_not_cost_the_next_block_its_ir() {
     for src in [
         "一\n\n［＃ここで字下げ終わり］\n\n二\n",
@@ -395,7 +383,7 @@ fn an_orphan_container_close_must_not_cost_the_next_block_its_ir() {
 // both sides, or drop a `#[serde(rename)]` that both sides then stop
 // applying, and every property above still holds. It is the same blind spot
 // I3 had for fence bodies — a consistently wrong rewrite is still a fixed
-// point — and the fix is the same one `property_serialize_fidelity` uses:
+// point — and the fix is the same one `property_canonicalize_fidelity` uses:
 // assert against bytes this file wrote, not against what the library wrote a
 // moment ago.
 //
@@ -440,7 +428,11 @@ fn an_aozora_block_reads_back_with_its_kind_beside_the_discriminant() {
         kind, "ruby",
         "the notation tag is read off `aozoraKind`, not off the discriminant"
     );
-    assert_eq!(span, Some(Span::new(0, 12)), "a byte span is two numbers");
+    assert_eq!(
+        span,
+        Some(ByteSpan::new(0, 12)),
+        "a byte span is two numbers"
+    );
     assert!(html.starts_with("<ruby>"), "html: {html}");
     assert_eq!(
         source_line,
@@ -520,7 +512,7 @@ fn a_document_this_test_wrote_round_trips_to_itself() {
             "children": [{ "kind": "text", "value": "本文" }],
         }],
     });
-    let document: Document =
+    let document: MarkdownDocument =
         serde_json::from_value(json.clone()).expect("the published document shape must read");
     assert_eq!(
         serde_json::to_value(&document).expect("a hand-written document serialises"),

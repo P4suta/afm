@@ -3,7 +3,8 @@
 
 use aozora_flavored_markdown::ir::Block;
 use aozora_flavored_markdown::{
-    Diagnostic, Options, RenderedBlock, RenderedBlocks, render, render_blocks, sentinels,
+    Diagnostic, Options, RenderedBlock, RenderedBlocks, render, render_blocks, render_to_ir,
+    sentinels,
 };
 use aozora_flavored_markdown_test_support::check_no_sentinel_leak;
 
@@ -52,6 +53,34 @@ fn block_source_lines_are_one_based() {
 }
 
 #[test]
+fn block_notation_does_not_shift_following_source_coordinates() {
+    let src = "一行目\n\n［＃改ページ］\n\n五行目\n";
+    let (blocks, _) = render_blocks_checked(src, &Options::default());
+    let last = blocks.last().expect("the final paragraph is streamed");
+    assert_eq!(last.source_line, 5);
+    let Some(Block::Paragraph {
+        source_line: Some(line),
+        range: Some(range),
+        ..
+    }) = last.ir.first()
+    else {
+        panic!("the final streamed block must be a ranged paragraph: {last:?}");
+    };
+    assert_eq!((*line, range.start.line), (5, 5));
+
+    let document = render_to_ir(src, &Options::default());
+    let Some(Block::Paragraph {
+        source_line: Some(line),
+        range: Some(range),
+        ..
+    }) = document.ir.blocks.last()
+    else {
+        panic!("the final document block must be a ranged paragraph");
+    };
+    assert_eq!((*line, range.start.line), (5, 5));
+}
+
+#[test]
 fn aozora_inline_renders_inside_per_block_html() {
     let src = "｜漢字《かんじ》\n\nplain second\n";
     let (blocks, diagnostics) = render_blocks_checked(src, &Options::default());
@@ -84,14 +113,14 @@ fn heading_blocks_carry_their_kind_in_ir() {
 }
 
 // ---------------------------------------------------------------------------
-// fenced code blocks — the mask is restored per block, not per document
+// fenced code blocks — masks are restored in each AST/IR code field
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fenced_aozora_triggers_are_restored_in_per_block_html() {
     // Triggers inside a fence are masked with `sentinels::MASK` before the
-    // lexer runs (ADR-0010). The document path restores them on its way out;
-    // this path has to do the same or the reader gets the PUA glyph.
+    // lexer runs (ADR-0010), then restored in the parsed code fields before
+    // formatting. The streaming path must do the same for HTML and IR.
     let src = "```\n｜青梅《おうめ》\n```\n";
     let (blocks, _) = render_blocks_checked(src, &Options::default());
     assert_eq!(blocks.len(), 1);

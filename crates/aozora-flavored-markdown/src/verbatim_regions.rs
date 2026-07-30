@@ -23,61 +23,142 @@ use crate::{Options, sentinels};
 // range the parser reports still addresses the caller's own text, which is
 // the whole reason `render` cannot lift a region out the way `protect` does.
 // None of them is whitespace, so a hidden row is still the non-blank line the
-// block structure around it was read against, and none of them appears in
-// prose — a source that carries one is left unhidden rather than guessed at.
+// block structure around it was read against. Their positions are carried
+// out-of-band: author-written U+0001–U+0003 therefore remain author text and
+// are never mistaken for one of these substitutions.
 const RULE_CHARS: [u8; 3] = [b'-', b'=', b'_'];
 const HIDDEN_RULE_CHARS: [u8; 3] = [0x01, 0x02, 0x03];
+
+#[derive(Debug, Clone)]
+pub(crate) struct HiddenRuleRows {
+    text: String,
+    rows: Vec<HiddenRuleRow>,
+}
+
+#[derive(Debug, Clone)]
+struct HiddenRuleRow {
+    range: Range<usize>,
+    visible: u8,
+    hidden: u8,
+}
+
+impl HiddenRuleRows {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Restores only substitutions recorded by [`hide_rule_rows`].
+    ///
+    /// The first parse can normalise bytes before a second read (BOM and
+    /// line endings are the common cases). Exact offsets are used while the
+    /// text is unchanged; otherwise the recorded whole-line runs are paired
+    /// in order. An author-written control byte is not in the registry and
+    /// is consequently never touched.
+    pub(crate) fn reveal(&self, text: &str) -> String {
+        let ranges = if text == self.text {
+            self.rows
+                .iter()
+                .map(|row| (row.range.clone(), row.visible))
+                .collect()
+        } else {
+            self.locate_after_normalization(text)
+        };
+        replace_registered_rows(text, &ranges)
+    }
+
+    fn locate_after_normalization(&self, text: &str) -> Vec<(Range<usize>, u8)> {
+        let mut found = Vec::with_capacity(self.rows.len());
+        let mut cursor = 0usize;
+        for row in &self.rows {
+            let width = row.range.len();
+            let Some(range) = find_hidden_row(text, cursor, row.hidden, width) else {
+                break;
+            };
+            cursor = range.end;
+            found.push((range, row.visible));
+        }
+        found
+    }
+}
 
 // Hides every rule row from the sibling parser, which would otherwise push
 // one onto a stanza of its own and split whichever block CommonMark had given
 // the bytes to. `reveal_rule_rows` puts the row back before comrak parses, so
 // the split never happens and comrak still reads the caller's own row.
 //
-// `None` where nothing was hidden — the source has no rule row, or it already
-// carries a character the reveal would claim. A caller that gets `None` reads
-// its own text and must not reveal.
-pub(crate) fn hide_rule_rows(source: &str) -> Option<String> {
-    if source.bytes().any(|byte| HIDDEN_RULE_CHARS.contains(&byte)) {
-        return None;
-    }
+// `None` where the source has no rule row. A caller that gets `None` reads its
+// own text and has no registry to reveal.
+pub(crate) fn hide_rule_rows(source: &str) -> Option<HiddenRuleRows> {
     let rows = rule_rows(source);
     if rows.is_empty() {
         return None;
     }
     let mut out = String::with_capacity(source.len());
+    let mut registry = Vec::with_capacity(rows.len());
     let mut cursor = 0;
     for row in rows {
-        out.push_str(&source[cursor..row.start]);
-        cursor = row.end;
-        let text = &source[row];
-        match hidden_form(text) {
-            Some(hidden) => out.extend(repeat_n(hidden, text.len())),
-            None => out.push_str(text),
-        }
+        out.push_str(&source[cursor..row.range.start]);
+        cursor = row.range.end;
+        let text = &source[row.range];
+        let range = out.len()..out.len() + text.len();
+        out.extend(repeat_n(char::from(row.hidden), text.len()));
+        registry.push(HiddenRuleRow {
+            range,
+            visible: row.visible,
+            hidden: row.hidden,
+        });
     }
     out.push_str(&source[cursor..]);
-    Some(out)
+    Some(HiddenRuleRows {
+        text: out,
+        rows: registry,
+    })
 }
 
-// Character for character, so it holds wherever the parser left the row —
-// the text it canonicalised for its own read included, which no offset
-// recorded against the source would still address.
-pub(crate) fn reveal_rule_rows(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            u8::try_from(ch)
-                .ok()
-                .and_then(|byte| HIDDEN_RULE_CHARS.iter().position(|&h| h == byte))
-                .map_or(ch, |idx| char::from(RULE_CHARS[idx]))
-        })
-        .collect()
+fn replace_registered_rows(text: &str, rows: &[(Range<usize>, u8)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for (range, visible) in rows {
+        let Some(gap) = text.get(cursor..range.start) else {
+            break;
+        };
+        let Some(hidden) = text.get(range.clone()) else {
+            break;
+        };
+        out.push_str(gap);
+        out.extend(repeat_n(char::from(*visible), hidden.len()));
+        cursor = range.end;
+    }
+    out.push_str(text.get(cursor..).unwrap_or_default());
+    out
 }
 
-// A row is a run of one character, so its first byte names the whole of it.
-fn hidden_form(row: &str) -> Option<char> {
-    let first = row.as_bytes().first()?;
-    let idx = RULE_CHARS.iter().position(|rule| rule == first)?;
-    Some(char::from(HIDDEN_RULE_CHARS[idx]))
+fn find_hidden_row(text: &str, from: usize, hidden: u8, width: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut at = from.min(bytes.len());
+    while at.saturating_add(width) <= bytes.len() {
+        let end = at + width;
+        let run_matches = bytes[at..end].iter().all(|&byte| byte == hidden);
+        let bounded = bytes.get(at.wrapping_sub(1)).copied() != Some(hidden)
+            && bytes.get(end).copied() != Some(hidden);
+        let line_start = bytes[..at]
+            .iter()
+            .rposition(|&byte| matches!(byte, b'\n' | b'\r'))
+            .map_or(0, |idx| idx + 1);
+        let line_end = bytes[end..]
+            .iter()
+            .position(|&byte| matches!(byte, b'\n' | b'\r'))
+            .map_or(bytes.len(), |idx| end + idx);
+        let line_is_only_the_run = bytes[line_start..at]
+            .iter()
+            .chain(&bytes[end..line_end])
+            .all(u8::is_ascii_whitespace);
+        if run_matches && bounded && line_is_only_the_run {
+            return Some(at..end);
+        }
+        at += 1;
+    }
+    None
 }
 
 /// Returns the lifted regions in source order, for [`restore`].
@@ -139,10 +220,10 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
             let pos = data.sourcepos;
             match data.value {
                 NodeValue::Code(_)
-                | NodeValue::CodeBlock(_)
                 | NodeValue::HtmlBlock(_)
                 | NodeValue::HtmlInline(_)
                 | NodeValue::ThematicBreak => byte_range(source, &line_starts, pos),
+                NodeValue::CodeBlock(_) => code_block_byte_range(source, &line_starts, pos),
                 // A setext heading's own text is prose; the row under it is
                 // the one that also reads as a rule.
                 NodeValue::Heading(NodeHeading { setext: true, .. }) => {
@@ -151,7 +232,8 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
                 _ => None,
             }
         })
-        .chain(rule_rows(source))
+        .chain(rule_rows(source).into_iter().map(|row| row.range))
+        .chain(leading_bom_run(source))
         .chain(reserved_codepoints(source))
         .collect();
     // Widest first where two of them start together, so the region that
@@ -166,6 +248,38 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
     disjoint
 }
 
+/// A code block whose last source position has column zero ends on a blank
+/// line. comrak points at that line's start, so [`byte_range`] deliberately
+/// trims it like any other block boundary. For code, however, the line ending
+/// is literal payload: letting the sibling canonicaliser see it rewrites CRLF
+/// or lone CR to LF. Extend only this node kind through the end of that line.
+fn code_block_byte_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: Sourcepos,
+) -> Option<Range<usize>> {
+    let mut range = byte_range(source, line_starts, pos)?;
+    if pos.end.column == 0 {
+        let after_end_line = line_starts
+            .get(pos.end.line)
+            .copied()
+            .unwrap_or(source.len());
+        if source.get(range.end..after_end_line).is_some() {
+            range.end = after_end_line;
+        }
+    }
+    Some(range)
+}
+
+fn leading_bom_run(source: &str) -> Option<Range<usize>> {
+    let width = source
+        .chars()
+        .take_while(|&ch| ch == '\u{FEFF}')
+        .map(char::len_utf8)
+        .sum();
+    (width > 0).then_some(0..width)
+}
+
 // A rule row is markup to one grammar or the other — CommonMark's thematic
 // break, its setext underline, the canonicaliser's decorative rule — and
 // prose to neither, so a length threshold here would only pin this crate to
@@ -175,26 +289,50 @@ fn verbatim_ranges(source: &str) -> Vec<Range<usize>> {
 // line continuing the paragraph above it, or a table row, and a blank line in
 // front of it splits the block that owned it. The indent stays outside the
 // region — it is what tells comrak which block the row belongs to.
-fn rule_rows(source: &str) -> Vec<Range<usize>> {
+struct RuleRow {
+    range: Range<usize>,
+    visible: u8,
+    hidden: u8,
+}
+
+fn rule_rows(source: &str) -> Vec<RuleRow> {
     let mut rows = Vec::new();
     let mut at = 0;
-    for line in source.split_inclusive('\n') {
+    while at < source.len() {
+        let rest = &source[at..];
+        let line_end = rest
+            .bytes()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+            .unwrap_or(rest.len());
+        let line = &rest[..line_end];
         let indent = line.len() - line.trim_start().len();
         let row = line.trim();
-        if is_rule_row(row) {
-            rows.push(at + indent..at + indent + row.len());
+        if let Some((visible, hidden)) = rule_form(row) {
+            rows.push(RuleRow {
+                range: at + indent..at + indent + row.len(),
+                visible,
+                hidden,
+            });
         }
-        at += line.len();
+        at += line_end;
+        match source.as_bytes().get(at..) {
+            Some([b'\r', b'\n', ..]) => at += 2,
+            Some([b'\r' | b'\n', ..]) => at += 1,
+            _ => break,
+        }
     }
     rows
 }
 
-fn is_rule_row(row: &str) -> bool {
+fn rule_form(row: &str) -> Option<(u8, u8)> {
     let mut bytes = row.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    RULE_CHARS.contains(&first) && bytes.all(|byte| byte == first)
+    let first = bytes.next()?;
+    let index = RULE_CHARS
+        .iter()
+        .position(|&candidate| candidate == first)?;
+    bytes
+        .all(|byte| byte == first)
+        .then_some((first, HIDDEN_RULE_CHARS[index]))
 }
 
 // Every codepoint this crate reserves, wherever the source already carried
@@ -228,7 +366,11 @@ fn underline_row(pos: Sourcepos) -> Sourcepos {
 // off: a break the canonicaliser cannot see is one it re-inserts, and the
 // round trip would grow a blank line every pass. A pair that does not slice
 // the source is dropped rather than trusted.
-fn byte_range(source: &str, line_starts: &[usize], pos: Sourcepos) -> Option<Range<usize>> {
+pub(crate) fn byte_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: Sourcepos,
+) -> Option<Range<usize>> {
     let offset = |line: usize, column: usize| {
         line_starts
             .get(line.checked_sub(1)?)
@@ -241,9 +383,31 @@ fn byte_range(source: &str, line_starts: &[usize], pos: Sourcepos) -> Option<Ran
     (!text.is_empty()).then_some(start..start + text.len())
 }
 
-fn line_starts(source: &str) -> Vec<usize> {
+// CommonMark ends a line at any of three terminators and comrak counts all
+// three, so a table built from `'\n'` alone numbered every line after a lone
+// `'\r'` one too low. Each `byte_range` above then resolved against the line
+// before the one comrak meant: a region landed on the wrong bytes or failed to
+// slice at all, and a fence that was never lifted got canonicalised — its
+// blank-line runs squeezed and its own lone `'\r'` rewritten, which is the one
+// thing `protect` exists to prevent. A single `'\r'` after the miscount is
+// enough to carry the drift into every later region, so an unrelated fence
+// further down the source breaks along with the one that holds the CR.
+//
+// `"\r\n"` is one terminator rather than two: the `'\n'` arm answers for the
+// pair, and the `'\r'` arm stands down when a `'\n'` follows it.
+pub(crate) fn line_starts(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
     once(0)
-        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .chain(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(at, &byte)| match byte {
+                    b'\n' => Some(at + 1),
+                    b'\r' if bytes.get(at + 1) != Some(&b'\n') => Some(at + 1),
+                    _ => None,
+                }),
+        )
         .collect()
 }
 
@@ -290,6 +454,63 @@ mod tests {
         let (protected, originals) = protect(&source);
         assert_eq!(originals, [format!("```\n{MASK_CHAR}\n```")]);
         assert_eq!(restore(&protected, &originals), source);
+    }
+
+    #[test]
+    fn rule_row_registry_never_claims_author_control_bytes() {
+        let controls = "\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}";
+        let source = format!("{controls}\nFoo\n----------\n\u{2}\u{3}\n");
+        let hidden = hide_rule_rows(&source).expect("the hyphen row is hidden");
+        assert_eq!(hidden.reveal(hidden.text()), source);
+        assert!(
+            hidden.text().starts_with(controls),
+            "the author's identical-looking run must not enter the registry"
+        );
+    }
+
+    #[test]
+    fn rule_row_registry_relocates_rows_after_line_ending_normalization() {
+        let source = "\u{FEFF}Foo\r\n----------\r\n";
+        let hidden = hide_rule_rows(source).expect("the hyphen row is hidden");
+        let normalized = hidden
+            .text()
+            .trim_start_matches('\u{FEFF}')
+            .replace("\r\n", "\n");
+        assert_eq!(hidden.reveal(&normalized), "Foo\n----------\n");
+    }
+
+    #[test]
+    fn rule_row_registry_recognises_every_commonmark_line_ending() {
+        for source in [
+            "Foo\n----------\n",
+            "Foo\r----------\r",
+            "Foo\r\n----------\r\n",
+        ] {
+            let hidden = hide_rule_rows(source).expect("the hyphen row is hidden");
+            assert_eq!(hidden.reveal(hidden.text()), source);
+        }
+    }
+
+    #[test]
+    fn every_leading_bom_is_one_verbatim_region() {
+        let source = "\u{FEFF}\u{FEFF}\u{FEFF}abc\n";
+        let (protected, originals) = protect(source);
+        assert_eq!(originals, ["\u{FEFF}\u{FEFF}\u{FEFF}"]);
+        assert_eq!(restore(&protected, &originals), source);
+    }
+
+    #[test]
+    fn a_code_block_ending_on_a_blank_line_keeps_its_line_terminator() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!("-\n  ```\n{ending}```");
+            let (protected, originals) = protect(&source);
+            let expected = format!("```\n{ending}");
+            assert!(
+                originals.contains(&expected.as_str()),
+                "the literal blank line was not lifted for {ending:?}: {originals:?}"
+            );
+            assert_eq!(restore(&protected, &originals), source);
+        }
     }
 
     #[test]

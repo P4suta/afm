@@ -90,7 +90,9 @@ pub mod sentinels {
 }
 
 #[doc(inline)]
-pub use diagnostics::{Diagnostic, DiagnosticSource, Severity, Span};
+pub use diagnostics::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
+#[cfg(feature = "miette")]
+pub use diagnostics::{DiagnosticBindError, SourceBoundDiagnostic};
 
 use core::mem;
 
@@ -118,7 +120,10 @@ use crate::constructs::Constructs;
 // knob it means to change, and `tsify` reads the same attribute to mark every
 // field optional in the emitted `.d.ts` — so the shape a browser host is
 // typed against is the shape serde will actually accept.
-#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(default, deny_unknown_fields, rename_all = "camelCase")
+)]
 #[cfg_attr(feature = "tsify", tsify(from_wasm_abi))]
 #[non_exhaustive]
 pub struct Options {
@@ -131,18 +136,6 @@ pub struct Options {
     strikethrough: bool,
     autolinks: bool,
     task_lists: bool,
-    // Raw HTML, and the GFM filter that only bites when raw HTML is passing
-    // through, exist for the conformance runners alone. The fields are not
-    // compiled into a released build, so there is nothing for a public setter
-    // to reach even by accident — and `skip` keeps the test build's own
-    // deserialiser off them too, so no spelling of the wire form reaches
-    // `render.unsafe` either.
-    #[cfg(test)]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    raw_html: bool,
-    #[cfg(test)]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    tagfilter: bool,
 }
 
 impl Default for Options {
@@ -176,10 +169,6 @@ impl Options {
             strikethrough: true,
             autolinks: true,
             task_lists: true,
-            #[cfg(test)]
-            raw_html: false,
-            #[cfg(test)]
-            tagfilter: false,
         }
     }
 
@@ -292,22 +281,30 @@ impl Options {
         comrak.extension.cjk_friendly_emphasis = self.cjk_friendly_emphasis;
         comrak.parse.smart = self.smart_punctuation;
         comrak.render.hardbreaks = self.hardbreaks;
-        // Rebound rather than mutated under a `#[cfg]` block, which no
-        // spelling of satisfies `semicolon_outside_block` and
-        // `semicolon_if_nothing_returned` at once.
-        #[cfg(test)]
-        let comrak = {
-            let mut comrak = comrak;
-            comrak.extension.tagfilter = self.tagfilter;
-            comrak.render.r#unsafe = self.raw_html;
-            comrak
-        };
         comrak
     }
 }
 
+/// Test-runner-only switches that cannot be represented by public
+/// [`Options`], even in a test build.
 #[cfg(test)]
-impl Options {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConformanceOptions {
+    public: Options,
+    raw_html: bool,
+    tagfilter: bool,
+}
+
+#[cfg(test)]
+impl ConformanceOptions {
+    fn new(public: Options) -> Self {
+        Self {
+            public,
+            raw_html: false,
+            tagfilter: false,
+        }
+    }
+
     // Raw-HTML passthrough, which both spec runners need because the expected
     // output in both fixtures contains raw HTML.
     //
@@ -318,16 +315,28 @@ impl Options {
     // README's compatibility claim is about those two presets; nothing else
     // about them is allowed to be runner-specific. Never reachable from
     // outside the crate — that is the point of the `cfg`.
-    pub(crate) fn with_raw_html(mut self, on: bool) -> Self {
+    fn with_raw_html(mut self, on: bool) -> Self {
         self.raw_html = on;
         self
     }
 
     // GFM's disallowed-raw-html filter. Only observable with raw HTML on, so
     // it belongs to the runner rather than the public surface.
-    pub(crate) fn with_tagfilter(mut self, on: bool) -> Self {
+    fn with_tagfilter(mut self, on: bool) -> Self {
         self.tagfilter = on;
         self
+    }
+
+    fn with_autolinks(mut self, on: bool) -> Self {
+        self.public = self.public.with_autolinks(on);
+        self
+    }
+
+    fn comrak(&self) -> comrak::Options<'static> {
+        let mut comrak = self.public.comrak();
+        comrak.extension.tagfilter = self.tagfilter;
+        comrak.render.r#unsafe = self.raw_html;
+        comrak
     }
 }
 
@@ -349,7 +358,7 @@ pub struct Rendered {
 #[non_exhaustive]
 pub struct RenderedIr {
     /// The projected document.
-    pub ir: ir::Document,
+    pub ir: ir::MarkdownDocument,
     /// The same document as HTML, so a host can render either without a
     /// second pass.
     pub html: String,
@@ -443,7 +452,8 @@ pub fn diagnose(input: &str, options: &Options) -> Vec<Diagnostic> {
     if !options.aozora {
         return Vec::new();
     }
-    let (masked_source, _) = code_block_mask::mask_code_block_triggers(input);
+    let comrak = options.comrak();
+    let (masked_source, _) = code_block_mask::mask_code_block_triggers(input, &comrak);
     aozora::prewarm();
     Constructs::build(&masked_source).diagnostics().to_vec()
 }
@@ -503,7 +513,7 @@ pub(crate) fn push_html_escaped(out: &mut String, s: &str) {
 pub fn render_to_ir(input: &str, options: &Options) -> RenderedIr {
     if !source_within_span_budget(input) {
         return RenderedIr {
-            ir: ir::Document::default(),
+            ir: ir::MarkdownDocument::default(),
             html: String::new(),
             diagnostics: vec![Diagnostic::source_too_large(input.len())],
         };
@@ -523,13 +533,25 @@ where
     F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
 {
     let comrak_options = options.comrak();
+    drive_pipeline_with_comrak(input, options, &comrak_options, project)
+}
+
+fn drive_pipeline_with_comrak<F, T>(
+    input: &str,
+    options: &Options,
+    comrak_options: &comrak::Options<'static>,
+    project: F,
+) -> (String, Vec<Diagnostic>, T)
+where
+    F: for<'a> FnOnce(&'a AstNode<'a>, &Constructs) -> T,
+{
     if !options.aozora {
         let comrak_arena = comrak::Arena::new();
-        let root = comrak::parse_document(&comrak_arena, input, &comrak_options);
+        let root = comrak::parse_document(&comrak_arena, input, comrak_options);
         // No lexer pass, so no constructs and no sentinels: the input goes
         // to comrak as the caller wrote it.
         let extra = project(root, &Constructs::none());
-        let html = format_root(root, &comrak_options, options.source_line_anchors, None);
+        let html = format_root(root, comrak_options, options.source_line_anchors);
         return (html, Vec::new(), extra);
     }
 
@@ -537,7 +559,7 @@ where
     // CommonMark fenced code block from the lexer, which is
     // CommonMark-blind by design (ADR-0010), so this lives here. See
     // `code_block_mask` module docs for the masking scheme.
-    let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
+    let (masked_source, fenced) = code_block_mask::mask_code_block_triggers(input, comrak_options);
 
     // A render parses the document once and then each of its constructs
     // again, on its own, to learn what that construct renders to. Building
@@ -549,24 +571,38 @@ where
     // masked source is the single coordinate space from here on: it is
     // char-for-char the caller's input, so a construct's byte range is one
     // the caller can slice (see `crate::constructs`).
-    let constructs = Constructs::build(&masked_source);
+    let mut constructs = Constructs::build(&masked_source);
+    if fenced.introduced_masks() {
+        constructs.neutralize_fence_masks();
+    }
 
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(&comrak_arena, constructs.text(), &comrak_options);
+    let root = comrak::parse_document(&comrak_arena, constructs.text(), comrak_options);
+    constructs.remap_source_positions(root);
+    code_block_mask::restore_ast(root, input, &fenced);
 
-    // Both walkers cursor over the same construct table, each with its own
-    // cursor, so they stay in lockstep without serial coupling.
+    // The IR walker sees fenced fields after range-keyed restoration and
+    // construct sentinels before the HTML splicer consumes them.
     let extra = project(root, &constructs);
 
     ast_splice::splice_into_ast(root, &comrak_arena, &constructs);
 
-    let html = format_root(
-        root,
-        &comrak_options,
-        options.source_line_anchors,
-        Some(mask_originals.as_slice()),
-    );
+    let html = format_root(root, comrak_options, options.source_line_anchors);
     (html, constructs.diagnostics().to_vec(), extra)
+}
+
+#[cfg(test)]
+fn render_conformance(input: &str, options: &ConformanceOptions) -> Rendered {
+    if !source_within_span_budget(input) {
+        return Rendered {
+            html: String::new(),
+            diagnostics: vec![Diagnostic::source_too_large(input.len())],
+        };
+    }
+    let comrak = options.comrak();
+    let (html, diagnostics, ()) =
+        drive_pipeline_with_comrak(input, &options.public, &comrak, |_root, _constructs| ());
+    Rendered { html, diagnostics }
 }
 
 /// Formats per top-level child when `anchors` is on, so each child's first
@@ -579,18 +615,12 @@ fn format_root<'a>(
     root: &'a AstNode<'a>,
     comrak: &comrak::Options<'static>,
     anchors: bool,
-    mask_originals: Option<&[char]>,
 ) -> String {
-    let html = if anchors {
+    if anchors {
         source_line_anchors::format_root_with_anchors(root, comrak)
     } else {
         let mut html = String::new();
         comrak::format_html(root, comrak, &mut html).expect("formatting to a String never fails");
-        html
-    };
-    if let Some(originals) = mask_originals {
-        code_block_mask::unmask(&html, originals).into_owned()
-    } else {
         html
     }
 }
@@ -654,22 +684,24 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
         let comrak_arena = comrak::Arena::new();
         let root = comrak::parse_document(&comrak_arena, input, &options.comrak());
         return RenderedBlocks {
-            blocks: collect_rendered_blocks(root, options, Vec::new(), &[]),
+            blocks: collect_rendered_blocks(root, options, Vec::new()),
             diagnostics: Vec::new(),
         };
     }
 
-    let (masked_source, mask_originals) = code_block_mask::mask_code_block_triggers(input);
+    let comrak_options = options.comrak();
+    let (masked_source, fenced) = code_block_mask::mask_code_block_triggers(input, &comrak_options);
     aozora::prewarm();
     // The builder owns the construct table; the splice below borrows the
     // same one, so both outputs of this call describe the same document.
     let mut builder = ir::StreamingIrBuilder::new(&masked_source);
+    if fenced.introduced_masks() {
+        builder.neutralize_fence_masks();
+    }
     let comrak_arena = comrak::Arena::new();
-    let root = comrak::parse_document(
-        &comrak_arena,
-        builder.constructs().text(),
-        &options.comrak(),
-    );
+    let root = comrak::parse_document(&comrak_arena, builder.constructs().text(), &comrak_options);
+    builder.constructs().remap_source_positions(root);
+    code_block_mask::restore_ast(root, input, &fenced);
     // IR projection runs before AST mutation so it walks the
     // sentinel-bearing Text nodes; AST splicing afterwards rewrites
     // the same nodes for `comrak::format_html` consumption. A single
@@ -679,7 +711,7 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     // Aozora projection against the table.
     let mut blocks_ir: Vec<Vec<ir::Block>> = root
         .children()
-        .map(|child| builder.walk_block(child))
+        .filter_map(|child| builder.walk_block(child))
         .collect();
     ast_splice::splice_into_ast(root, &comrak_arena, builder.constructs());
     // Read while the builder still owns the table.
@@ -690,7 +722,7 @@ pub fn render_blocks(input: &str, options: &Options) -> RenderedBlocks {
     // here keeps `ir` and `html` describing the same block.
     blocks_ir.extend(builder.finish().into_iter().map(|block| vec![block]));
     RenderedBlocks {
-        blocks: collect_rendered_blocks(root, options, blocks_ir, &mask_originals),
+        blocks: collect_rendered_blocks(root, options, blocks_ir),
         diagnostics,
     }
 }
@@ -703,7 +735,6 @@ fn collect_rendered_blocks<'a>(
     root: &'a AstNode<'a>,
     options: &Options,
     mut blocks_ir: Vec<Vec<ir::Block>>,
-    mask_originals: &[char],
 ) -> Vec<RenderedBlock> {
     // The AST has already been spliced at the document level by the
     // caller (so `format_html` sees no sentinels here), and the IR
@@ -714,13 +745,8 @@ fn collect_rendered_blocks<'a>(
     // us an empty IR vector; we emit `Vec::new()` per block in that
     // case so the per-block IR field stays consistent with the IR
     // builder's no-op behaviour.
-    //
-    // Masks are restored with a cursor rather than the one pass the
-    // document path makes: handing every block the whole slice would replay
-    // block 1's originals into block 2.
     let comrak_options = options.comrak();
     let mut blocks = Vec::new();
-    let mut mask_cursor = mask_originals;
     for (idx, child) in root.children().enumerate() {
         let data = child.data.borrow();
         let line = constructs::saturating_u32(data.sourcepos.start.line).max(1);
@@ -733,11 +759,6 @@ fn collect_rendered_blocks<'a>(
                 .expect("formatting a String never fails");
             buf
         };
-        let block_html = if mask_cursor.is_empty() {
-            rendered
-        } else {
-            code_block_mask::unmask_from(&rendered, &mut mask_cursor).into_owned()
-        };
         let ir_blocks = if idx < blocks_ir.len() {
             mem::take(&mut blocks_ir[idx])
         } else {
@@ -745,7 +766,7 @@ fn collect_rendered_blocks<'a>(
         };
         blocks.push(RenderedBlock {
             ir: ir_blocks,
-            html: block_html,
+            html: rendered,
             source_line: line,
         });
     }
@@ -759,7 +780,7 @@ fn collect_rendered_blocks<'a>(
 /// they saw as [`Diagnostic`]s — a rustc warning's standing, not an error's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum CanonicalizeError {
     /// Refused ahead of the lexer, whose own `u32` span assert would abort
     /// the process under this workspace's `panic = "abort"`.
     #[error("source is {len} bytes; the parser addresses at most u32::MAX")]
@@ -767,10 +788,6 @@ pub enum Error {
         /// Length of the source that was refused, in bytes.
         len: usize,
     },
-    /// A pass handed the lexer text it would not take — reachable only
-    /// because lifting a verbatim region out can grow a source past the bound.
-    #[error("the source did not lex")]
-    ParseFailed,
 }
 
 /// Round-trip source through the parser back to canonical
@@ -785,7 +802,9 @@ pub enum Error {
 /// rule row and a codepoint this crate reserves come back as written, at any
 /// container depth. Plain CommonMark therefore passes through verbatim, up to
 /// what CommonMark does not itself distinguish and the parser normalises
-/// document-wide — CRLF becomes LF, a leading BOM goes, blank lines collapse.
+/// document-wide — prose line endings become LF and blank lines collapse.
+/// A leading run of byte-order marks is source text at this API boundary and
+/// is preserved in full.
 ///
 /// # Examples
 ///
@@ -796,14 +815,13 @@ pub enum Error {
 /// assert_eq!(canonical, "彼は青梅《おうめ》に行った。");
 /// assert_eq!(canonicalize(&canonical)?, canonical);
 /// assert_eq!(canonicalize("")?, String::new());
-/// # Ok::<(), aozora_flavored_markdown::Error>(())
+/// # Ok::<(), aozora_flavored_markdown::CanonicalizeError>(())
 /// ```
 ///
 /// # Errors
 ///
-/// [`Error::SourceTooLarge`] past `MAX_SOURCE_BYTES`, [`Error::ParseFailed`]
-/// when a pass hands the lexer text it will not take — never for empty input.
-pub fn canonicalize(input: &str) -> Result<String, Error> {
+/// [`CanonicalizeError::SourceTooLarge`] past `MAX_SOURCE_BYTES`.
+pub fn canonicalize(input: &str) -> Result<String, CanonicalizeError> {
     canonicalize_within(input, MAX_SOURCE_BYTES)
 }
 
@@ -813,13 +831,13 @@ pub fn canonicalize(input: &str) -> Result<String, Error> {
 // this guard. Same reason `len_within_span_budget` is split out from the
 // guard the render entry points share, and the boundary is the same one —
 // a source of exactly the budget is still addressable.
-fn canonicalize_within(input: &str, budget: usize) -> Result<String, Error> {
+fn canonicalize_within(input: &str, budget: usize) -> Result<String, CanonicalizeError> {
     if input.len() > budget {
-        return Err(Error::SourceTooLarge { len: input.len() });
+        return Err(CanonicalizeError::SourceTooLarge { len: input.len() });
     }
-    let mut current = canonicalise_pass(input).ok_or(Error::ParseFailed)?;
+    let mut current = canonicalise_pass(input);
     for _ in 1..MAX_CANONICAL_PASSES {
-        let next = canonicalise_pass(&current).ok_or(Error::ParseFailed)?;
+        let next = canonicalise_pass(&current);
         if next == current {
             return Ok(current);
         }
@@ -836,15 +854,20 @@ fn canonicalize_within(input: &str, budget: usize) -> Result<String, Error> {
 const MAX_CANONICAL_PASSES: usize = 4;
 
 // One pass: lift out what comrak claims, canonicalise the prose between,
-// splice the originals back; `None` when the source does not lex at all.
+// splice the originals back. The sibling grammar is total below its span
+// budget. If an internal placeholder expansion alone crosses that budget,
+// returning the caller's text is the only fixed-point-preserving answer and
+// avoids inventing a second public error for an internal representation.
 // Lifted whole rather than masked character by character as in
 // `drive_pipeline`, which has a byte span to keep aligned and this has not —
 // so here a region leaves the lexer's sight entirely (`verbatim_regions`).
-fn canonicalise_pass(source: &str) -> Option<String> {
+fn canonicalise_pass(source: &str) -> String {
     let (protected, originals) = verbatim_regions::protect(source);
-    let document = aozora::parse(protected).ok()?;
+    let Ok(document) = aozora::parse(protected) else {
+        return source.to_owned();
+    };
     let canonical = document.snapshot().to_source();
-    Some(verbatim_regions::restore(&canonical, &originals))
+    verbatim_regions::restore(&canonical, &originals)
 }
 
 #[cfg(test)]
@@ -1011,19 +1034,19 @@ mod tests {
         // this one switch, so the switch has to be exactly that: raw HTML on,
         // every other knob still the preset's.
         for preset in [Options::commonmark(), Options::gfm()] {
-            let opts = preset.clone().with_raw_html(true);
+            let opts = ConformanceOptions::new(preset.clone()).with_raw_html(true);
             assert!(
                 opts.comrak().render.r#unsafe,
                 "with_raw_html must enable raw-HTML passthrough for the runner"
             );
             assert_eq!(
-                opts.with_raw_html(false),
+                opts.with_raw_html(false).public,
                 preset,
                 "with_raw_html must move no knob but its own"
             );
         }
         assert!(
-            Options::commonmark()
+            ConformanceOptions::new(Options::commonmark())
                 .with_raw_html(true)
                 .with_tagfilter(true)
                 .comrak()
@@ -1049,13 +1072,9 @@ mod tests {
         );
     }
 
-    // The wire form is the other way in, and `raw_html` / `tagfilter` are
-    // `#[cfg(test)]` — so this build is the only one in which they exist,
-    // and therefore the only place a deserialiser that reached them could
-    // ever be caught. The integration sweep over the options surface links
-    // the released shape, where both fields are simply absent: it would pass
-    // for the wrong reason, whatever the attributes said. `#[serde(skip)]`
-    // is what holds the line here, and nothing else in the workspace sees it.
+    // The wire form is the other way in. Test-only switches live on a
+    // different type, and strict deserialisation rejects every spelling
+    // instead of silently accepting a configuration it cannot apply.
     #[cfg(feature = "serde")]
     #[test]
     fn no_wire_spelling_reaches_raw_html_or_the_tagfilter() {
@@ -1068,15 +1087,9 @@ mod tests {
             r#"{"render": {"unsafe": true}}"#,
             r#"{"aozora": true, "rawHtml": true, "tagfilter": true}"#,
         ] {
-            let opts: Options = serde_json::from_str(wire).unwrap();
-            let comrak = opts.comrak();
             assert!(
-                !comrak.render.r#unsafe,
-                "{wire} turned raw-HTML passthrough on"
-            );
-            assert!(
-                !comrak.extension.tagfilter,
-                "{wire} turned the GFM tagfilter on"
+                serde_json::from_str::<Options>(wire).is_err(),
+                "{wire} must be rejected as an unknown Options key"
             );
         }
     }
@@ -1125,7 +1138,7 @@ mod tests {
             let expected = if len <= BUDGET {
                 Ok(src.clone())
             } else {
-                Err(Error::SourceTooLarge { len })
+                Err(CanonicalizeError::SourceTooLarge { len })
             };
             assert_eq!(
                 canonicalize_within(&src, BUDGET),

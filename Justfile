@@ -6,7 +6,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
-_DOC_FLAGS := "-D warnings --cfg docsrs"
+_DOC_FLAGS := "-D warnings"
 _COV_FLOOR := "95"
 _COV_IGNORE := "(target/|xtask/|aozora-flavored-markdown-test-support/|aozora-flavored-markdown-wasm/)"
 _FUZZ_TOOLCHAIN := "nightly-2026-07-15"
@@ -21,6 +21,16 @@ default:
 [group('rust')]
 check:
     cargo check --locked --workspace --all-targets --all-features
+
+[group('rust')]
+check-features:
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features miette
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features serde
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features theme
+    cargo check --locked --package aozora-flavored-markdown --lib --no-default-features --features tsify
+    cargo check --locked --package aozora-flavored-markdown-wasm --no-default-features
+    cargo check --locked --package aozora-flavored-markdown-wasm --all-features
 
 [group('rust')]
 build:
@@ -161,11 +171,11 @@ deny:
 
 [group('repo')]
 actionlint:
-    actionlint -no-color -shellcheck= -pyflakes=
+    actionlint -no-color -shellcheck=shellcheck -pyflakes=
 
 [group('repo')]
 zizmor:
-    zizmor --offline --no-progress .
+    zizmor --offline --no-progress --no-ignores .
 
 # --- Fuzzing -----------------------------------------------------------------
 
@@ -198,6 +208,21 @@ fuzz-seed:
         taking { gsub(/→/, "\t"); body = body $0 "\n" }
     ' spec/sources/*.txt
 
+    # CommonMark has LF, CRLF and lone CR line endings, but the tracked
+    # source fixtures are LF-normalised. Keep one generated seed per
+    # CR-sensitive structure so libFuzzer does not have to invent the byte
+    # before it can exercise fence fidelity.
+    printf 'a\rb\n\n```\nc\n\n\nd\n```\n' \
+        >"$work/seeds/eol-cr-in-prose-shifts-a-later-fence"
+    printf '```\r｜青梅《おうめ》\r［＃改ページ］\r```\r' \
+        >"$work/seeds/eol-cr-is-the-only-ending"
+    printf '```\r\n｜青梅《おうめ》\r｜漢字《かんじ》\r\n```\n' \
+        >"$work/seeds/eol-all-three-in-one-fence"
+    printf '> ```\r> ｜青梅《おうめ》\r> ```\r\n\n    ｜青梅《おうめ》\r    ｜漢字《かんじ》\n' \
+        >"$work/seeds/eol-cr-behind-a-container-and-an-indent"
+    cargo run --quiet -p xtask -- cp932-project \
+        --input-dir "$work/seeds" --output-dir "$work/cp932"
+
     cd crates/aozora-flavored-markdown
     while IFS= read -r target; do
         dir="../../$corpus/$target"
@@ -206,8 +231,8 @@ fuzz-seed:
         for source in "$work"/seeds/*; do
             seed=$source
             if [[ "$target" == sjis_decode ]]; then
-                iconv -f UTF-8 -t CP932 <"$source" >"$work/encoded" 2>/dev/null || continue
-                seed="$work/encoded"
+                seed="$work/cp932/${source##*/}"
+                [[ -f "$seed" ]] || continue
             elif [[ "$target" == options_space ]]; then
                 (head -c 2 /dev/zero; cat "$source") >"$work/masked"
                 seed="$work/masked"
@@ -231,6 +256,69 @@ fuzz-deep TARGET:
         timeout --signal=TERM --kill-after=10s 330s \
         cargo +{{_FUZZ_TOOLCHAIN}} fuzz run {{TARGET}} \
             --target {{_FUZZ_TARGET}} -- -max_total_time=300
+
+# Replay every artifact libFuzzer left for TARGET. One line per artifact: the
+# `Tier X violated` panic line when it still crashes, otherwise the tail of a
+# clean run. Exit status is the number of crashing artifacts, so a CI gate can
+# read it directly.
+[group('fuzz')]
+fuzz-triage TARGET:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    dir="crates/aozora-flavored-markdown/fuzz/artifacts/{{TARGET}}"
+    bin="crates/aozora-flavored-markdown/fuzz/target/{{_FUZZ_TARGET}}/release/{{TARGET}}"
+    if [[ ! -x "$bin" ]]; then
+        echo "fuzz-triage: build the targets first: just fuzz-build" >&2
+        exit 2
+    fi
+    crashing=0
+    shopt -s nullglob
+    for artifact in "$dir"/*; do
+        log=$(mktemp)
+        if ASAN_OPTIONS=detect_leaks=0 "$bin" "$artifact" -runs=1 >"$log" 2>&1; then
+            printf '%s: clean\n' "${artifact##*/}"
+            tail -n 5 "$log" | sed 's/^/    /'
+        else
+            crashing=$((crashing + 1))
+            printf '%s: CRASH\n' "${artifact##*/}"
+            grep -m1 -o "panicked at .*\|Tier [A-Z] ([^)]*) violated" "$log" \
+                | sed 's/^/    /' || true
+        fi
+        rm -f "$log"
+    done
+    exit "$crashing"
+
+# Move an artifact into the permanent regression set, where `just test` replays
+# it without a nightly toolchain. The name is the artifact's own file name.
+[group('fuzz')]
+fuzz-promote TARGET ARTIFACT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    from="crates/aozora-flavored-markdown/fuzz/artifacts/{{TARGET}}/{{ARTIFACT}}"
+    into="crates/aozora-flavored-markdown/tests/fuzz_regressions/{{TARGET}}"
+    [[ -f "$from" ]] || { echo "fuzz-promote: no such artifact: $from" >&2; exit 2; }
+    [[ -d "$into" ]] || { echo "fuzz-promote: no such target dir: $into" >&2; exit 2; }
+    mv "$from" "$into/"
+    printf 'fuzz-promote: %s -> %s/\n' "{{ARTIFACT}}" "$into"
+
+# What is waiting to be triaged, and what is already pinned.
+[group('fuzz')]
+fuzz-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts="crates/aozora-flavored-markdown/fuzz/artifacts"
+    pinned="crates/aozora-flavored-markdown/tests/fuzz_regressions"
+    printf '%-24s %-16s %s\n' target pending_crashes pinned_regressions
+    printf '%.0s-' {1..60}; printf '\n'
+    cd crates/aozora-flavored-markdown
+    while IFS= read -r target; do
+        cd ../..
+        printf '%-24s %-16s %s\n' "$target" \
+            "$(find "$artifacts/$target" -maxdepth 1 -type f 2>/dev/null | wc -l)" \
+            "$(find "$pinned/$target" -maxdepth 1 -type f -not -name '.gitkeep' \
+                -not -name '*.expect.txt' 2>/dev/null | wc -l)"
+        cd crates/aozora-flavored-markdown
+    done < <(cargo +{{_FUZZ_TOOLCHAIN}} fuzz list)
 
 [group('fuzz')]
 fuzz-all-quick:
@@ -297,7 +385,7 @@ dist-assets-check:
 
 [group('release')]
 dist-plan:
-    dist plan --output-format=json
+    scripts/dist-plan-check.sh
 
 [group('release')]
 changelog-check:
@@ -317,19 +405,8 @@ semver:
         --baseline-rev v0.4.1
 
 [group('release')]
-package-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    id=$(cargo pkgid --locked --package aozora-flavored-markdown)
-    version=${id##*[#@]}
-    cargo publish --workspace --dry-run --locked
-    crate="target/package/tmp-crate/aozora-flavored-markdown-${version}.crate"
-    test -f "$crate"
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
-    tar -xf "$crate" -C "$tmp"
-    cd "$tmp/aozora-flavored-markdown-${version}"
-    cargo test --lib --all-features --locked
+package-smoke SKIP_CRATES="":
+    scripts/package-smoke.sh {{quote(SKIP_CRATES)}}
 
 [group('release')]
 release-smoke:
@@ -378,7 +455,7 @@ docs-site: doc playground-build
 # --- Fixed CI entry points ---------------------------------------------------
 
 [group('ci')]
-ci-rust: fmt-check clippy coverage test-doc doc-public
+ci-rust: fmt-check check-features clippy coverage test-doc doc-public
 
 [group('ci')]
 ci-web: test-wasm playground-lint playground-test playground-build

@@ -84,8 +84,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "serialize_round_trip"
-path = "fuzz_targets/serialize_round_trip.rs"
+name = "canonicalize_round_trip"
+path = "fuzz_targets/canonicalize_round_trip.rs"
 test = false
 doc = false
 bench = false

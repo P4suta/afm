@@ -38,3 +38,17 @@ fn anchors_not_applied_when_aozora_disabled_and_option_off() {
     let on = render("p\n", &Options::commonmark().with_source_line_anchors(true));
     assert!(on.html.contains(r#"<p data-aozora-md-source-line=""#));
 }
+
+#[test]
+fn block_notation_does_not_shift_a_following_anchor() {
+    let on = render(
+        "一行目\n\n［＃改ページ］\n\n五行目\n",
+        &Options::default().with_source_line_anchors(true),
+    );
+    assert!(
+        on.html
+            .contains(r#"<p data-aozora-md-source-line="5">五行目</p>"#),
+        "anchor must address the caller's fifth line: {}",
+        on.html
+    );
+}

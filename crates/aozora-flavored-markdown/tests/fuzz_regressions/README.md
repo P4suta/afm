@@ -15,7 +15,7 @@ tests/fuzz_regressions/
     crash-<sha>.expect.txt # (optional) panic snippet, archaeology only
   render_blocks/
     .gitkeep               # nothing promoted yet — the directory still exists
-  serialize_round_trip/
+  canonicalize_round_trip/
     ...
   sjis_decode/
     ...
@@ -28,7 +28,7 @@ Every registered fuzz target owns a directory here whether or not it has
 anything pinned, and `.gitkeep` is what keeps an empty one in git. A
 missing directory is a hard failure, not an empty replay: `read_dir`
 answered "no such directory" with an empty list, an empty list is a pass,
-and `render_blocks`, `serialize_round_trip` and `sjis_decode` therefore
+and `render_blocks`, `canonicalize_round_trip` and `sjis_decode` therefore
 reported green over a directory that had never been created.
 
 ## Workflow
@@ -76,7 +76,7 @@ reported green over a directory that had never been created.
    # --------------------------------------------------------
    # parse_render        0                3
    # render_blocks       0                0
-   # serialize_round_trip 0                1
+   # canonicalize_round_trip 0             1
    # sjis_decode         0                0
    ```
 

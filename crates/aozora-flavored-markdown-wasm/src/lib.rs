@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 use aozora::json;
-use aozora_flavored_markdown::ir::{Block, Document};
+use aozora_flavored_markdown::ir::{Block, MarkdownDocument};
 // Aliased because the `renderBlocks` export below is itself a `render_blocks`
 // in Rust, and the ABI's name is the one that cannot move.
 use aozora_flavored_markdown::{
@@ -20,6 +20,14 @@ use serde::Serialize;
 use tsify::Tsify;
 use twox_hash::XxHash3_64;
 use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    /// JavaScript representation of the core [`Options`] interface.
+    #[wasm_bindgen(typescript_type = "Options")]
+    pub type JsOptions;
+}
 
 /// Install a `console.error` panic hook for friendlier debugging.
 /// No-op when compiled without the `panic-hook` feature.
@@ -35,7 +43,7 @@ pub fn init_panic_hook() {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct RenderResult {
-    ir: Document,
+    ir: MarkdownDocument,
     /// A debug / fallback surface: hosts that ship a JS renderer should
     /// render from `ir` instead.
     html: String,
@@ -51,15 +59,40 @@ pub struct RenderResult {
 // carrying a `source_too_large` diagnostic, which the envelope below forwards
 // like any other. A malformed `options` never reaches here at all — `tsify`
 // owns the ABI decode and throws a `TypeError` from it.
-#[must_use]
-#[wasm_bindgen(js_name = render)]
-pub fn render(source: &str, options: Option<Options>) -> RenderResult {
-    let rendered = render_to_ir(source, &options.unwrap_or_default());
+fn render_with_options(source: &str, options: &Options) -> RenderResult {
+    let rendered = render_to_ir(source, options);
     RenderResult {
         ir: rendered.ir,
         html: rendered.html,
         diagnostics: rendered.diagnostics,
     }
+}
+
+/// Host-build forwarder used by the native contract tests.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn render(source: &str, options: Option<Options>) -> RenderResult {
+    render_with_options(source, &options.unwrap_or_default())
+}
+
+/// Decode through a value map first. `serde-wasm-bindgen` optimises typed
+/// structs by visiting only their declared field names, which would make
+/// serde's `deny_unknown_fields` unable to observe extra JS object keys.
+#[cfg(target_arch = "wasm32")]
+fn strict_options(options: Option<JsOptions>) -> Result<Options, JsValue> {
+    let Some(options) = options else {
+        return Ok(Options::default());
+    };
+    let value = tsify::serde_wasm_bindgen::from_value::<serde_json::Value>(options.into())
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    serde_json::from_value(value).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// WASM boundary: unknown and retired option keys throw before rendering.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = render)]
+pub fn render(source: &str, options: Option<JsOptions>) -> Result<RenderResult, JsValue> {
+    Ok(render_with_options(source, &strict_options(options)?))
 }
 
 /// Aozora-only inline mode for the obsidian inline post-processor.
@@ -71,7 +104,7 @@ pub fn render(source: &str, options: Option<Options>) -> RenderResult {
 #[must_use]
 #[wasm_bindgen(js_name = renderAozoraOnly)]
 pub fn render_aozora_only(text: &str) -> RenderResult {
-    render(text, None)
+    render_with_options(text, &Options::default())
 }
 
 /// xxh3-64 cache key; JS receives a `bigint`.
@@ -107,14 +140,12 @@ pub struct BlocksResult {
 ///
 /// `options` as in [`render`], including the oversize degradation — which
 /// arrives here as an empty `blocks` beside the diagnostic.
-#[must_use]
-#[wasm_bindgen(js_name = renderBlocks)]
-pub fn render_blocks(source: &str, options: Option<Options>) -> BlocksResult {
+fn render_blocks_with_options(source: &str, options: &Options) -> BlocksResult {
     let RenderedBlocks {
         blocks,
         diagnostics,
         ..
-    } = render_blocks_core(source, &options.unwrap_or_default());
+    } = render_blocks_core(source, options);
     BlocksResult {
         blocks: blocks
             .into_iter()
@@ -126,6 +157,23 @@ pub fn render_blocks(source: &str, options: Option<Options>) -> BlocksResult {
             .collect(),
         diagnostics,
     }
+}
+
+/// Host-build forwarder used by the native contract tests.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn render_blocks(source: &str, options: Option<Options>) -> BlocksResult {
+    render_blocks_with_options(source, &options.unwrap_or_default())
+}
+
+/// WASM boundary equivalent of [`render`], with the same strict options.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = renderBlocks)]
+pub fn render_blocks(source: &str, options: Option<JsOptions>) -> Result<BlocksResult, JsValue> {
+    Ok(render_blocks_with_options(
+        source,
+        &strict_options(options)?,
+    ))
 }
 
 // =====================================================================
@@ -172,11 +220,9 @@ fn now_ms() -> f64 {
 ///
 /// The raw 青空文庫 parser, **not** the aozora-flavored-markdown pipeline, so
 /// its spans are in source coordinates.
-// Named for the parser it wraps rather than `Document`, because the ABI is
-// where the disambiguation belongs: `tsify` derives a TS name from the Rust
-// one, so `ir::Document` already claims `Document` in the emitted `.d.ts` —
-// and so does the DOM. Two `Document` declarations in one `.d.ts` merge
-// silently instead of failing, which is the worse of the two outcomes.
+// Named for the parser it wraps rather than the public Markdown IR document.
+// The generated TypeScript surface therefore keeps this opaque parser handle
+// distinct from both `MarkdownDocument` and the browser DOM `Document`.
 #[derive(Debug)]
 #[wasm_bindgen]
 pub struct AozoraDocument {

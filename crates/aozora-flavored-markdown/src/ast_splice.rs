@@ -234,7 +234,11 @@ impl<'a> AstSplicer<'a, '_> {
                     // two kinds that are not, and the IR walker asks it
                     // the same question.
                     && !inline_is_dropped(hit.kind, self.in_heading_depth > 0)
-                    && let Some(html) = hit.html()
+                    && let Some(html) = if self.in_heading_depth > 0 {
+                        hit.heading_html()
+                    } else {
+                        hit.html()
+                    }
                 {
                     segments.push(self.new_raw_node(html));
                 }
@@ -343,7 +347,7 @@ impl<'a> AstSplicer<'a, '_> {
         let mut data = node.data.borrow_mut();
         match &mut data.value {
             NodeValue::Code(code) => code.literal = rewritten,
-            NodeValue::CodeBlock(code) => code.literal = rewritten,
+            NodeValue::CodeBlock(code) if !code.fenced => code.literal = rewritten,
             _ => {}
         }
     }
@@ -433,7 +437,7 @@ enum DispatchAction {
     /// Carries at least one sentinel char or orphan `［＃` prefix. The
     /// `String` is captured so the dispatch needs no re-borrow.
     TextWith(String),
-    /// Code span or block whose literal carries at least one sentinel.
+    /// Code span or indented block whose literal carries a sentinel.
     CodeWith(String),
     /// Recurse into children, then rewrite `url`/`title`.
     RecurseLink,
@@ -470,17 +474,11 @@ fn classify(value: &NodeValue) -> DispatchAction {
         // (not child text). Recurse into the children first, then rewrite
         // the fields, so cursor consumption matches source order.
         NodeValue::Link(_) | NodeValue::Image(_) => DispatchAction::RecurseLink,
-        // A code block is literal markdown for the same reason a code
-        // span is. A *fenced* one never carries a sentinel — the mask
-        // hides the triggers inside a fence before the lexer runs
-        // (ADR-0010) — but an *indented* one is context the mask
-        // deliberately does not reproduce (see `crate::code_block_mask`),
-        // and comrak reads one out of any four-space line. A sentinel
-        // that lands there has to be written back as the source the
-        // author typed, or it reaches the reader as a private-use
-        // codepoint (Tier B).
+        // A fenced block has already been restored structurally from the
+        // original comrak snapshot. An indented block is not masked and
+        // therefore keeps the existing literal-context cursor recovery.
         NodeValue::CodeBlock(c) => {
-            if c.literal.chars().any(is_sentinel_char) {
+            if !c.fenced && c.literal.chars().any(is_sentinel_char) {
                 DispatchAction::CodeWith(c.literal.clone())
             } else {
                 DispatchAction::Skip
@@ -503,15 +501,20 @@ mod tests {
     /// Mirrors `drive_pipeline` exactly, so these unit tests exercise the
     /// same code-block-mask boundary the production renderer uses.
     fn render_via_ast_splice(input: &str) -> String {
-        let (masked, originals) = code_block_mask::mask_code_block_triggers(input);
-        let constructs = Constructs::build(&masked);
-        let comrak_arena: Arena<'_> = Arena::new();
         let opts = comrak::Options::default();
+        let (masked, fenced) = code_block_mask::mask_code_block_triggers(input, &opts);
+        let mut constructs = Constructs::build(&masked);
+        if fenced.introduced_masks() {
+            constructs.neutralize_fence_masks();
+        }
+        let comrak_arena: Arena<'_> = Arena::new();
         let root = comrak::parse_document(&comrak_arena, constructs.text(), &opts);
+        constructs.remap_source_positions(root);
+        code_block_mask::restore_ast(root, input, &fenced);
         splice_into_ast(root, &comrak_arena, &constructs);
         let mut html = String::new();
         comrak::format_html(root, &opts, &mut html).expect("formatting to a String never fails");
-        code_block_mask::unmask(&html, &originals).into_owned()
+        html
     }
 
     #[test]
@@ -548,6 +551,26 @@ mod tests {
         assert!(
             html.contains("<h1>第一篇</h1>"),
             "expected <h1>第一篇</h1>, got {html}"
+        );
+    }
+
+    /// The minimised `sjis_decode` artifact, end to end. Its one construct's
+    /// run reaches over a blank line, so the table refuses it (see
+    /// `constructs::tests::an_inline_run_reaching_over_a_blank_line_is_not_claimed`)
+    /// and the bracket run reaches this walk as an orphan instead. Before
+    /// that, the two-paragraph fragment was spliced into the list item and its
+    /// stray `</p>` closed the `<li>` comrak had open — Tier D, tag balance.
+    #[test]
+    fn a_run_reaching_over_a_blank_line_leaves_comraks_blocks_intact() {
+        let html = render_via_ast_splice("［「\n- ［＃「］\n\n［］」");
+        assert_eq!(
+            html,
+            concat!(
+                "<p>［「</p>\n<ul>\n<li>",
+                r#"<span class="aozora-md-directive" hidden>［＃「］</span>"#,
+                "</li>\n</ul>\n<p>［］」</p>\n"
+            ),
+            "html: {html}"
         );
     }
 

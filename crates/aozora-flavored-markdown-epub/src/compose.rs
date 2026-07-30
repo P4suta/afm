@@ -28,12 +28,14 @@ use uuid::Uuid;
 
 use crate::discover::{Manuscript, Metadata, WritingMode};
 use crate::render::RenderOutput;
+#[cfg(test)]
+use crate::validate::{is_bcp47_subset, validate_metadata};
+use crate::xml;
 use crate::{Error, Result};
 
 /// Files to write into the EPUB ZIP, in their canonical order.
 #[derive(Debug, Clone)]
 pub(crate) struct Bundle {
-    pub mimetype: &'static str,
     pub container: String,
     pub package_opf: String,
     pub nav_xhtml: String,
@@ -48,8 +50,6 @@ pub(crate) struct NamedFile {
 }
 
 pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Result<Bundle> {
-    validate_metadata(&manuscript.metadata)?;
-
     let id = manuscript
         .metadata
         .identifier
@@ -85,69 +85,12 @@ pub(crate) fn compose(manuscript: &Manuscript, rendered: &RenderOutput) -> Resul
     }];
 
     Ok(Bundle {
-        mimetype: "application/epub+zip",
         container,
         package_opf,
         nav_xhtml,
         spine,
         assets,
     })
-}
-
-/// Reject metadata that would leave the EPUB unreadable on the major
-/// reading systems. Narrow on purpose.
-fn validate_metadata(meta: &Metadata) -> Result<()> {
-    if meta.title.trim().is_empty() {
-        return Err(Error::MetadataInvalid {
-            field: "title",
-            reason: "dc:title must be a non-empty string".to_owned(),
-        });
-    }
-    if meta.creator.trim().is_empty() {
-        return Err(Error::MetadataInvalid {
-            field: "creator",
-            reason: "dc:creator must be a non-empty string".to_owned(),
-        });
-    }
-    if !is_bcp47_subset(&meta.language) {
-        return Err(Error::MetadataInvalid {
-            field: "language",
-            reason: format!(
-                "dc:language must be a BCP 47 tag (e.g. `ja`, `ja-JP`); got {:?}",
-                meta.language
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Permissive BCP 47 subset check: accepts a primary subtag of 2-3
-/// ASCII alphabetic characters, optionally followed by `-` and one or
-/// more 2-8 alphanumeric subtags. Covers `ja`, `en-US`, `zh-Hant-TW`,
-/// `ja-Jpan-JP-x-private` etc. Stricter than `regex` for the trivial
-/// invariants downstream readers care about.
-fn is_bcp47_subset(tag: &str) -> bool {
-    if tag.is_empty() {
-        return false;
-    }
-    let mut subtags = tag.split('-');
-    // `str::split` always yields at least one element, so `next` is `Some`.
-    let primary = subtags.next().unwrap_or_default();
-    if primary.len() < 2 || primary.len() > 3 {
-        return false;
-    }
-    if !primary.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return false;
-    }
-    for sub in subtags {
-        if sub.len() < 2 || sub.len() > 8 {
-            return false;
-        }
-        if !sub.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return false;
-        }
-    }
-    true
 }
 
 fn container_xml() -> Result<String> {
@@ -187,7 +130,7 @@ fn package_opf(
     package.push_attribute(("xmlns", "http://www.idpf.org/2007/opf"));
     package.push_attribute(("version", "3.0"));
     package.push_attribute(("unique-identifier", "bookid"));
-    package.push_attribute(("xml:lang", meta.language.as_str()));
+    push_xml_attribute(&mut package, b"xml:lang", &meta.language);
     w.write_event(Event::Start(package))
         .map_err(|e| xml_to_err(&e))?;
 
@@ -300,11 +243,23 @@ fn write_dc<W: Write>(
     }
     w.write_event(Event::Start(tag))
         .map_err(|e| xml_to_err(&e))?;
-    w.write_event(Event::Text(BytesText::new(text)))
-        .map_err(|e| xml_to_err(&e))?;
+    write_xml_text(w, text)?;
     w.write_event(Event::End(BytesEnd::new(name.to_owned())))
         .map_err(|e| xml_to_err(&e))?;
     Ok(())
+}
+
+fn write_xml_text<W: Write>(w: &mut Writer<W>, text: &str) -> Result<()> {
+    w.write_event(Event::Text(BytesText::from_escaped(xml::escape(text))))
+        .map_err(|e| xml_to_err(&e))
+}
+
+fn push_xml_attribute(tag: &mut BytesStart<'_>, name: &[u8], value: &str) {
+    let escaped = xml::escape(value);
+    // The byte-tuple conversion is the quick_xml API for an already-escaped
+    // attribute. The `(&str, &str)` conversion would escape the `&` in our
+    // numeric whitespace references a second time.
+    tag.push_attribute((name, escaped.as_bytes()));
 }
 
 /// One manifest entry, named so call sites read top-down rather than
@@ -340,8 +295,8 @@ fn nav_xhtml(meta: &Metadata, rendered: &RenderOutput) -> Result<String> {
     let mut html = BytesStart::new("html");
     html.push_attribute(("xmlns", "http://www.w3.org/1999/xhtml"));
     html.push_attribute(("xmlns:epub", "http://www.idpf.org/2007/ops"));
-    html.push_attribute(("xml:lang", meta.language.as_str()));
-    html.push_attribute(("lang", meta.language.as_str()));
+    push_xml_attribute(&mut html, b"xml:lang", &meta.language);
+    push_xml_attribute(&mut html, b"lang", &meta.language);
     w.write_event(Event::Start(html))
         .map_err(|e| xml_to_err(&e))?;
 
@@ -353,8 +308,7 @@ fn nav_xhtml(meta: &Metadata, rendered: &RenderOutput) -> Result<String> {
         .map_err(|e| xml_to_err(&e))?;
     w.write_event(Event::Start(BytesStart::new("title")))
         .map_err(|e| xml_to_err(&e))?;
-    w.write_event(Event::Text(BytesText::new(&meta.title)))
-        .map_err(|e| xml_to_err(&e))?;
+    write_xml_text(&mut w, &meta.title)?;
     w.write_event(Event::End(BytesEnd::new("title")))
         .map_err(|e| xml_to_err(&e))?;
     w.write_event(Event::End(BytesEnd::new("head")))
@@ -384,8 +338,7 @@ fn nav_xhtml(meta: &Metadata, rendered: &RenderOutput) -> Result<String> {
         let mut a = BytesStart::new("a");
         a.push_attribute(("href", it.href.as_str()));
         w.write_event(Event::Start(a)).map_err(|e| xml_to_err(&e))?;
-        w.write_event(Event::Text(BytesText::new(&it.title)))
-            .map_err(|e| xml_to_err(&e))?;
+        write_xml_text(&mut w, &it.title)?;
         w.write_event(Event::End(BytesEnd::new("a")))
             .map_err(|e| xml_to_err(&e))?;
         w.write_event(Event::End(BytesEnd::new("li")))
@@ -468,7 +421,7 @@ mod tests {
             language: language.to_owned(),
             identifier: None,
             writing_mode,
-            spine: Vec::new(),
+            spine: None,
         }
     }
 

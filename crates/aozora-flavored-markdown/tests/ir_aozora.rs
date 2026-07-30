@@ -6,7 +6,7 @@
 //! it came from, and the HTML fragment it renders to — and the sentinel
 //! stream stays in lockstep with the HTML splicer while doing it.
 
-use aozora_flavored_markdown::ir::{Block, Inline, Span};
+use aozora_flavored_markdown::ir::{Block, ByteSpan, Inline};
 use aozora_flavored_markdown::{Options, render, render_to_ir};
 
 fn ir(src: &str) -> Vec<Block> {
@@ -21,7 +21,7 @@ fn first_paragraph_inlines(blocks: &[Block]) -> &[Inline] {
 }
 
 /// `(kind, span, html)` for every Aozora inline in `inlines`, in order.
-fn aozora_inlines(inlines: &[Inline]) -> Vec<(&str, Option<Span>, &str)> {
+fn aozora_inlines(inlines: &[Inline]) -> Vec<(&str, Option<ByteSpan>, &str)> {
     inlines
         .iter()
         .filter_map(|inline| match inline {
@@ -32,7 +32,7 @@ fn aozora_inlines(inlines: &[Inline]) -> Vec<(&str, Option<Span>, &str)> {
 }
 
 /// `(kind, span, html, source_line)` for every Aozora block, in order.
-fn aozora_blocks(blocks: &[Block]) -> Vec<(&str, Option<Span>, &str, Option<u32>)> {
+fn aozora_blocks(blocks: &[Block]) -> Vec<(&str, Option<ByteSpan>, &str, Option<u32>)> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -48,7 +48,7 @@ fn aozora_blocks(blocks: &[Block]) -> Vec<(&str, Option<Span>, &str, Option<u32>
 }
 
 /// The first Aozora inline tagged `kind`, as `(span, html)`.
-fn find_inline_kind<'a>(inlines: &'a [Inline], kind: &str) -> (Option<Span>, &'a str) {
+fn find_inline_kind<'a>(inlines: &'a [Inline], kind: &str) -> (Option<ByteSpan>, &'a str) {
     let Some((_, span, html)) = aozora_inlines(inlines)
         .into_iter()
         .find(|(k, ..)| *k == kind)
@@ -66,7 +66,7 @@ fn find_inline_kind<'a>(inlines: &'a [Inline], kind: &str) -> (Option<Span>, &'a
 /// on the notation, not merely somewhere. See
 /// `spans_are_withheld_when_normalisation_moves_the_bytes` for the other
 /// side of that contract.
-fn slice(src: &str, span: Option<Span>) -> &str {
+fn slice(src: &str, span: Option<ByteSpan>) -> &str {
     let span = span.expect("a projected notation carries its source span");
     &src[span.start as usize..span.end as usize]
 }

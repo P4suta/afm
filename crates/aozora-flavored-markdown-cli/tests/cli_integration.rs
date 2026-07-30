@@ -147,6 +147,10 @@ fn help_flag_succeeds_and_mentions_subcommands() {
         stdout.contains("check"),
         "--help must list `check` subcommand, got {stdout:?}"
     );
+    assert!(
+        stdout.contains("fmt"),
+        "--help must list `fmt` subcommand, got {stdout:?}"
+    );
 }
 
 #[test]
@@ -242,6 +246,66 @@ fn render_stdin_dash_undecodable_utf8_fails() {
         "error must mention UTF-8, got {:?}",
         stderr_of(&out)
     );
+}
+
+// ---------------------------------------------------------------------------
+// `fmt` canonicalisation modes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fmt_requires_exactly_one_mode() {
+    let path = write_temp_utf8("already canonical\n");
+    for args in [
+        vec!["fmt", path.to_str().unwrap()],
+        vec!["fmt", "--check", "--diff", path.to_str().unwrap()],
+    ] {
+        let out = run_cli(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+}
+
+#[test]
+fn fmt_check_is_silent_and_reports_drift_with_exit_one() {
+    let canonical = write_temp_utf8("a\nb\n");
+    let clean = run_cli(&["fmt", "--check", canonical.to_str().unwrap()]);
+    assert!(clean.status.success(), "{clean:?}");
+    assert!(clean.stdout.is_empty() && clean.stderr.is_empty());
+
+    let drifted = write_temp_utf8("a\rb\n");
+    let drift = run_cli(&["fmt", "--check", drifted.to_str().unwrap()]);
+    assert_eq!(drift.status.code(), Some(1), "{drift:?}");
+    assert!(drift.stdout.is_empty() && drift.stderr.is_empty());
+    assert_eq!(fs::read_to_string(drifted).unwrap(), "a\rb\n");
+}
+
+#[test]
+fn fmt_diff_prints_a_unified_diff_without_writing() {
+    let path = write_temp_utf8("a\rb\n");
+    let out = run_cli(&["fmt", "--diff", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let diff = stdout_of(&out);
+    assert!(diff.contains("--- ") && diff.contains("+++ "), "{diff:?}");
+    assert_eq!(fs::read_to_string(path).unwrap(), "a\rb\n");
+}
+
+#[test]
+fn fmt_write_replaces_a_file_but_refuses_stdin_and_shift_jis() {
+    let path = write_temp_utf8("a\rb\r\nc\n");
+    let written = run_cli(&["fmt", "--write", path.to_str().unwrap()]);
+    assert!(written.status.success(), "{written:?}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\nc\n");
+
+    let stdin = run_cli_stdin(&["fmt", "--write", "-"], b"a\rb");
+    assert_eq!(stdin.status.code(), Some(1), "{stdin:?}");
+
+    let sjis = run_cli(&[
+        "--encoding",
+        "sjis",
+        "fmt",
+        "--write",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(sjis.status.code(), Some(1), "{sjis:?}");
 }
 
 // ---------------------------------------------------------------------------

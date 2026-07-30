@@ -141,7 +141,7 @@ export default defineConfig(({ command }) => ({
   test: {
     // Beside the module they test, so a module without one is visible in the
     // same directory listing.
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
     // `outline.ts` reads heading text back out of rendered HTML with
     // `DOMParser`, which node has not got. happy-dom over jsdom for the
     // reason the sibling aozora playground picked it: same API surface for

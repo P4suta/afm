@@ -5,6 +5,9 @@
 # Honorary words unique to this project / domain.
 extend-ignore-identifiers-re = [
     "[A-Fa-f0-9]{7,}",   # git SHAs in comments
+    # `zip::ZIP64_BYTES_THR` — the archiver's own name for the classic entry
+    # size limit, spelled by upstream and not ours to rename.
+    "ZIP64_BYTES_THR",
 ]
 
 [default.extend-words]

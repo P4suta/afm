@@ -10,7 +10,7 @@
 //! sibling parser's type vocabulary would own it twice (ADR-0021).
 
 #[doc(inline)]
-pub use crate::diagnostics::Span;
+pub use crate::diagnostics::ByteSpan;
 
 /// A whole document, as [`crate::render_to_ir`] projected it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
@@ -21,7 +21,7 @@ pub use crate::diagnostics::Span;
 // same reason — document-level metadata (a source digest, a schema tag) is
 // exactly the kind of field a later release adds.
 #[non_exhaustive]
-pub struct Document {
+pub struct MarkdownDocument {
     /// In source order, and flat: a 青空文庫 container is two sibling markers
     /// here rather than a subtree (see [`Block::Aozora`]).
     pub blocks: Vec<Block>,
@@ -56,7 +56,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// An ATX or setext heading — or the paragraph a 青空文庫 heading hint
     /// promoted to one, at any nesting depth.
@@ -72,7 +72,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A `>` quote.
     Blockquote {
@@ -85,7 +85,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A bullet or ordered list.
     List {
@@ -104,7 +104,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     // `Block::CodeBlock` stutters once the enum is `Block` (the same reason
     // the types lost their `Ir`), and `Inline::Code` is already the inline
@@ -127,7 +127,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A horizontal rule.
     ThematicBreak {
@@ -138,7 +138,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A GFM table.
     Table {
@@ -155,7 +155,7 @@ pub enum Block {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A 青空文庫 construct occupying a whole block.
     ///
@@ -171,7 +171,7 @@ pub enum Block {
         /// container still open.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        span: Option<Span>,
+        span: Option<ByteSpan>,
         /// Rebranded to `aozora-md-*` classes (ADR-0011).
         html: String,
         /// 1-based line the marker sits on; `None` below top level.
@@ -185,7 +185,7 @@ pub enum Block {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-// See `Document`: a row gains fields (a header flag, a span) without the
+// See `MarkdownDocument`: a row gains fields (a header flag, a span) without the
 // variants around it changing.
 #[non_exhaustive]
 pub struct TableRow {
@@ -194,7 +194,7 @@ pub struct TableRow {
     /// Extent in the source; `None` if the parser reported it inverted.
     #[cfg_attr(feature = "serde", serde(default))]
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-    pub range: Option<Range>,
+    pub range: Option<SourceRange>,
 }
 
 /// One item of a [`Block::List`].
@@ -209,7 +209,7 @@ pub struct ListItem {
     /// Extent in the source; `None` if the parser reported it inverted.
     #[cfg_attr(feature = "serde", serde(default))]
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-    pub range: Option<Range>,
+    pub range: Option<SourceRange>,
 }
 
 /// How a [`Block::Table`] column is aligned.
@@ -255,7 +255,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A code span. Wire tag `code`, against the block half's `codeBlock`.
     Code {
@@ -264,7 +264,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// Strong emphasis.
     Strong {
@@ -273,7 +273,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// Ordinary emphasis.
     Emphasis {
@@ -282,7 +282,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A link, inline or reference-resolved.
     Link {
@@ -297,7 +297,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// CommonMark image. `alt` carries the alt-text inlines as comrak parses
     /// them, so it is a list rather than a string.
@@ -313,7 +313,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A break inside a paragraph.
     LineBreak {
@@ -322,7 +322,7 @@ pub enum Inline {
         /// Extent in the source; `None` if the parser reported it inverted.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        range: Option<Range>,
+        range: Option<SourceRange>,
     },
     /// A 青空文庫 construct inside a text run: ruby, bouten, 縦中横, 外字,
     /// 返り点, a bracket annotation, …
@@ -346,7 +346,7 @@ pub enum Inline {
         /// mid-codepoint — position.
         #[cfg_attr(feature = "serde", serde(default))]
         #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-        span: Option<Span>,
+        span: Option<ByteSpan>,
         /// Rebranded to `aozora-md-*` classes (ADR-0011), and byte-identical
         /// to the run this notation contributes to [`crate::render`] —
         /// empty included. A notation the HTML suppresses in context is
@@ -366,19 +366,19 @@ pub enum Inline {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-// Left open for literal construction for the reason `Span` is — see its
+// Left open for literal construction for the reason `ByteSpan` is — see its
 // definition in `crate::diagnostics`.
-pub struct Range {
+pub struct SourceRange {
     /// First position the node covers.
-    pub start: Position,
+    pub start: SourcePosition,
     /// First position past it.
-    pub end: Position,
+    pub end: SourcePosition,
 }
 
-impl Range {
+impl SourceRange {
     /// No ordering is imposed on the pair; `sourcepos_to_range` checks it.
     #[must_use]
-    pub const fn new(start: Position, end: Position) -> Self {
+    pub const fn new(start: SourcePosition, end: SourcePosition) -> Self {
         Self { start, end }
     }
 }
@@ -389,15 +389,15 @@ impl Range {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
-// Left open for literal construction; see `Range`.
-pub struct Position {
+// Left open for literal construction; see `SourceRange`.
+pub struct SourcePosition {
     /// 1-based line.
     pub line: u32,
     /// 1-based column, counted in characters.
     pub column: u32,
 }
 
-impl Position {
+impl SourcePosition {
     /// Both coordinates are 1-based, as comrak reports them.
     #[must_use]
     pub const fn new(line: u32, column: u32) -> Self {
@@ -433,7 +433,7 @@ mod tests {
     fn aozora_inline_wire_shape_separates_tag_from_discriminant() {
         let value = json(Inline::Aozora {
             kind: "ruby".to_owned(),
-            span: Some(Span { start: 3, end: 21 }),
+            span: Some(ByteSpan { start: 3, end: 21 }),
             html: "<ruby>青梅<rt>おうめ</rt></ruby>".to_owned(),
         });
 
@@ -802,7 +802,7 @@ mod tests {
         }
     }
 
-    // The shapes the two unions travel inside. `Document` is what a consumer
+    // The shapes the two unions travel inside. `MarkdownDocument` is what a consumer
     // is actually handed; `ListItem` and `TableRow` are reachable only
     // through a variant, so an unpaired attribute on either shows up not as a
     // bad list item but as a whole document that will not read. The geometry
@@ -811,15 +811,18 @@ mod tests {
     #[test]
     fn the_containers_and_the_geometry_read_back_too() {
         assert_reads_back(
-            &Document {
+            &MarkdownDocument {
                 blocks: one_of_every_block(),
             },
-            "Document",
+            "MarkdownDocument",
         );
         assert_reads_back(
             &ListItem {
                 children: one_of_every_block(),
-                range: Some(Range::new(Position::new(1, 1), Position::new(2, 4))),
+                range: Some(SourceRange::new(
+                    SourcePosition::new(1, 1),
+                    SourcePosition::new(2, 4),
+                )),
             },
             "ListItem",
         );
@@ -831,10 +834,10 @@ mod tests {
             "TableRow",
         );
         assert_reads_back(
-            &Range::new(Position::new(1, 1), Position::new(9, 3)),
-            "Range",
+            &SourceRange::new(SourcePosition::new(1, 1), SourcePosition::new(9, 3)),
+            "SourceRange",
         );
-        assert_reads_back(&Position::new(4, 12), "Position");
-        assert_reads_back(&Span::new(0, 7), "Span");
+        assert_reads_back(&SourcePosition::new(4, 12), "SourcePosition");
+        assert_reads_back(&ByteSpan::new(0, 7), "ByteSpan");
     }
 }

@@ -22,8 +22,37 @@ owned here, and speak only the parser's public API
 Consumers of the IR, of the TypeScript types, or of the `aozora-md-*` CSS
 classes have breaking changes to absorb — see **Changed (breaking)**.
 
+### 0.4 → 0.5 migration
+
+0.5.0 is the cleanup boundary. The old spellings are not aliases: update the
+consumer and let the compiler or TypeScript catch every remaining use.
+
+| 0.4 surface | 0.5 replacement |
+|---|---|
+| `Document` | `MarkdownDocument` |
+| `Range` | `SourceRange` |
+| `Position` | `SourcePosition` |
+| `Span` | `ByteSpan` |
+| `Error` | `CanonicalizeError`; the unreachable `ParseFailed` variant is removed |
+| `miette::Report::new(diagnostic)` | `miette::Report::new(diagnostic.bind_source(name, source)?)` |
+| JSON option `aozoraEnabled` | `aozora`; unknown and retired keys are errors |
+| public/test raw-HTML option paths | none; raw HTML is never enabled by public `Options` |
+
+The JSON keys and enum tags of the IR, and the emitted HTML contract, otherwise
+remain stable. Generated TypeScript uses the new Rust names directly, avoiding
+the browser globals `Document` and `Range`.
+
 ### Added
 
+- **Non-writing format and EPUB validation commands.**
+  `aozora-flavored-markdown fmt --check|--diff|--write` separates checking,
+  review and mutation; `check`/`diff` accept stdin and never write, while
+  `write` accepts only a UTF-8 file. `aozora-flavored-markdown-epub check`
+  executes discover → validate → render → compose without creating an EPUB.
+- **Source-bound miette diagnostics.** `Diagnostic::bind_source` validates the
+  byte span against the exact UTF-8 source and returns
+  `SourceBoundDiagnostic`; the CLI uses this route exclusively, so a report
+  cannot be paired with the wrong source text.
 - **EPUB3 generator consolidated into this workspace** — the
   `aozora-flavored-markdown-epub` library and its `aozora-flavored-markdown-epub`
   CLI now live in `crates/aozora-flavored-markdown-epub{,-cli}`, absorbed from
@@ -81,6 +110,12 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Changed (breaking)
 
+- **Core types use domain-specific names.** `MarkdownDocument`,
+  `SourceRange`, `SourcePosition`, `ByteSpan` and `CanonicalizeError` replace
+  their collision-prone generic names. No compatibility aliases remain.
+- **`Options` is strict and contains only production behaviour.** serde rejects
+  unknown fields, including retired `aozoraEnabled`; test-only raw-HTML
+  configuration is no longer part of the public type.
 - **The Aozora half of the IR collapses to one variant per level.** Every
   青空文庫 notation now projects to `IrInline::Aozora { kind, span, html }` /
   `IrBlock::Aozora { kind, span, html }`, carrying an opaque `kind` tag,
@@ -126,6 +161,26 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Changed
 
+- **Long `-` / `=` rule rows belong to CommonMark at every width.** A row
+  immediately under prose is therefore a setext heading even when it is ten
+  or more characters long; there is no Aozora-decoration option. The measured
+  compatibility impact and the formatter/EPUB corpus audit are recorded in
+  [ADR-0027](docs/adr/0027-commonmark-owns-rule-rows-at-every-width.md).
+- **Canonicalization preserves every leading BOM and code-region byte.**
+  Outside code, CRLF and lone CR line endings normalize to LF. Rule rows and
+  author-supplied U+0001–U+0003 are tracked out of band instead of borrowing
+  control characters as placeholders.
+- **Release gates validate the artifacts, not configuration text.** Cargo
+  metadata drives the same retry exclusions in package dry-runs and live
+  publishes. Package smoke suppresses only Cargo's exact test/benchmark
+  package-exclusion warnings and preserves every other stderr line and failure
+  status. Every cargo-dist phase is bracketed by `cargo metadata --locked` plus
+  a byte-for-byte `Cargo.lock` guard, and its release workflow is deliberately
+  hand-maintained; the real plan rejects reintroduced dynamic container or
+  package-install matrix fields. Release write permission is scoped to the host
+  job, and ShellCheck 0.11.0 is pinned in mise. Dependabot version-update
+  cooldown is 30/7/3 days for major/minor/patch updates, with a seven-day
+  fallback; security updates are not subject to cooldown.
 - **Native, locked mise is the supported development and CI environment.**
   The repository now has one `mise.toml` plus `mise.lock`, with Rust, Bun,
   Node and every directly invoked tool fixed. CI has five static jobs that
@@ -227,6 +282,18 @@ classes have breaking changes to absorb — see **Changed (breaking)**.
 
 ### Fixed
 
+- **Heading preprocessing no longer leaks Aozora layout directives.**
+  `AlignEnd`, `Center` and `LineGothic` are dropped in headings; ruby whose
+  reading is itself a directive keeps only its base text.
+- **Masks and streaming coordinates now cover every source context.** Fenced
+  code info strings are masked, nested/orphan closing directives are consumed
+  once, and block source-line coordinates stay anchored to the caller's text.
+- **EPUB validation rejects packages that cannot be conforming.** Explicitly
+  empty spines fail as `NoSources` while an omitted spine still discovers
+  chapters; rooted/parent/symlink escapes and XML 1.0-forbidden characters fail
+  with path-, field- and phase-specific diagnostics. XML character validation
+  precedes metadata semantics. TAB/LF/CR in metadata and chapter-name XML are
+  emitted as numeric character references and read back losslessly.
 - **An unclaimed `［＃…］` run could publish a PUA sentinel.** A bracket run
   no notation claimed is hidden behind the directive wrapper and read as the
   author's own bytes — but a run may still *contain* a notation, as

@@ -32,9 +32,8 @@ export function slugsJson(): string {
 //
 // The IR types are aliased back to their `Ir*` spelling on the way out:
 // unprefixed is right inside the Rust `ir` module, which supplies the
-// context, but a browser module has no such module scope and `Document`
-// there is the DOM's. The alias is TypeScript's problem to solve, so it
-// is solved in TypeScript.
+// context, but a browser module has no such module scope. The local `Ir*`
+// names also keep source code visually distinct from DOM types.
 //
 // `Options` is aliased for the same reason: it is the renderer's option set
 // named from inside the Rust crate that owns it, and a browser module has no
@@ -49,8 +48,8 @@ export type {
   Block as IrBlock,
   Diagnostic,
   DiagnosticSource,
-  Document as IrDocument,
   Inline as IrInline,
+  MarkdownDocument as IrDocument,
   Severity,
 } from 'aozora-flavored-markdown-wasm';
 export type { RenderOptions, RenderResult };

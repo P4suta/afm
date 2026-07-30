@@ -2,15 +2,16 @@
 // read the input, run the pipeline, and turn the outcome into an exit code.
 // `main.rs` is a shim over `run`, so the behaviour of the CLI is read here.
 
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::{env, fs};
 
 use aozora::decode_sjis;
-use aozora_flavored_markdown::{Diagnostic, Options, diagnose, render};
+use aozora_flavored_markdown::{Diagnostic, Options, canonicalize, diagnose, render};
 use clap::{CommandFactory, Parser};
 use miette::{IntoDiagnostic, Result, WrapErr};
+use similar::TextDiff;
 
 use crate::args::{Cli, ColorChoice, Command, DiagFormat, InputEncoding};
 use crate::output::{DiagStream, Input, OutputSink, emit_diagnostics};
@@ -44,10 +45,78 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             output: None,
             format: cli.format,
         },
+        Command::Fmt {
+            input,
+            check,
+            diff,
+            write,
+        } => {
+            let mode = if check {
+                FmtMode::Check
+            } else if diff {
+                FmtMode::Diff
+            } else if write {
+                FmtMode::Write
+            } else {
+                return Err(miette::miette!("one fmt mode is required"));
+            };
+            return run_fmt(&input, cli.encoding, mode);
+        }
         Command::Completions { shell } => return Ok(generate_completions(shell)),
         Command::Man => return render_man(),
     };
     run_pipeline(&args)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FmtMode {
+    Check,
+    Diff,
+    Write,
+}
+
+fn run_fmt(input: &Path, encoding: InputEncoding, mode: FmtMode) -> Result<ExitCode> {
+    if matches!((encoding, mode), (InputEncoding::Sjis, FmtMode::Write)) {
+        return Err(miette::miette!(
+            "`fmt --write` cannot preserve Shift_JIS; decode to UTF-8 first"
+        ));
+    }
+    if input == Path::new("-") && mode == FmtMode::Write {
+        return Err(miette::miette!("`fmt --write` requires a file path"));
+    }
+
+    let source = read_input(input, encoding)?;
+    let formatted = canonicalize(&source).into_diagnostic()?;
+    if source == formatted {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    match mode {
+        FmtMode::Check => Ok(ExitCode::FAILURE),
+        FmtMode::Diff => {
+            let name = if input == Path::new("-") {
+                "<stdin>".to_owned()
+            } else {
+                input.display().to_string()
+            };
+            let diff = TextDiff::from_lines(&source, &formatted)
+                .unified_diff()
+                .header(&name, &format!("{name} (canonical)"))
+                .to_string();
+            io::stdout()
+                .lock()
+                .write_all(diff.as_bytes())
+                .into_diagnostic()
+                .wrap_err("差分を標準出力へ書けません")?;
+            Ok(ExitCode::FAILURE)
+        }
+        FmtMode::Write => {
+            fs::write(input, formatted)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("正規化した入力を書き戻せません: {}", input.display()))?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 /// A struct rather than positional args, so the shared pipeline stays under

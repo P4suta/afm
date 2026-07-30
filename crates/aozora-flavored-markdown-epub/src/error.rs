@@ -88,13 +88,39 @@ pub enum Error {
 
     /// Metadata parsed, but a field cannot go into an EPUB package document.
     #[error("metadata field {field:?} is invalid: {reason}")]
-    #[diagnostic(code(aozora_flavored_markdown_epub::compose::metadata))]
+    #[diagnostic(code(aozora_flavored_markdown_epub::validate::metadata))]
     #[non_exhaustive]
     MetadataInvalid {
         /// Name of the offending field, as spelled in `book.toml`.
         field: &'static str,
         /// Why that value is not usable.
         reason: String,
+    },
+
+    /// An explicit spine entry is empty, rooted, or escapes its manuscript.
+    #[error("invalid EPUB spine entry {path}: {reason}")]
+    #[diagnostic(code(aozora_flavored_markdown_epub::discover::spine))]
+    #[non_exhaustive]
+    SpineInvalid {
+        /// The manuscript root or entry that failed validation.
+        path: PathBuf,
+        /// The containment or shape rule it violated.
+        reason: String,
+    },
+
+    /// User-controlled text contains a character XML 1.0 cannot represent.
+    #[error("XML 1.0 forbids U+{codepoint:04X} in {field} at byte {byte_offset}: {path}")]
+    #[diagnostic(code(aozora_flavored_markdown_epub::validate::xml_character))]
+    #[non_exhaustive]
+    XmlCharacter {
+        /// Metadata file or chapter containing the value.
+        path: PathBuf,
+        /// Logical field whose value is invalid.
+        field: &'static str,
+        /// UTF-8 byte offset in the value.
+        byte_offset: usize,
+        /// Unicode scalar value rejected by XML 1.0.
+        codepoint: u32,
     },
 
     /// The OPF / NAV writer rejected what it was asked to emit.
@@ -200,6 +226,42 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ErrorKind {
+        DiscoverIo,
+        MetadataParse,
+        MetadataInvalid,
+        SpineInvalid,
+        XmlCharacter,
+        XmlBuild,
+        NoSources,
+        Package,
+        PackageIo,
+        Utf8,
+        Sjis,
+    }
+
+    // This match deliberately lives inside the defining crate and has no
+    // wildcard. `Error` is non-exhaustive for consumers, so the integration
+    // sweep cannot make a newly added variant a compile-time failure by
+    // itself. This classifier does: adding a variant requires assigning it a
+    // registry kind before the crate's tests can compile.
+    fn error_kind(error: &Error) -> ErrorKind {
+        match error {
+            Error::DiscoverIo { .. } => ErrorKind::DiscoverIo,
+            Error::MetadataParse { .. } => ErrorKind::MetadataParse,
+            Error::MetadataInvalid { .. } => ErrorKind::MetadataInvalid,
+            Error::SpineInvalid { .. } => ErrorKind::SpineInvalid,
+            Error::XmlCharacter { .. } => ErrorKind::XmlCharacter,
+            Error::XmlBuild(_) => ErrorKind::XmlBuild,
+            Error::NoSources { .. } => ErrorKind::NoSources,
+            Error::Package { .. } => ErrorKind::Package,
+            Error::PackageIo { .. } => ErrorKind::PackageIo,
+            Error::Utf8 { .. } => ErrorKind::Utf8,
+            Error::Sjis { .. } => ErrorKind::Sjis,
+        }
+    }
+
     // A failure with a cause of its own, so the delegation is observable.
     // `Cause::source` answers "inner" here; a wrapper that handed back the
     // error it holds instead would answer "outer" and print it twice.
@@ -254,13 +316,15 @@ mod tests {
     }
 
     // Nothing can drive `build` to a zip failure — the archive is assembled
-    // in memory through a sink whose writes cannot fail, which is the same
-    // reason `package.rs` sits outside the coverage gate (ADR-0018). The
-    // constructor still has a contract, so it is exercised directly rather
-    // than left as the one arm of this module nothing reaches.
+    // in memory through a sink whose writes cannot fail, fixed entry names and
+    // methods cannot be rejected, and the known content sizes reserve ZIP64
+    // before Deflate could cross the classic limit. The constructor still has
+    // a contract, so it is exercised directly rather than left as the one arm
+    // of this module nothing reaches.
     #[test]
     fn the_packaging_constructor_keeps_the_path_and_the_cause() {
         let err = Error::package(PathBuf::from("out.epub"), Outer(Inner));
+        assert_eq!(error_kind(&err), ErrorKind::Package);
         assert_eq!(
             chain(&err),
             ["EPUB packaging failed for out.epub", "outer", "inner"],

@@ -14,6 +14,12 @@
 //! Run by `just test-wasm` (`wasm-pack test --node`), a `[group('gate')]`
 //! recipe, so CI expands it into a job like any other gate.
 //!
+//! Coverage here is semantic, not an assertion-count proxy: each export is
+//! called with an input that distinguishes the value or side effect its host
+//! relies on. `initPanicHook` is the one return-less exception. Its contract
+//! is that installation, including a repeated call, does not trap; reaching
+//! the next statement is therefore the observable assertion.
+//!
 //! The whole file is `#![cfg(target_arch = "wasm32")]`: `#[wasm_bindgen_test]`
 //! is collected by wasm-bindgen's runner, not by libtest, so on the host these
 //! would be tests nothing runs. The two files beside this one carry the
@@ -22,12 +28,12 @@
 #![cfg(target_arch = "wasm32")]
 #![forbid(unsafe_code)]
 
-use aozora_flavored_markdown::Options;
 use aozora_flavored_markdown_wasm::{
-    AozoraDocument, hash_source, init_panic_hook, render, render_aozora_only, render_blocks,
-    slugs_json,
+    AozoraDocument, JsOptions, hash_source, init_panic_hook, render, render_aozora_only,
+    render_blocks, slugs_json,
 };
 use serde_json::Value;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 /// One document that reaches every export's interesting path: ruby (an Aozora
@@ -105,7 +111,7 @@ fn hash_source_is_a_stable_key_that_separates_documents() {
 
 #[wasm_bindgen_test]
 fn render_returns_the_ir_the_html_and_the_diagnostics_together() {
-    let rendered = json_of(&render(SOURCE, None));
+    let rendered = json_of(&render(SOURCE, None).expect("default options decode"));
     assert!(
         rendered["ir"]["blocks"]
             .as_array()
@@ -129,9 +135,15 @@ fn render_returns_the_ir_the_html_and_the_diagnostics_together() {
 
 #[wasm_bindgen_test]
 fn render_forwards_the_options_it_was_handed() {
+    let value = tsify::serde_wasm_bindgen::to_value(&serde_json::json!({
+        "aozora": false,
+        "hardbreaks": false
+    }))
+    .expect("known options serialise");
+    let options: JsOptions = value.unchecked_into();
     assert_ne!(
-        json_of(&render(SOURCE, Some(Options::commonmark())))["html"],
-        json_of(&render(SOURCE, None))["html"],
+        json_of(&render(SOURCE, Some(options)).expect("known options decode"))["html"],
+        json_of(&render(SOURCE, None).expect("default options decode"))["html"],
         "`commonmark()` runs no notation pass and `default()` does, so an export that dropped \
          its `options` argument would render these the same"
     );
@@ -141,7 +153,7 @@ fn render_forwards_the_options_it_was_handed() {
 fn render_aozora_only_is_render_with_the_default_options() {
     assert_eq!(
         json_of(&render_aozora_only(SOURCE)),
-        json_of(&render(SOURCE, None)),
+        json_of(&render(SOURCE, None).expect("default options decode")),
         "the aozora-only wrapper takes no options, so the only thing it can get wrong is \
          choosing a different default than `render` does"
     );
@@ -149,7 +161,7 @@ fn render_aozora_only_is_render_with_the_default_options() {
 
 #[wasm_bindgen_test]
 fn render_blocks_returns_every_block_with_the_line_it_started_on() {
-    let bridged = json_of(&render_blocks(SOURCE, None));
+    let bridged = json_of(&render_blocks(SOURCE, None).expect("default options decode"));
     let blocks = bridged["blocks"]
         .as_array()
         .unwrap_or_else(|| panic!("the envelope carries an array of blocks; got {bridged}"));
@@ -219,10 +231,38 @@ fn the_document_handle_answers_every_projection_the_editor_asks_for() {
         "the fixture's ※［＃二の字点、1-2-22］ resolves, and the inlay hints are those \
          resolutions"
     );
-    // Diagnostics are asserted for shape only: what the parser chooses to
-    // report about an unmatched 》 is its decision to change, and this crate
-    // only carries the answer across.
-    envelope("diagnosticsJson", &doc.diagnostics_json());
+    let diagnostics = envelope("diagnosticsJson", &doc.diagnostics_json());
+    let entries = diagnostics["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`data` is an array; got {diagnostics}"));
+    let close_start = SOURCE
+        .rfind('》')
+        .expect("the fixture ends with an unmatched ruby close");
+    let unmatched = entries
+        .iter()
+        .find(|entry| {
+            entry["kind"].as_str() == Some("unmatched_close")
+                && entry["span"]["start"].as_u64() == u64::try_from(close_start).ok()
+                && entry["span"]["end"].as_u64()
+                    == u64::try_from(close_start + '》'.len_utf8()).ok()
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "diagnosticsJson must carry the fixture's unmatched `》` at bytes \
+                 {close_start}..{}; got {diagnostics}",
+                close_start + '》'.len_utf8()
+            )
+        });
+    assert_eq!(
+        unmatched["severity"].as_str(),
+        Some("error"),
+        "an unmatched close is an error; got {unmatched}"
+    );
+    assert_eq!(
+        unmatched["source"].as_str(),
+        Some("source"),
+        "the unmatched close came from the source, not an internal check; got {unmatched}"
+    );
 }
 
 #[wasm_bindgen_test]

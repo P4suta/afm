@@ -26,7 +26,6 @@ exclude = ["tests/"]
 # Same docs.rs build as the library (see its manifest for why).
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 # The second of the workspace's two version lines. `release.toml` names the
 # other one (`workspace`) as its default, so this pair has to say which group

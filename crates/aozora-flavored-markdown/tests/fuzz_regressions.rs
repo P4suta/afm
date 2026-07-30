@@ -18,7 +18,7 @@
 //!     <hash>.expect.txt  ── (optional) the panic snippet that originally
 //!                            justified the regression case, kept for human
 //!                            archaeology; not parsed by the test runner
-//!   serialize_round_trip/
+//!   canonicalize_round_trip/
 //!     ...
 //! ```
 //!
@@ -53,6 +53,7 @@ use aozora_flavored_markdown::{
 use aozora_flavored_markdown_test_support::{
     assert_html_invariants, check_fence_fidelity, check_no_sentinel_leak,
 };
+use encoding_rs::SHIFT_JIS;
 
 #[test]
 fn options_space_regressions_replay_cleanly() {
@@ -172,8 +173,8 @@ fn render_blocks_regressions_replay_cleanly() {
 }
 
 #[test]
-fn serialize_round_trip_regressions_replay_cleanly() {
-    replay_each("serialize_round_trip", |src| {
+fn canonicalize_round_trip_regressions_replay_cleanly() {
+    replay_each("canonicalize_round_trip", |src| {
         // Mirrors the target: I3 (`canonicalize(canonicalize(x)) ==
         // canonicalize(x)`) plus I5, which is the half a fixed point
         // cannot see — a consistently wrong rewrite satisfies I3 — plus
@@ -208,10 +209,74 @@ fn serialize_round_trip_regressions_replay_cleanly() {
 
 #[test]
 fn sjis_decode_regressions_replay_cleanly() {
-    replay_each("sjis_decode", |text| {
-        let html = render(text, &Options::default()).html;
-        assert_html_invariants(text, &html);
-    });
+    replay_each("sjis_decode", assert_render_front_doors_agree);
+}
+
+/// DEV-246's original 12-byte reproducer. Keep the exact payload named here
+/// as well as in the discovery sweep: the regression is not merely that
+/// decoding and one HTML render do not panic, but that every public rendering
+/// path agrees after the CP932 boundary has produced Markdown fence syntax.
+const SJIS_FENCE_REPRODUCER: &[u8; 12] =
+    include_bytes!("fuzz_regressions/sjis_decode/crash-ba5ff350751754e25d36dd7606889c0a38e1bd19");
+
+#[test]
+fn twelve_byte_sjis_fence_artifact_agrees_across_every_front_door() {
+    let text = decode_sjis(SJIS_FENCE_REPRODUCER)
+        .expect("the pinned sjis_decode artifact must remain valid CP932");
+    assert_render_front_doors_agree(&text);
+}
+
+fn assert_render_front_doors_agree(src: &str) {
+    let options = Options::default();
+    let rendered = render(src, &options);
+    let projected = render_to_ir(src, &options);
+    let RenderedBlocks {
+        blocks,
+        diagnostics: block_diagnostics,
+        ..
+    } = render_blocks(src, &options);
+    let joined_html: String = blocks.iter().map(|block| block.html.as_str()).collect();
+    let joined_ir: Vec<_> = blocks
+        .iter()
+        .flat_map(|block| block.ir.iter().cloned())
+        .collect();
+
+    assert_html_invariants(src, &rendered.html);
+    assert_html_invariants(src, &projected.html);
+    assert_html_invariants(src, &joined_html);
+    for block in &blocks {
+        if let Err(error) = check_no_sentinel_leak(src, &block.html) {
+            panic!(
+                "sentinel leaked into one block: {error:?}\n  html = {:?}",
+                block.html
+            );
+        }
+    }
+
+    assert_eq!(
+        rendered.html, projected.html,
+        "`render` and `render_to_ir` HTML disagree about {src:?}"
+    );
+    assert_eq!(
+        rendered.html, joined_html,
+        "`render` and joined `render_blocks` HTML disagree about {src:?}"
+    );
+    assert_eq!(
+        projected.ir.blocks, joined_ir,
+        "`render_to_ir` and flattened `render_blocks` IR disagree about {src:?}"
+    );
+
+    let diagnosed = diagnose(src, &options);
+    for (name, actual) in [
+        ("render", &rendered.diagnostics),
+        ("render_to_ir", &projected.diagnostics),
+        ("render_blocks", &block_diagnostics),
+    ] {
+        assert_eq!(
+            actual, &diagnosed,
+            "`{name}` and `diagnose` disagree about {src:?}"
+        );
+    }
 }
 
 /// How a target reads its raw bytes: what `replay_each` turns an artifact
@@ -219,7 +284,7 @@ fn sjis_decode_regressions_replay_cleanly() {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum ReplayInput {
     /// Decode as UTF-8; skip artifact on invalid UTF-8 (mirrors the
-    /// `parse_render` / `serialize_round_trip` fuzz targets).
+    /// `parse_render` / `canonicalize_round_trip` fuzz targets).
     Utf8,
     /// Decode via Shift_JIS; skip artifact on decode failure (mirrors
     /// the `sjis_decode` fuzz target).
@@ -253,10 +318,10 @@ const OPTION_MASK_BYTES: usize = 2;
 /// so a new target lands here as an unanswered question rather than being
 /// replayed as UTF-8 because that is the common case.
 const INPUT_SHAPES: &[(&str, ReplayInput)] = &[
+    ("canonicalize_round_trip", ReplayInput::Utf8),
     ("options_space", ReplayInput::MaskedUtf8),
     ("parse_render", ReplayInput::Utf8),
     ("render_blocks", ReplayInput::Utf8),
-    ("serialize_round_trip", ReplayInput::Utf8),
     ("sjis_decode", ReplayInput::Sjis),
 ];
 
@@ -447,26 +512,51 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("resolving the workspace root: {e}"))
 }
 
-/// The fuzz targets the crate registers. `fuzz/Cargo.toml` is the registry: a
-/// `[[bin]]` there is what `cargo fuzz run <name>` resolves, and reading it is
-/// what keeps this file from holding a second list of target names.
+/// The fuzz targets Cargo registers for the separate fuzz workspace.
+///
+/// Cargo's own metadata projection is the contract here; this test does not
+/// implement a second TOML parser.
 fn registered_targets() -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fuzz")
         .join("Cargo.toml");
-    let manifest =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let mut out = Vec::new();
-    let mut in_bin = false;
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            // `[package]` declares a `name` too, and it is not a target.
-            in_bin = trimmed == "[[bin]]";
-        } else if in_bin && let Some(rest) = trimmed.strip_prefix("name = \"") {
-            out.extend(rest.split('"').next().map(str::to_owned));
-        }
-    }
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = process::Command::new(cargo)
+        .args([
+            "metadata",
+            "--locked",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("running cargo metadata for {}: {e}", path.display()));
+    assert!(
+        output.status.success(),
+        "cargo metadata failed for {}:\n{}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Cargo metadata must be valid JSON");
+    let mut out: Vec<String> = metadata["packages"]
+        .as_array()
+        .expect("Cargo metadata packages must be an array")
+        .iter()
+        .flat_map(|package| {
+            package["targets"]
+                .as_array()
+                .expect("Cargo metadata package targets must be an array")
+        })
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .filter_map(|target| target["name"].as_str().map(str::to_owned))
+        .collect();
     out.sort();
     out
 }
@@ -523,17 +613,22 @@ fn seed_source_documents() -> Vec<(String, String)> {
     out
 }
 
-/// The one place CP932 cannot hold what the documents say.
+/// The decoded text produced by the one CP932 projection used by the seeder.
 ///
-/// Shift_JIS has no U+2014 EM DASH. `iconv` writes it as 0x815C and the
-/// decoder reads 0x815C back as U+2015 HORIZONTAL BAR, so three of the seven
-/// dialect documents reach `sjis_decode` with a different dash than they were
-/// written with. That is the encoding's own ambiguity rather than a seeding
-/// defect — a real 青空文庫 file has the same 0x815C in it — but it is a
-/// carve-out, so it is one named substitution applied to one lossy shape and
-/// not a fuzzy comparison applied to all of them.
-fn without_the_cp932_dash_ambiguity(text: &str) -> String {
-    text.replace('\u{2015}', "\u{2014}")
+/// `encoding_rs` is both the executable contract in `xtask cp932-project` and
+/// the expectation here. This keeps platform `iconv` aliases and handwritten
+/// dash substitutions out of the corpus contract.
+fn cp932_projection(text: &str) -> String {
+    let mut encoded = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mut utf8 = [0; 4];
+        let scalar = ch.encode_utf8(&mut utf8);
+        let (bytes, _, had_errors) = SHIFT_JIS.encode(scalar);
+        if !had_errors {
+            encoded.extend_from_slice(bytes.as_ref());
+        }
+    }
+    decode_sjis(&encoded).expect("encoding_rs emitted bytes the aozora decoder rejects")
 }
 
 /// One target's committed corpus, decoded through the shape that target
@@ -642,32 +737,26 @@ fn one_document_set_behind_every_corpus(corpora: &[Corpus]) {
         );
     }
 
-    // And the lossy one is the same set again, minus what its encoding refuses
-    // outright. Subset rather than equality: `iconv` fails on a document CP932
-    // cannot represent and `just fuzz-seed` skips it, which is a real hole in
-    // that target's corpus — but it is a hole in the SPEC half of it, and the
-    // dialect half is asserted document by document below.
+    // The lossy target is the complete character-wise projection of that
+    // same source set: only unrepresentable scalars are dropped. Both the
+    // generator and this expectation use encoding_rs.
     let reference: BTreeSet<String> = first
         .texts
         .iter()
-        .map(|text| without_the_cp932_dash_ambiguity(text))
+        .map(|text| cp932_projection(text))
         .collect();
     for corpus in corpora.iter().filter(|corpus| !corpus.how.is_lossless()) {
-        let strays: Vec<&String> = corpus
-            .texts
-            .iter()
-            .filter(|text| !reference.contains(&without_the_cp932_dash_ambiguity(text)))
-            .collect();
+        let extra: Vec<&String> = corpus.texts.difference(&reference).collect();
+        let missing: Vec<&String> = reference.difference(&corpus.texts).collect();
         assert!(
-            strays.is_empty(),
-            "{} of `{}`'s seeds decode to text that is not one of the documents every other \
-             target was seeded from, e.g. {:?}. Its seeds are transcoded rather than rewritten, \
-             so a decoded seed that is nobody's document means the transcoding does not round \
-             trip and this target is fuzzing on inputs the others never see.",
-            strays.len(),
+            extra.is_empty() && missing.is_empty(),
+            "`{}` is not the exact encoding_rs CP932 projection: {} extra, {} missing, e.g. {:?}",
             corpus.target,
-            strays
+            extra.len(),
+            missing.len(),
+            extra
                 .iter()
+                .chain(&missing)
                 .take(2)
                 .map(|text| text.chars().take(60).collect::<String>())
                 .collect::<Vec<_>>()
@@ -691,7 +780,7 @@ fn every_corpus_carries_the_dialect(corpora: &[Corpus]) {
             if corpus.how.is_lossless() {
                 text.to_owned()
             } else {
-                without_the_cp932_dash_ambiguity(text)
+                cp932_projection(text)
             }
         };
         let held: BTreeSet<String> = corpus.texts.iter().map(|text| fold(text)).collect();

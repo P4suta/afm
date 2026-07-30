@@ -89,6 +89,9 @@ assert!(html.contains("<ruby>"));
 
 Try it in the
 [playground](https://p4suta.github.io/aozora-flavored-markdown/playground/).
+Rule rows remain CommonMark at every width: a long `-` or `=` row directly
+under prose is a setext underline, not an Aozora decorative separator
+([ADR-0027](https://github.com/P4suta/aozora-flavored-markdown/blob/main/docs/adr/0027-commonmark-owns-rule-rows-at-every-width.md)).
 
 ## Entry points
 
@@ -99,7 +102,7 @@ Try it in the
 | `diagnose` | diagnostics alone, no rendering |
 | `render_to_ir` | HTML + a structural IR a host can render itself |
 | `render_blocks` | one IR block per top-level element, for incremental hosts |
-| `canonicalize` | the source reformatted, or an `Error` |
+| `canonicalize` | the source reformatted, or a `CanonicalizeError` |
 
 ## Features
 
@@ -110,7 +113,7 @@ pays for none of them.
 |---|---|
 | `theme` | `theme::HORIZONTAL_CSS` / `theme::VERTICAL_CSS` — the canonical stylesheets for the emitted classes, as `pub const` data |
 | `serde` | `Serialize` + `Deserialize` on the IR and the diagnostic types |
-| `miette` | `impl miette::Diagnostic for Diagnostic` (trait only — the graphical renderer is a binary's choice) |
+| `miette` | `Diagnostic::bind_source` and `SourceBoundDiagnostic`, which bind a validated byte span to its exact source (the graphical renderer remains a binary's choice) |
 | `tsify` | TypeScript declarations for the IR, derived from the Rust types |
 
 The rendered HTML carries stable `aozora-md-*` CSS classes, enumerated by

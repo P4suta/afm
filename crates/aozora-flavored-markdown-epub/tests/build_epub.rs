@@ -18,12 +18,18 @@
 mod common;
 
 use core::error::Error as StdError;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Options, render};
-use aozora_flavored_markdown_epub::{BuildOptions, BuildReport, Error, build};
+use aozora_flavored_markdown_epub::{BuildOptions, BuildReport, CheckOptions, Error, build, check};
 use common::{Entry, entry_text, fixture, fixture_bytes, read_epub};
+use miette::Diagnostic as _;
+use quick_xml::XmlVersion;
+use quick_xml::escape::resolve_predefined_entity;
+use quick_xml::events::{BytesRef, Event};
+use quick_xml::reader::Reader;
 
 const HORIZONTAL_BOOK: &str = "\
 title = \"Test Book\"
@@ -57,6 +63,64 @@ fn report_from(dir: &Path, out_name: &str) -> (BuildReport, PathBuf) {
 
 fn opf(entries: &[Entry]) -> String {
     entry_text(entries, "OEBPS/package.opf")
+}
+
+fn resolve_reference(reference: &BytesRef<'_>) -> String {
+    if let Some(ch) = reference
+        .resolve_char_ref()
+        .expect("a numeric XML reference resolves")
+    {
+        return ch.into();
+    }
+    let name = reference.decode().expect("an XML reference name decodes");
+    resolve_predefined_entity(&name)
+        .expect("the EPUB emits only predefined named entities")
+        .to_owned()
+}
+
+fn first_element_text(xml: &str, name: &[u8]) -> String {
+    let mut reader = Reader::from_str(xml);
+    let mut in_element = false;
+    let mut value = String::new();
+    loop {
+        match reader.read_event().expect("the generated document parses") {
+            Event::Eof => break,
+            Event::Start(tag) if tag.name().as_ref() == name => in_element = true,
+            Event::End(tag) if tag.name().as_ref() == name => break,
+            Event::Text(text) if in_element => value.push_str(
+                &text
+                    .xml10_content()
+                    .expect("generated character data decodes"),
+            ),
+            Event::GeneralRef(reference) if in_element => {
+                value.push_str(&resolve_reference(&reference));
+            }
+            _ => {}
+        }
+    }
+    value
+}
+
+fn attribute_value(xml: &str, element: &[u8], attribute: &[u8]) -> String {
+    let mut reader = Reader::from_str(xml);
+    let decoder = reader.decoder();
+    loop {
+        match reader.read_event().expect("the generated document parses") {
+            Event::Eof => return String::new(),
+            Event::Start(tag) if tag.name().as_ref() == element => {
+                for attr in tag.attributes() {
+                    let attr = attr.expect("the generated attribute parses");
+                    if attr.key.as_ref() == attribute {
+                        return attr
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                            .expect("the generated attribute decodes")
+                            .into_owned();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]
@@ -136,6 +200,43 @@ fn nav_lists_every_chapter() {
     let nav = entry_text(&entries, "OEBPS/nav.xhtml");
     assert_eq!(nav.matches("chapter-001.xhtml").count(), 1);
     assert_eq!(nav.matches("chapter-002.xhtml").count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn xml_whitespace_in_metadata_and_a_chapter_filename_reads_back_exactly() {
+    let book_title = "Book\tOne\nTwo\rThree";
+    let language = "ja-JP";
+    let chapter_title = "001-chapter\tOne\nTwo\rThree";
+    let book = "\
+title = \"Book\\tOne\\nTwo\\rThree\"
+creator = \"Author\"
+language = \"ja-JP\"
+";
+    let filename = format!("{chapter_title}.md");
+    let dir = fixture(book, &[]);
+    fs::write(dir.path().join("manuscript").join(&filename), "# 本文\n")
+        .expect("write control-whitespace chapter filename");
+
+    let entries = read_epub(&build_into(dir.path(), "whitespace.epub"));
+    let package = entry_text(&entries, "OEBPS/package.opf");
+    let nav = entry_text(&entries, "OEBPS/nav.xhtml");
+    let chapter = chapter(&entries, 1);
+
+    assert_eq!(first_element_text(&package, b"dc:title"), book_title);
+    assert_eq!(first_element_text(&package, b"dc:language"), language);
+    assert_eq!(first_element_text(&nav, b"title"), book_title);
+    assert_eq!(first_element_text(&nav, b"a"), chapter_title);
+    assert_eq!(first_element_text(&chapter, b"title"), chapter_title);
+    assert_eq!(attribute_value(&chapter, b"html", b"lang"), language);
+    assert!(
+        package.contains("&#9;") && package.contains("&#10;") && package.contains("&#13;"),
+        "metadata whitespace must be numeric XML references: {package}"
+    );
+    assert!(
+        chapter.contains("&#9;") && chapter.contains("&#10;") && chapter.contains("&#13;"),
+        "chapter-title whitespace must be numeric XML references: {chapter}"
+    );
 }
 
 #[test]
@@ -267,6 +368,24 @@ fn a_configured_spine_is_the_reading_order_and_omitting_a_file_drops_it() {
     );
 }
 
+#[test]
+fn a_spine_can_name_chapters_in_manuscript_subdirectories() {
+    let dir = fixture(
+        &book_with_spine(r#""parts/002-b.md", "parts/001-a.md""#),
+        &[],
+    );
+    let parts = dir.path().join("manuscript").join("parts");
+    fs::create_dir(&parts).expect("create chapter subdirectory");
+    fs::write(parts.join("001-a.md"), "# 甲\n").expect("write first chapter");
+    fs::write(parts.join("002-b.md"), "# 乙\n").expect("write second chapter");
+
+    let entries = read_epub(&build_into(dir.path(), "subdirectory.epub"));
+    assert!(
+        chapter(&entries, 1).contains("乙") && chapter(&entries, 2).contains("甲"),
+        "the normal contained subdirectory paths must keep explicit spine order"
+    );
+}
+
 /// A spine entry with a typo is the failure the whole manifest existed to
 /// stop being silent, so it names the path it could not read rather than
 /// quietly shipping a shorter book.
@@ -301,8 +420,167 @@ fn a_spine_beside_a_single_file_input_is_refused() {
     ))
     .unwrap_err();
     assert!(
-        matches!(err, Error::MetadataInvalid { field: "spine", .. }),
+        matches!(err, Error::SpineInvalid { .. }),
         "a configured spine must not be silently unused, got {err:?}"
+    );
+}
+
+#[test]
+fn an_explicitly_empty_spine_is_not_the_unspecified_default() {
+    let dir = fixture(&book_with_spine(""), THREE_CHAPTERS);
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::NoSources { .. }), "{err:?}");
+}
+
+#[test]
+fn an_explicitly_empty_spine_is_no_sources_for_a_single_file_too() {
+    let dir = fixture(&book_with_spine(""), &[("001-a.md", "# 甲\n")]);
+    let input = dir.path().join("manuscript").join("001-a.md");
+    let output = dir.path().join("o.epub");
+    let err = build(&BuildOptions::new(
+        &input,
+        &dir.path().join("book.toml"),
+        &output,
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::NoSources { ref path, .. } if path == &input),
+        "the empty-spine contract must not depend on the input shape: {err:?}"
+    );
+    assert!(!output.exists(), "a refused build must not write an EPUB");
+}
+
+#[test]
+fn rooted_and_parent_spine_paths_are_refused_before_they_are_read() {
+    for entry in [r#""/tmp/outside.md""#, r#""../outside.md""#] {
+        let dir = fixture(&book_with_spine(entry), THREE_CHAPTERS);
+        let err = build(&BuildOptions::new(
+            &dir.path().join("manuscript"),
+            &dir.path().join("book.toml"),
+            &dir.path().join("o.epub"),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::SpineInvalid { .. }),
+            "{entry}: {err:?}"
+        );
+        assert_eq!(
+            err.code().map(|code| code.to_string()).as_deref(),
+            Some("aozora_flavored_markdown_epub::discover::spine"),
+            "{entry}: the code must name the phase that validates the entry"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_spine_symlink_cannot_escape_the_manuscript_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = fixture(&book_with_spine(r#""escape.md""#), THREE_CHAPTERS);
+    let outside = dir.path().join("outside.md");
+    fs::write(&outside, "secret").unwrap();
+    symlink(&outside, dir.path().join("manuscript").join("escape.md")).unwrap();
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::SpineInvalid { .. }), "{err:?}");
+}
+
+#[test]
+fn an_xml_10_forbidden_source_character_is_refused_with_its_path() {
+    let dir = fixture(HORIZONTAL_BOOK, &[("001.md", "before\0after")]);
+    let chapter = dir.path().join("manuscript").join("001.md");
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::XmlCharacter { ref path, codepoint: 0, .. } if path == &chapter),
+        "{err:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_xml_forbidden_chapter_filename_is_refused_before_rendering() {
+    let filename = "001-control-\u{1}.md";
+    let dir = fixture(HORIZONTAL_BOOK, &[]);
+    let chapter_path = dir.path().join("manuscript").join(filename);
+    fs::write(&chapter_path, "# clean source\n").expect("write control filename");
+    let output = dir.path().join("o.epub");
+
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+        &output,
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::XmlCharacter {
+                ref path,
+                field: "chapter title",
+                codepoint: 1,
+                ..
+            } if path == &chapter_path
+        ),
+        "{err:?}"
+    );
+    assert!(!output.exists(), "validation must precede package writing");
+}
+
+#[test]
+fn xml_character_validation_precedes_metadata_meaning_validation() {
+    let dir = fixture(
+        "title = \"T\"\ncreator = \"A\"\nlanguage = \"japanese\\u0001\"\n",
+        &[("001.md", "x")],
+    );
+    let metadata_path = dir.path().join("book.toml");
+    let err = build(&BuildOptions::new(
+        &dir.path().join("manuscript"),
+        &metadata_path,
+        &dir.path().join("o.epub"),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::XmlCharacter {
+                ref path,
+                field: "language",
+                codepoint: 1,
+                ..
+            } if path == &metadata_path
+        ),
+        "the prohibited scalar is more specific than the later BCP 47 refusal: {err:?}"
+    );
+}
+
+#[test]
+fn check_runs_every_prepackage_phase_without_writing_an_epub() {
+    let dir = fixture(HORIZONTAL_BOOK, &[("001.md", "# 本文\n")]);
+    let output = dir.path().join("must-not-exist.epub");
+    let report = check(&CheckOptions::new(
+        &dir.path().join("manuscript"),
+        &dir.path().join("book.toml"),
+    ))
+    .expect("the manuscript checks");
+    assert!(report.is_empty());
+    assert!(
+        !output.exists(),
+        "check has no output path and writes nothing"
     );
 }
 
@@ -621,15 +899,87 @@ struct Failure {
     cause: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ErrorKind {
+    DiscoverIo,
+    MetadataParse,
+    MetadataInvalid,
+    SpineInvalid,
+    XmlCharacter,
+    XmlBuild,
+    NoSources,
+    Package,
+    PackageIo,
+    Utf8,
+    Sjis,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BuildReachability {
+    Reachable,
+    StructurallyUnreachable(&'static str),
+}
+
+/// Test-private registry for the complete public error vocabulary.
+///
+/// Each kind either has a case in [`reachable_failures`] or a concrete reason
+/// the public `build` pipeline cannot produce it.
+const ERROR_KIND_REGISTRY: &[(ErrorKind, BuildReachability)] = &[
+    (ErrorKind::DiscoverIo, BuildReachability::Reachable),
+    (ErrorKind::MetadataParse, BuildReachability::Reachable),
+    (ErrorKind::MetadataInvalid, BuildReachability::Reachable),
+    (ErrorKind::SpineInvalid, BuildReachability::Reachable),
+    (ErrorKind::XmlCharacter, BuildReachability::Reachable),
+    (
+        ErrorKind::XmlBuild,
+        BuildReachability::StructurallyUnreachable(
+            "quick_xml writes into an in-memory Vec sink whose writes cannot fail",
+        ),
+    ),
+    (ErrorKind::NoSources, BuildReachability::Reachable),
+    (
+        ErrorKind::Package,
+        BuildReachability::StructurallyUnreachable(
+            "fixed ZIP operations write to an infallible Cursor<Vec<u8>>, while known entry sizes \
+             reserve ZIP64 before the Deflate upper bound can cross the classic limit",
+        ),
+    ),
+    (ErrorKind::PackageIo, BuildReachability::Reachable),
+    (ErrorKind::Utf8, BuildReachability::Reachable),
+    (ErrorKind::Sjis, BuildReachability::Reachable),
+];
+
+fn error_kind(error: &Error) -> Option<ErrorKind> {
+    // The defining crate has a second classifier without this wildcard. This
+    // downstream match must allow one because `Error` is `#[non_exhaustive]`;
+    // the crate-local match makes a new variant fail to compile and signals
+    // that this registry and downstream arm need a corresponding entry.
+    match error {
+        Error::DiscoverIo { .. } => Some(ErrorKind::DiscoverIo),
+        Error::MetadataParse { .. } => Some(ErrorKind::MetadataParse),
+        Error::MetadataInvalid { .. } => Some(ErrorKind::MetadataInvalid),
+        Error::SpineInvalid { .. } => Some(ErrorKind::SpineInvalid),
+        Error::XmlCharacter { .. } => Some(ErrorKind::XmlCharacter),
+        Error::XmlBuild(_) => Some(ErrorKind::XmlBuild),
+        Error::NoSources { .. } => Some(ErrorKind::NoSources),
+        Error::Package { .. } => Some(ErrorKind::Package),
+        Error::PackageIo { .. } => Some(ErrorKind::PackageIo),
+        Error::Utf8 { .. } => Some(ErrorKind::Utf8),
+        Error::Sjis { .. } => Some(ErrorKind::Sjis),
+        _ => None,
+    }
+}
+
 /// The failures a consumer can reach through `build`, each built here rather
 /// than constructed: `Error` is `#[non_exhaustive]` and its `Cause`-bearing
 /// variants have no public constructor, so a caller only ever meets one the
 /// pipeline raised.
 ///
 /// `Error::Package` and `Error::XmlBuild` are missing because nothing can
-/// drive `build` to them — the ZIP and the XML are written into an in-memory
-/// sink whose `io::Write` cannot fail (ADR-0018 records the same reasoning for
-/// the coverage carve-out on those two modules).
+/// drive `build` to them. XML writes into an in-memory sink whose `io::Write`
+/// cannot fail. ZIP additionally uses fixed-valid names/methods and reserves
+/// ZIP64 from the known entry size before Deflate can cross the classic limit
+/// (ADR-0018 records the same reasoning for the coverage carve-out).
 fn reachable_failures() -> Vec<Failure> {
     let mut all = manifest_failures();
     all.extend(source_failures());
@@ -718,6 +1068,7 @@ fn source_failures() -> Vec<Failure> {
     let blocked_output = fixture(HORIZONTAL_BOOK, &[("001.md", "x")]);
     let bad_utf8 = fixture_bytes(HORIZONTAL_BOOK, &[("001.md", &[0x80, 0x81])]);
     let bad_sjis = fixture_bytes(HORIZONTAL_BOOK, &[("001.sjis", &[0xFF, 0xFF, 0xFF])]);
+    let bad_xml = fixture(HORIZONTAL_BOOK, &[("001.md", "before\0after")]);
 
     // The output path aims *inside* a regular file, so creating its parent
     // directory fails.
@@ -746,6 +1097,13 @@ fn source_failures() -> Vec<Failure> {
             bad_sjis.path().join("o.epub"),
             true,
         ),
+        (
+            "a decoded chapter XML 1.0 cannot represent",
+            bad_xml.path().join("manuscript"),
+            bad_xml.path().join("book.toml"),
+            bad_xml.path().join("o.epub"),
+            false,
+        ),
     ])
 }
 
@@ -759,6 +1117,54 @@ fn source_failures() -> Vec<Failure> {
 /// `source` shadowing the trait one — would have satisfied every gate in the
 /// workspace and left `anyhow`, `miette` and `{:?}` reporting a bare
 /// "failed to parse book metadata" with no parser message under it.
+#[test]
+fn the_build_failure_sweep_and_error_kind_registry_are_exactly_the_same_set() {
+    let observed: BTreeSet<ErrorKind> = reachable_failures()
+        .iter()
+        .map(|failure| {
+            error_kind(&failure.err).expect("every observed build failure must have a registry row")
+        })
+        .collect();
+    let declared_reachable: BTreeSet<ErrorKind> = ERROR_KIND_REGISTRY
+        .iter()
+        .filter_map(|(kind, reachability)| {
+            matches!(reachability, BuildReachability::Reachable).then_some(*kind)
+        })
+        .collect();
+    let declared_all: BTreeSet<ErrorKind> =
+        ERROR_KIND_REGISTRY.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(
+        declared_all.len(),
+        ERROR_KIND_REGISTRY.len(),
+        "the registry must classify each error kind exactly once"
+    );
+    assert_eq!(
+        observed, declared_reachable,
+        "every declared build-reachable kind needs a measured failure, and no measured kind may \
+         be absent from the registry"
+    );
+
+    let unreachable: BTreeSet<ErrorKind> = ERROR_KIND_REGISTRY
+        .iter()
+        .filter_map(|(kind, reachability)| {
+            matches!(reachability, BuildReachability::StructurallyUnreachable(_)).then_some(*kind)
+        })
+        .collect();
+    assert_eq!(
+        unreachable,
+        BTreeSet::from([ErrorKind::Package, ErrorKind::XmlBuild]),
+        "only the two preflighted in-memory writer variants are excluded from the build sweep"
+    );
+    for (kind, reachability) in ERROR_KIND_REGISTRY {
+        if let BuildReachability::StructurallyUnreachable(reason) = reachability {
+            assert!(
+                !reason.is_empty(),
+                "{kind:?} must record why no public build can reach it"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_error_a_build_can_raise_still_hands_over_the_chain_underneath_it() {
     let failures = reachable_failures();

@@ -1,8 +1,7 @@
 //! Convert Aozora Flavored Markdown sources into an [EPUB 3.3] package.
 //!
-//! [`build`] is the only entry point; it runs the `discover` → `render` →
-//! `compose` → `package` phases, each of which cites the spec section it
-//! implements, and reports what the renderer saw in every chapter.
+//! [`build`] runs the `discover` → `validate` → `render` → `compose` →
+//! `package` phases. [`check`] runs the same work without the final write.
 //!
 //! [EPUB 3.3]: https://www.w3.org/TR/epub-33/
 
@@ -24,11 +23,13 @@ mod discover;
 mod error;
 mod package;
 mod render;
+mod validate;
+mod xml;
 
 // A chapter's diagnostics are the renderer's, so they are re-exported rather
 // than copied into a shadow type: a host reads one vocabulary whether it
 // renders the HTML itself or asks for an EPUB.
-pub use aozora_flavored_markdown::{Diagnostic, DiagnosticSource, Severity, Span};
+pub use aozora_flavored_markdown::{ByteSpan, Diagnostic, DiagnosticSource, Severity};
 pub use error::{Cause, Error, Result};
 
 /// Inputs for one [`build`].
@@ -55,13 +56,31 @@ impl<'a> BuildOptions<'a> {
     }
 }
 
+/// Inputs for one non-writing [`check`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CheckOptions<'a> {
+    /// Directory or single file containing Aozora Flavored Markdown sources.
+    pub input: &'a Path,
+    /// Path to `book.toml` metadata.
+    pub metadata: &'a Path,
+}
+
+impl<'a> CheckOptions<'a> {
+    /// Both input paths are required.
+    #[must_use]
+    pub const fn new(input: &'a Path, metadata: &'a Path) -> Self {
+        Self { input, metadata }
+    }
+}
+
 /// What one chapter's render observed, and the text those spans index into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ChapterReport {
     /// Source file as discovered, before decoding.
     pub path: PathBuf,
-    /// Decoded chapter text. A [`Span`] indexes into this, not into the
+    /// Decoded chapter text. A [`ByteSpan`] indexes into this, not into the
     /// bytes on disk, which may have been Shift_JIS.
     pub text: String,
     /// Never empty — a clean chapter contributes no report at all.
@@ -99,11 +118,29 @@ impl BuildReport {
 ///
 /// Any failing phase. Errors carry source spans where applicable.
 pub fn build(opts: &BuildOptions<'_>) -> Result<BuildReport> {
+    let (bundle, report) = prepare(opts)?;
+    package::write(opts.output, &bundle)?;
+    Ok(report)
+}
+
+/// Validate and render a book without creating an EPUB file.
+///
+/// # Errors
+///
+/// Any discovery, validation, rendering, or composition failure.
+pub fn check(opts: &CheckOptions<'_>) -> Result<BuildReport> {
+    let build_opts = BuildOptions::new(opts.input, opts.metadata, Path::new(""));
+    let (_, report) = prepare(&build_opts)?;
+    Ok(report)
+}
+
+fn prepare(opts: &BuildOptions<'_>) -> Result<(compose::Bundle, BuildReport)> {
     let manuscript = discover::collect(opts)?;
+    validate::validate(&manuscript)?;
     let rendered = render::render_all(&manuscript)?;
     let bundle = compose::compose(&manuscript, &rendered)?;
-    package::write(opts.output, &bundle)?;
-    Ok(BuildReport {
+    let report = BuildReport {
         chapters: rendered.chapters,
-    })
+    };
+    Ok((bundle, report))
 }

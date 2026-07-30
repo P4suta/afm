@@ -1,0 +1,2 @@
+warning: ignoring test `ir_coverage` as `tests/ir_coverage.rs` is not included in the published package
+warning: ignoring benchmark `render` as `benches/render.rs` is not included in the published package

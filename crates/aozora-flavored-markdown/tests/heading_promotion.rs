@@ -129,6 +129,9 @@ const MARKERS: &[&str] = &[
     "［＃ここから２字下げ］",
     "［＃ここで字下げ終わり］",
     "［＃地付き］",
+    "［＃地から３字上げ］",
+    "［＃ページの左右中央］",
+    "［＃この行はゴシック体］",
     "［＃改ページ］",
     "［＃ほげふが］",
     "［＃［＃２字下げ］",
@@ -198,6 +201,15 @@ fn a_markdown_heading_body_carries_no_marker_and_no_sentinel() {
         "the setext arm of the grid answers the same way, and it exists at all only \
          because the rule row is now CommonMark's to read"
     );
+}
+
+#[test]
+fn a_ruby_with_a_directive_reading_keeps_only_its_parent_in_a_heading() {
+    let src = "改ページ《［＃２字下げ］》\n------------\n";
+    let out = to_html(src);
+    assert_eq!(out, "<h2>改ページ</h2>\n");
+    check_heading_integrity(&out)
+        .unwrap_or_else(|e| panic!("Tier C for src={src:?}, html={out:?}: {e}"));
 }
 
 #[test]

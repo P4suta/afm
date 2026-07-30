@@ -27,6 +27,7 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  ViewPlugin,
 } from '@codemirror/view';
 
 import { aozoraMdEditorTheme } from './cm-theme';
@@ -39,6 +40,19 @@ import { linkedRangesFilter } from './editor/linkedRanges';
 import { aozoraMdLinter, aozoraMdLintGutter } from './editor/linter';
 import { parserStateField } from './editor/parserState';
 import { aozoraMdWrapKeymap } from './editor/wrapCommands';
+
+// StateField values have no disposal hook. Revisions free their predecessor
+// in `computeParserState`; this view plugin releases the final WASM document
+// when CodeMirror itself is destroyed.
+const parserDocumentOwner = ViewPlugin.fromClass(
+  class {
+    constructor(readonly view: EditorView) {}
+
+    destroy(): void {
+      this.view.state.field(parserStateField).doc?.free();
+    }
+  },
+);
 
 // Toggleable features (flipped by the settings panel). Default ON so the
 // editor's initial state matches the panel's initial signal values.
@@ -82,6 +96,7 @@ export function createEditor(
         aozoraMdEditorTheme,
         // Parser backbone — every assist below reads from this field.
         parserStateField,
+        parserDocumentOwner,
         structureHighlightCompartment.of(aozoraDecorations),
         aozoraMdLinter,
         aozoraMdLintGutter,

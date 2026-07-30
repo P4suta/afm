@@ -35,9 +35,9 @@ pub fn kanji_fragment(max_len: usize) -> impl Strategy<Value = String> {
 /// gate on the parse diagnostics instead.
 ///
 /// The CR-bearing breaks earn their place: 青空文庫 source is historically
-/// CRLF, and CRLF is one of the normalisations that decide whether the
-/// renderer can address a construct by slicing the caller's own source or
-/// has to recover it.
+/// CRLF, and a line ending is what decides whether the renderer can address a
+/// construct by slicing the caller's own source or has to recover it. All
+/// three CommonMark has are drawn, for the reason DEV-233 measured.
 const AOZORA_ATOMS: &[&str] = &[
     "｜",
     "《",
@@ -64,6 +64,16 @@ const AOZORA_ATOMS: &[&str] = &[
     "\n\n",
     "\r\n",
     "\r\n\r\n",
+    // CommonMark §2.1 ends a line at LF, at CRLF, *or* at a lone CR. This pool
+    // held the first two and was written because a line ending is what decides
+    // whether a construct can be located by slicing the source — and the one
+    // ending it never drew is the one that broke the locating (DEV-233): the
+    // line table counted LF only, so every sourcepos past a bare CR was one
+    // line low and the region protection landed on the wrong bytes. Two atoms,
+    // because a lone CR terminates a line and a pair of them makes the blank
+    // line that ends a block, which is a different question of the parser.
+    "\r",
+    "\r\r",
     "、",
     "。",
     " ",

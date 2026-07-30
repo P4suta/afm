@@ -8,9 +8,15 @@ on:
         type: boolean
         default: true
       use_oidc:
-        description: "Use crates.io OIDC trusted publishing"
+        description: "Use crates.io OIDC only after every selected crate has a Trusted Publisher"
         type: boolean
-        default: true
+        # The unpublished EPUB pair cannot register Trusted Publishers until
+        # after its token-authenticated bootstrap upload.
+        default: false
+      skip_crates:
+        description: "Comma-separated publishable package names already uploaded by an earlier attempt"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -38,7 +44,10 @@ jobs:
         with:
           key: publish-crates-preflight
       - run: just changelog-check
-      - run: just package-smoke
+      - name: Dry-run the same crate selection as a live retry
+        env:
+          SKIP_CRATES: ${{ inputs.skip_crates }}
+        run: just package-smoke "$SKIP_CRATES"
       - run: just semver
 
   publish:
@@ -69,4 +78,31 @@ jobs:
       - name: Publish four crates in workspace dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ inputs.use_oidc && steps.auth.outputs.token || secrets.CARGO_TOKEN }}
-        run: cargo publish --workspace --locked
+          SKIP_CRATES: ${{ inputs.skip_crates }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          scripts/publish-excludes.sh "$SKIP_CRATES" > "$work/excludes"
+          mapfile -t excludes < "$work/excludes"
+          : > "$work/skipped"
+          for ((i = 1; i < ${#excludes[@]}; i += 2)); do
+            printf '%s\n' "${excludes[i]}" >> "$work/skipped"
+          done
+          cargo metadata --locked --no-deps --format-version 1 \
+            > "$work/metadata.json"
+          jq -r --rawfile skipped "$work/skipped" '
+            ($skipped | split("\n") | map(select(length > 0))) as $skipped
+            | .packages[]
+            | select(.publish != [] and (.name as $name | $skipped | index($name) | not))
+            | .name
+          ' "$work/metadata.json" > "$work/selected"
+          mapfile -t selected < "$work/selected"
+          printf 'publish selected %d crate(s):\n' "${#selected[@]}"
+          if (( ${#selected[@]} == 0 )); then
+            printf '  (none)\n'
+            echo "all publishable crates were skipped; nothing to publish"
+            exit 0
+          fi
+          printf '  %s\n' "${selected[@]}"
+          cargo publish --workspace --locked "${excludes[@]}"

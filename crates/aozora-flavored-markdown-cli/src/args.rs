@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -18,6 +18,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
         aozora-flavored-markdown render input.md -o out.html\n  \
         cat input.md | aozora-flavored-markdown render -\n  \
         aozora-flavored-markdown check --strict --format json input.md\n  \
+        aozora-flavored-markdown fmt --check input.md\n  \
         aozora-flavored-markdown completions zsh > _aozora-flavored-markdown",
 )]
 pub(crate) struct Cli {
@@ -64,6 +65,28 @@ pub(crate) enum Command {
     Check {
         /// Path to the aozora-flavored-markdown source. Use `-` for stdin.
         input: PathBuf,
+    },
+    /// Canonicalize source and check, display, or write the result.
+    #[command(group(
+        ArgGroup::new("fmt-mode")
+            .required(true)
+            .args(["check", "diff", "write"])
+    ))]
+    Fmt {
+        /// Path to the source. Use `-` for stdin with `--check` or `--diff`.
+        input: PathBuf,
+
+        /// Exit 1 when the source is not canonical; write nothing.
+        #[arg(long, group = "fmt-mode")]
+        check: bool,
+
+        /// Print a unified diff; exit 1 when the source is not canonical.
+        #[arg(long, group = "fmt-mode")]
+        diff: bool,
+
+        /// Replace the input file with canonical source.
+        #[arg(long, group = "fmt-mode")]
+        write: bool,
     },
     /// Generate a shell completion script on stdout.
     Completions {

@@ -31,7 +31,6 @@ exclude = ["tests/"]
 # and a table added later is a table someone has to remember.
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 # Step 2 of the manual release, made a consequence of the bump instead of
 # something to remember after it. `dist/assets/man/aozora-flavored-markdown.1`
@@ -95,6 +94,7 @@ miette    = { workspace = true, features = ["fancy"] }
 tracing-subscriber = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+similar    = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -22,13 +22,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use aozora_flavored_markdown::ir::{Block, Inline, Span};
+use aozora_flavored_markdown::ir::{Block, ByteSpan, Inline};
 use aozora_flavored_markdown::{Options, render_to_ir};
 
 /// One projected construct: its tag, its range, and its HTML fragment.
 struct Projected {
     kind: String,
-    span: Option<Span>,
+    span: Option<ByteSpan>,
     html: String,
 }
 

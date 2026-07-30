@@ -184,10 +184,12 @@ miette    = { version = "7.6.0", default-features = false }
 
 # Parsing helpers
 regex                 = "1.12"
+similar               = "2.7"
 
 # Serialization / data
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+encoding_rs = "0.8.35"
 
 # WASM / TypeScript bindings. Feature-gated: only aozora-flavored-markdown-wasm
 # and the lib's `tsify` feature pull these. `tsify` derives the

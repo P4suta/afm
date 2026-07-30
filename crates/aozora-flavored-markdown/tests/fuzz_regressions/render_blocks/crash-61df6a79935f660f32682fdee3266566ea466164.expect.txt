@@ -1,0 +1,8 @@
+Tier B (PUA sentinel leak) violated in one block:
+  details = SentinelLeak { codepoint: '\u{e001}', .. }
+
+CommonMark 4.5 admits no backtick in a backtick fence info string, so this
+line is prose and nothing snapshotted it. Substituting the ruby removes that
+backtick, the text comrak parses opens a fence whose info string is the
+sentinel, and restore_ast skipped its fail-closed walk because there had been
+nothing to restore.

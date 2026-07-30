@@ -25,6 +25,9 @@ _aozora-flavored-markdown() {
             aozora__flavored__markdown,completions)
                 cmd="aozora__flavored__markdown__subcmd__completions"
                 ;;
+            aozora__flavored__markdown,fmt)
+                cmd="aozora__flavored__markdown__subcmd__fmt"
+                ;;
             aozora__flavored__markdown,help)
                 cmd="aozora__flavored__markdown__subcmd__help"
                 ;;
@@ -40,6 +43,9 @@ _aozora-flavored-markdown() {
             aozora__flavored__markdown__subcmd__help,completions)
                 cmd="aozora__flavored__markdown__subcmd__help__subcmd__completions"
                 ;;
+            aozora__flavored__markdown__subcmd__help,fmt)
+                cmd="aozora__flavored__markdown__subcmd__help__subcmd__fmt"
+                ;;
             aozora__flavored__markdown__subcmd__help,help)
                 cmd="aozora__flavored__markdown__subcmd__help__subcmd__help"
                 ;;
@@ -53,7 +59,7 @@ _aozora-flavored-markdown() {
 
     case "${cmd}" in
         aozora__flavored__markdown)
-            opts="-v -q -h -V --encoding --strict --color --verbose --quiet --format --help --version render check completions _man help"
+            opts="-v -q -h -V --encoding --strict --color --verbose --quiet --format --help --version render check fmt completions _man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -156,8 +162,34 @@ _aozora-flavored-markdown() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        aozora__subcmd__flavored__subcmd__markdown__subcmd__fmt)
+            opts="-v -q -h --check --diff --write --encoding --strict --color --verbose --quiet --format --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --encoding)
+                    COMPREPLY=($(compgen -W "utf8 sjis" -- "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "human json" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         aozora__subcmd__flavored__subcmd__markdown__subcmd__help)
-            opts="render check completions _man help"
+            opts="render check fmt completions _man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -199,6 +231,20 @@ _aozora-flavored-markdown() {
             return 0
             ;;
         aozora__subcmd__flavored__subcmd__markdown__subcmd__help__subcmd__completions)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        aozora__subcmd__flavored__subcmd__markdown__subcmd__help__subcmd__fmt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

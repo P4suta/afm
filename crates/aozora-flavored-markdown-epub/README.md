@@ -49,12 +49,19 @@ which case exactly those files are used, in that order. `.md` sources are
 UTF-8; `.sjis`, `.shift_jis` and `.shift-jis` are decoded as Shift_JIS, which
 is how Aozora Bunko itself distributes text.
 
-## Build
+## Check and build
 
 ```rust,no_run
 use std::path::Path;
 
-use aozora_flavored_markdown_epub::{BuildOptions, build};
+use aozora_flavored_markdown_epub::{BuildOptions, CheckOptions, build, check};
+
+let check_opts = CheckOptions::new(
+    Path::new("my-book/manuscript"),
+    Path::new("my-book/book.toml"),
+);
+let checked = check(&check_opts)?;
+assert!(checked.is_empty(), "{} diagnostics", checked.diagnostic_count());
 
 let opts = BuildOptions::new(
     Path::new("my-book/manuscript"),
@@ -69,12 +76,17 @@ assert!(report.is_empty(), "{} diagnostics", report.diagnostic_count());
 # Ok::<(), aozora_flavored_markdown_epub::Error>(())
 ```
 
-`build` is the only entry point. It runs four phases — discover, render,
-compose, package — each citing the EPUB section it implements, and returns a
-`BuildReport` naming every chapter that raised a diagnostic, in spine order.
+`check` runs discover → validate → render → compose and never writes a package;
+`build` adds the package phase. Both return a `BuildReport` naming every
+chapter that raised a diagnostic, in spine order.
 Those diagnostics are the renderer's own types, re-exported here rather than
 copied, so a host reads one vocabulary whether it renders HTML itself or asks
 for an EPUB.
+
+An explicit `spine = []`, a rooted/parent path, a symlink that resolves outside
+the manuscript root, or a character XML 1.0 cannot represent is a refusal with
+a phase-specific diagnostic code. Literal TAB/LF/CR in metadata attributes are
+preserved as numeric character references.
 
 The chapter stylesheet is the canonical `aozora-md-*` theme published by the
 [`aozora-flavored-markdown`](https://crates.io/crates/aozora-flavored-markdown)

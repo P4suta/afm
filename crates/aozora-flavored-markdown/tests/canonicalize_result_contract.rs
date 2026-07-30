@@ -2,13 +2,13 @@
 //!
 //! The entry point it replaced returned a bare `String` and spelled every
 //! failure `""` — the value an empty document canonicalises to. A source one
-//! byte past the parser's `u32` span budget, a source that would not lex, and
-//! a document with nothing in it were therefore *one answer*. No caller could
+//! byte past the parser's `u32` span budget and a document with nothing in it
+//! were therefore *one answer*. No caller could
 //! branch on them, and no gate could see the difference either: the fuzz
 //! target's fixed point held vacuously, `""` being a fixed point of anything
 //! that answers `""`.
 //!
-//! An integration test is where this has to be stated. `Error` is
+//! An integration test is where this has to be stated. `CanonicalizeError` is
 //! `#[non_exhaustive]`, so only from outside the defining crate does a
 //! `match` on it carry the wildcard arm the attribute forces on consumers,
 //! and only from outside is the signature the one crates.io publishes.
@@ -22,8 +22,8 @@ use std::collections::HashSet;
 use std::error::Error as StdError;
 
 use aozora_flavored_markdown::{
-    Error, Options, Rendered, RenderedBlocks, RenderedIr, canonicalize, render, render_blocks,
-    render_to_ir, to_html,
+    CanonicalizeError, Options, Rendered, RenderedBlocks, RenderedIr, canonicalize, render,
+    render_blocks, render_to_ir, to_html,
 };
 
 /// One byte past the budget on a 64-bit target: the length a refusal reports.
@@ -37,22 +37,20 @@ enum Answer {
     Empty,
     Canonical(String),
     Refused { len: usize },
-    Unlexable,
     Unrecognised,
 }
 
-fn classify(answer: Result<String, Error>) -> Answer {
+fn classify(answer: Result<String, CanonicalizeError>) -> Answer {
     match answer {
         Ok(out) if out.is_empty() => Answer::Empty,
         Ok(out) => Answer::Canonical(out),
-        Err(Error::SourceTooLarge { len }) => Answer::Refused { len },
-        Err(Error::ParseFailed) => Answer::Unlexable,
+        Err(CanonicalizeError::SourceTooLarge { len }) => Answer::Refused { len },
         Err(_) => Answer::Unrecognised,
     }
 }
 
 #[test]
-fn the_three_answers_are_three_values_a_caller_can_tell_apart() {
+fn success_and_refusal_are_values_a_caller_can_tell_apart() {
     // Empty input is the success side of the split, by decision: nothing to
     // canonicalise is not a failure to canonicalise.
     assert_eq!(canonicalize(""), Ok(String::new()));
@@ -61,21 +59,28 @@ fn the_three_answers_are_three_values_a_caller_can_tell_apart() {
         classify(canonicalize("彼は｜青梅《おうめ》に行った。")),
         Answer::Canonical("彼は青梅《おうめ》に行った。".to_owned())
     );
-    // The two failures, through the same match. Handed in rather than
-    // provoked: `SourceTooLarge` needs a 4 GiB source and `ParseFailed` needs
-    // one within a placeholder's width of that same bound.
+    // The refusal, through the same match. Handed in rather than provoked:
+    // `SourceTooLarge` needs a 4 GiB source.
     assert_eq!(
-        classify(Err(Error::SourceTooLarge { len: OVER_BUDGET })),
+        classify(Err(CanonicalizeError::SourceTooLarge { len: OVER_BUDGET })),
         Answer::Refused { len: OVER_BUDGET }
     );
-    assert_eq!(classify(Err(Error::ParseFailed)), Answer::Unlexable);
-    // The assertions that were *false* before: all three were `""`.
-    assert_ne!(canonicalize(""), Err(Error::ParseFailed));
-    assert_ne!(canonicalize(""), Err(Error::SourceTooLarge { len: 0 }));
     assert_ne!(
-        Err::<String, Error>(Error::ParseFailed),
-        Err(Error::SourceTooLarge { len: OVER_BUDGET })
+        canonicalize(""),
+        Err(CanonicalizeError::SourceTooLarge { len: 0 })
     );
+}
+
+#[test]
+fn every_leading_bom_is_preserved_and_is_not_an_empty_document() {
+    for src in ["\u{feff}", "\u{feff}\u{feff}", "\u{feff}\u{feff}body"] {
+        assert_eq!(
+            canonicalize(src),
+            Ok(src.to_owned()),
+            "leading BOM run changed for {src:?}"
+        );
+    }
+    assert_ne!(classify(canonicalize("\u{feff}")), Answer::Empty);
 }
 
 #[test]
@@ -93,38 +98,31 @@ fn a_failure_propagates_as_the_error_trait_a_host_already_holds() {
 
     // A refusal a host logs must say which length it refused, or the operator
     // is back to guessing what an empty answer meant.
-    let boxed: Box<dyn StdError> = Box::new(Error::SourceTooLarge { len: OVER_BUDGET });
+    let boxed: Box<dyn StdError> = Box::new(CanonicalizeError::SourceTooLarge { len: OVER_BUDGET });
     let message = boxed.to_string();
     assert!(
         message.contains(&OVER_BUDGET.to_string()),
         "a refusal must report the length: {message}"
     );
-    assert_ne!(
-        message,
-        Error::ParseFailed.to_string(),
-        "the two failures must not read alike"
-    );
 }
 
 #[test]
 fn an_error_is_a_value_a_host_can_copy_compare_and_key_on() {
-    let refused = Error::SourceTooLarge { len: OVER_BUDGET };
+    let refused = CanonicalizeError::SourceTooLarge { len: OVER_BUDGET };
     // `Copy`, so `refused` is still live below — a host holding one in a
     // per-document cache entry does not have to clone it.
     let copied = refused;
     assert_eq!(refused, copied);
     assert_ne!(
         refused,
-        Error::SourceTooLarge {
+        CanonicalizeError::SourceTooLarge {
             len: OVER_BUDGET + 1
         },
         "the length is part of the value, not decoration"
     );
-    assert_ne!(refused, Error::ParseFailed);
     let mut seen = HashSet::new();
     assert!(seen.insert(refused));
     assert!(!seen.insert(copied), "equal errors must hash equal");
-    assert!(seen.insert(Error::ParseFailed));
 }
 
 /// Sources the lexer has something to say about. Any one of them producing a
