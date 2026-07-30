@@ -257,6 +257,69 @@ fuzz-deep TARGET:
         cargo +{{_FUZZ_TOOLCHAIN}} fuzz run {{TARGET}} \
             --target {{_FUZZ_TARGET}} -- -max_total_time=300
 
+# Replay every artifact libFuzzer left for TARGET. One line per artifact: the
+# `Tier X violated` panic line when it still crashes, otherwise the tail of a
+# clean run. Exit status is the number of crashing artifacts, so a CI gate can
+# read it directly.
+[group('fuzz')]
+fuzz-triage TARGET:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    dir="crates/aozora-flavored-markdown/fuzz/artifacts/{{TARGET}}"
+    bin="crates/aozora-flavored-markdown/fuzz/target/{{_FUZZ_TARGET}}/release/{{TARGET}}"
+    if [[ ! -x "$bin" ]]; then
+        echo "fuzz-triage: build the targets first: just fuzz-build" >&2
+        exit 2
+    fi
+    crashing=0
+    shopt -s nullglob
+    for artifact in "$dir"/*; do
+        log=$(mktemp)
+        if ASAN_OPTIONS=detect_leaks=0 "$bin" "$artifact" -runs=1 >"$log" 2>&1; then
+            printf '%s: clean\n' "${artifact##*/}"
+            tail -n 5 "$log" | sed 's/^/    /'
+        else
+            crashing=$((crashing + 1))
+            printf '%s: CRASH\n' "${artifact##*/}"
+            grep -m1 -o "panicked at .*\|Tier [A-Z] ([^)]*) violated" "$log" \
+                | sed 's/^/    /' || true
+        fi
+        rm -f "$log"
+    done
+    exit "$crashing"
+
+# Move an artifact into the permanent regression set, where `just test` replays
+# it without a nightly toolchain. The name is the artifact's own file name.
+[group('fuzz')]
+fuzz-promote TARGET ARTIFACT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    from="crates/aozora-flavored-markdown/fuzz/artifacts/{{TARGET}}/{{ARTIFACT}}"
+    into="crates/aozora-flavored-markdown/tests/fuzz_regressions/{{TARGET}}"
+    [[ -f "$from" ]] || { echo "fuzz-promote: no such artifact: $from" >&2; exit 2; }
+    [[ -d "$into" ]] || { echo "fuzz-promote: no such target dir: $into" >&2; exit 2; }
+    mv "$from" "$into/"
+    printf 'fuzz-promote: %s -> %s/\n' "{{ARTIFACT}}" "$into"
+
+# What is waiting to be triaged, and what is already pinned.
+[group('fuzz')]
+fuzz-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts="crates/aozora-flavored-markdown/fuzz/artifacts"
+    pinned="crates/aozora-flavored-markdown/tests/fuzz_regressions"
+    printf '%-24s %-16s %s\n' target pending_crashes pinned_regressions
+    printf '%.0s-' {1..60}; printf '\n'
+    cd crates/aozora-flavored-markdown
+    while IFS= read -r target; do
+        cd ../..
+        printf '%-24s %-16s %s\n' "$target" \
+            "$(find "$artifacts/$target" -maxdepth 1 -type f 2>/dev/null | wc -l)" \
+            "$(find "$pinned/$target" -maxdepth 1 -type f -not -name '.gitkeep' \
+                -not -name '*.expect.txt' 2>/dev/null | wc -l)"
+        cd crates/aozora-flavored-markdown
+    done < <(cargo +{{_FUZZ_TOOLCHAIN}} fuzz list)
+
 [group('fuzz')]
 fuzz-all-quick:
     #!/usr/bin/env bash
