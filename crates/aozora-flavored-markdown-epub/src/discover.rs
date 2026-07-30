@@ -93,34 +93,32 @@ pub(crate) fn collect(opts: &BuildOptions<'_>) -> Result<Manuscript> {
     let metadata: Metadata = toml::from_str(&metadata_text)
         .map_err(|source| Error::metadata_parse(opts.metadata.to_path_buf(), source))?;
 
-    let sources = if opts.input.is_file() {
+    let sources = match (opts.input.is_file(), metadata.spine.as_deref()) {
+        // An explicitly empty reading order describes an empty book
+        // regardless of whether `input` names a directory or one file.
+        (_, Some([])) => {
+            return Err(Error::NoSources {
+                path: opts.input.to_path_buf(),
+            });
+        }
         // A spine names files inside a manuscript directory, so there is
-        // nothing here for it to order. Refusing beats the alternative:
-        // building the one file the caller named while the list of chapters
-        // the manifest asked for goes unread, without a word.
-        if metadata.spine.is_some() {
+        // nothing here for it to order. Refusing beats building the one file
+        // while silently ignoring a non-empty chapter list.
+        (true, Some(_)) => {
             return Err(Error::SpineInvalid {
                 path: opts.input.to_path_buf(),
                 reason: "`spine` cannot be used with a single-file input".to_owned(),
             });
         }
-        vec![read_source(opts.input)?]
-    } else {
-        match metadata.spine.as_deref() {
-            None => sweep(opts.input)?,
-            Some([]) => {
-                return Err(Error::NoSources {
-                    path: opts.input.to_path_buf(),
-                });
-            }
-            Some(entries) => entries
-                .iter()
-                .map(|entry| {
-                    let path = validate_spine_path(opts.input, entry)?;
-                    read_source(&path)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        }
+        (true, None) => vec![read_source(opts.input)?],
+        (false, None) => sweep(opts.input)?,
+        (false, Some(entries)) => entries
+            .iter()
+            .map(|entry| {
+                let path = validate_spine_path(opts.input, entry)?;
+                read_source(&path)
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
 
     // An empty book is not a book. Left to run, `compose` writes a package

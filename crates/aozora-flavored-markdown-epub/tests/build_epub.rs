@@ -438,6 +438,24 @@ fn an_explicitly_empty_spine_is_not_the_unspecified_default() {
 }
 
 #[test]
+fn an_explicitly_empty_spine_is_no_sources_for_a_single_file_too() {
+    let dir = fixture(&book_with_spine(""), &[("001-a.md", "# 甲\n")]);
+    let input = dir.path().join("manuscript").join("001-a.md");
+    let output = dir.path().join("o.epub");
+    let err = build(&BuildOptions::new(
+        &input,
+        &dir.path().join("book.toml"),
+        &output,
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::NoSources { ref path, .. } if path == &input),
+        "the empty-spine contract must not depend on the input shape: {err:?}"
+    );
+    assert!(!output.exists(), "a refused build must not write an EPUB");
+}
+
+#[test]
 fn rooted_and_parent_spine_paths_are_refused_before_they_are_read() {
     for entry in [r#""/tmp/outside.md""#, r#""../outside.md""#] {
         let dir = fixture(&book_with_spine(entry), THREE_CHAPTERS);
