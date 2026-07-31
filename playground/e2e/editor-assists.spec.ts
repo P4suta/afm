@@ -123,6 +123,70 @@ test.describe('real editor assistance', () => {
     await expect(editor).toContainText('折り畳まれる本文');
   });
 
+  test('preserves history, folds, and selection across a locale change', async ({
+    page,
+  }) => {
+    const editor = page.locator('.cm-content');
+    const editorShell = page.locator('.cm-editor');
+    await replaceEditor(
+      page,
+      [
+        'alpha',
+        '［＃ここから字下げ］',
+        'folded body',
+        '［＃ここで字下げ終わり］',
+        'omega',
+      ].join('\n'),
+    );
+    await page.waitForTimeout(600);
+    await page.keyboard.insertText('!');
+    await page.waitForTimeout(600);
+
+    await editor.press('Control+Home');
+    await editor.press('ArrowDown');
+    await editor.press('Control+Shift+BracketLeft');
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+
+    await editor.press('Control+End');
+    await editor.press('Shift+Home');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+    await editorShell.evaluate((element) => {
+      element.setAttribute('data-editor-identity', 'retained');
+    });
+
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings' });
+    await settings.getByRole('button', { name: /Language/ }).click();
+    await page.getByRole('option', { name: 'Japanese' }).click();
+
+    await expect(page.locator('html')).toHaveAttribute('lang', 'ja');
+    await expect(editor).toHaveAttribute('aria-label', 'Markdown ソース');
+    await expect(editorShell).toHaveAttribute(
+      'data-editor-identity',
+      'retained',
+    );
+    await page
+      .getByRole('dialog', { name: '設定' })
+      .getByRole('button', { name: '閉じる' })
+      .click();
+    await expect(page.getByRole('dialog', { name: '設定' })).toBeHidden();
+
+    await editor.focus();
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+
+    await page.keyboard.press('ControlOrMeta+Z');
+    await expect(editor).toContainText('omega');
+    await expect(editor).not.toContainText('omega!');
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+  });
+
   test('renders and toggles parser-backed highlights and gaiji hints', async ({
     page,
   }) => {

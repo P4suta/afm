@@ -41,6 +41,5 @@ extend-exclude = [
     "crates/*/fuzz/corpus/",
     "target/",
     "coverage/",
-    "*.html",
     "*.lock",
 ]

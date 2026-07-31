@@ -7,6 +7,7 @@ import {
   listFiles,
   PLAYGROUND_UI_FILES,
 } from './playground-ui-files';
+import { UPSTREAM_REPOSITORY } from './vendor-repository';
 
 interface VendorLock {
   readonly schemaVersion: number;
@@ -45,6 +46,11 @@ const lock = JSON.parse(
 ) as VendorLock;
 
 if (lock.schemaVersion !== 1) throw new Error('unsupported vendor lock schema');
+if (lock.upstreamRepository !== UPSTREAM_REPOSITORY) {
+  throw new Error(
+    `vendor lock repository differs: ${lock.upstreamRepository} != ${UPSTREAM_REPOSITORY}`,
+  );
+}
 if (JSON.stringify(lock.files) !== JSON.stringify(PLAYGROUND_UI_FILES)) {
   throw new Error('vendor lock allowlist differs from the sync allowlist');
 }

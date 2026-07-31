@@ -38,7 +38,7 @@ jobs:
 
   web:
     name: web
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -70,6 +70,10 @@ jobs:
       - name: Install Playwright system dependencies
         working-directory: playground
         run: bun x --no-install playwright install --with-deps chromium firefox webkit
+      - name: Install deterministic screenshot fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-core fonts-takao-gothic
       - name: Verify canonical playground UI snapshot
         working-directory: playground
         run: bun run vendor:verify -- ../.upstream-aozora

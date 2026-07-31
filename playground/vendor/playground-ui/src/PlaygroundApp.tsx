@@ -186,6 +186,22 @@ const paneStyle = style({
   overflow: 'hidden',
 });
 
+const editorSlotStyle = style({
+  display: 'flex',
+  flexGrow: 1,
+  minHeight: 0,
+  minWidth: 0,
+  overflow: 'hidden',
+});
+
+const editorSessionStyle = style({
+  height: 'full',
+  minHeight: 0,
+  minWidth: 0,
+  overflow: 'hidden',
+  width: 'full',
+});
+
 const editorBorderStyle = style({
   borderEndWidth: 1,
   borderColor: 'gray-300',
@@ -430,39 +446,66 @@ function initialSource(adapter: PlaygroundAdapter): {
   };
 }
 
-function EditorMount({
+function usePersistentEditor({
   adapter,
-  locale,
+  enabled,
   onChange,
-  onController,
   settingValues,
   value,
 }: {
   readonly adapter: PlaygroundAdapter;
-  readonly locale: Locale;
+  readonly enabled: boolean;
   readonly onChange: (value: string) => void;
-  readonly onController: (controller: EditorController | null) => void;
   readonly settingValues: Readonly<Record<string, boolean>>;
   readonly value: string;
-}) {
-  const mountRef = useRef<HTMLDivElement>(null);
+}): {
+  readonly attach: (parent: HTMLDivElement) => void;
+  readonly controller: EditorController | null;
+  readonly detach: (parent: HTMLDivElement) => void;
+} {
+  const [host] = useState(() => {
+    const element = document.createElement('div');
+    element.className = `playground-editor-host ${editorSessionStyle}`;
+    return element;
+  });
   const controllerRef = useRef<EditorController | null>(null);
+  const [controller, setController] = useState<EditorController | null>(null);
   const initialValueRef = useRef(value);
   const latestValueRef = useRef(value);
   const latestSettingValuesRef = useRef(settingValues);
+  const restoreFocusRef = useRef(false);
   latestValueRef.current = value;
   latestSettingValuesRef.current = settingValues;
 
+  const attach = useCallback(
+    (parent: HTMLDivElement) => {
+      parent.append(host);
+      if (restoreFocusRef.current) {
+        restoreFocusRef.current = false;
+        if (host.isConnected && host.closest('[hidden], [inert]') === null) {
+          controllerRef.current?.focus();
+        }
+      }
+    },
+    [host],
+  );
+
+  const detach = useCallback(
+    (parent: HTMLDivElement) => {
+      if (host.parentElement !== parent) return;
+      restoreFocusRef.current = host.contains(document.activeElement);
+    },
+    [host],
+  );
+
   useEffect(() => {
-    const parent = mountRef.current;
-    if (!parent) return;
+    if (!enabled) return;
     let disposed = false;
     let secondFrame = 0;
     let timer = 0;
     const mountEditor = () => {
-      adapter.setLocale?.(locale);
       void Promise.resolve(
-        adapter.createEditor(parent, initialValueRef.current, onChange),
+        adapter.createEditor(host, initialValueRef.current, onChange),
       ).then((controller) => {
         if (disposed) {
           controller.destroy();
@@ -475,7 +518,7 @@ function EditorMount({
         )) {
           controller.setSetting(id, enabled);
         }
-        onController(controller);
+        setController(controller);
       });
     };
     const firstFrame = globalThis.requestAnimationFrame(() => {
@@ -495,11 +538,11 @@ function EditorMount({
       globalThis.cancelAnimationFrame(firstFrame);
       globalThis.cancelAnimationFrame(secondFrame);
       globalThis.clearTimeout(timer);
-      onController(null);
       controllerRef.current?.destroy();
       controllerRef.current = null;
+      setController(null);
     };
-  }, [adapter, locale, onChange, onController]);
+  }, [adapter, enabled, host, onChange]);
 
   useEffect(() => {
     controllerRef.current?.setValue(value);
@@ -513,7 +556,26 @@ function EditorMount({
     }
   }, [settingValues]);
 
-  return <div className="playground-editor-host" ref={mountRef} />;
+  return { attach, controller, detach };
+}
+
+function EditorMount({
+  attach,
+  detach,
+}: {
+  readonly attach: (parent: HTMLDivElement) => void;
+  readonly detach: (parent: HTMLDivElement) => void;
+}) {
+  const mountRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const parent = mountRef.current;
+    if (!parent) return;
+    attach(parent);
+    return () => detach(parent);
+  }, [attach, detach]);
+
+  return <div className={editorSlotStyle} ref={mountRef} />;
 }
 
 function PreviewMount({
@@ -1018,19 +1080,13 @@ function PreviewPane({
 }
 
 function EditorPane({
-  adapter,
+  attachEditor,
+  detachEditor,
   locale,
-  onChange,
-  onController,
-  settingValues,
-  value,
 }: {
-  readonly adapter: PlaygroundAdapter;
+  readonly attachEditor: (parent: HTMLDivElement) => void;
+  readonly detachEditor: (parent: HTMLDivElement) => void;
   readonly locale: Locale;
-  readonly onChange: (value: string) => void;
-  readonly onController: (controller: EditorController | null) => void;
-  readonly settingValues: Readonly<Record<string, boolean>>;
-  readonly value: string;
 }) {
   return (
     <section
@@ -1040,14 +1096,7 @@ function EditorPane({
       <div className={paneHeaderStyle}>
         <span className={paneTitleStyle}>{message(locale, 'editor')}</span>
       </div>
-      <EditorMount
-        adapter={adapter}
-        locale={locale}
-        onChange={onChange}
-        onController={onController}
-        settingValues={settingValues}
-        value={value}
-      />
+      <EditorMount attach={attachEditor} detach={detachEditor} />
     </section>
   );
 }
@@ -1095,8 +1144,6 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
   const [dialog, setDialog] = useState<DialogName>(null);
   const [selectedSample, setSelectedSample] = useState<string | null>(null);
   const [mobilePane, setMobilePane] = useState<'editor' | 'preview'>('editor');
-  const [editorController, setEditorController] =
-    useState<EditorController | null>(null);
   const [pendingJump, setPendingJump] = useState<TextRange | null>(null);
   const [pendingCommand, setPendingCommand] = useState<string | null>(null);
   const isMobile = useMedia('(max-width: 767px)');
@@ -1104,7 +1151,9 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
   const colorScheme = useEffectiveColorScheme(preferences.colorScheme);
   const revisionRef = useRef(0);
   const initializationRevisionRef = useRef(0);
-  const previousAttentionDiagnostics = useRef<Set<string> | null>(null);
+  const previousAttentionDiagnostics = useRef<Map<string, number> | null>(
+    null,
+  );
   const storageFailureShownRef = useRef(false);
   const dialogReturnFocusRef = useRef<{
     readonly element: HTMLElement | null;
@@ -1127,12 +1176,18 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
     setSource(value);
   }, []);
 
-  const onEditorController = useCallback(
-    (controller: EditorController | null) => {
-      setEditorController(controller);
-    },
-    [],
-  );
+  const {
+    attach: attachEditor,
+    controller: editorController,
+    detach: detachEditor,
+  } = usePersistentEditor({
+    adapter,
+    enabled:
+      adapter.createEditorDuringInitialization || initialization === 'ready',
+    onChange: onEditorChange,
+    settingValues,
+    value: source,
+  });
 
   const openDialog = useCallback(
     (nextDialog: Exclude<DialogName, null>, fallbackId?: string) => {
@@ -1164,7 +1219,18 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
       // after two frames makes the explicit, locale-safe target the final
       // destination in browsers where the Provider replaced the trigger.
       globalThis.requestAnimationFrame(() => {
-        globalThis.requestAnimationFrame(() => target.focus());
+        globalThis.requestAnimationFrame(() => {
+          const activeElement = document.activeElement;
+          if (
+            activeElement instanceof HTMLElement &&
+            activeElement !== document.body &&
+            activeElement !== document.documentElement &&
+            activeElement !== target
+          ) {
+            return;
+          }
+          target.focus();
+        });
       });
     });
   }, []);
@@ -1183,14 +1249,20 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
 
   useEffect(() => {
     document.documentElement.lang = locale;
-    document.documentElement.dataset.colorScheme = colorScheme;
     document.title = `${adapter.product.name} — ${localized(
       adapter.product.description,
       locale,
     )}`;
     adapter.setLocale?.(locale);
+  }, [adapter, locale]);
+
+  useEffect(() => {
+    document.documentElement.dataset.colorScheme = colorScheme;
+  }, [colorScheme]);
+
+  useEffect(() => {
     reportStorageResult(savePreferences(preferences));
-  }, [adapter, colorScheme, locale, preferences, reportStorageResult]);
+  }, [preferences, reportStorageResult]);
 
   useEffect(() => {
     const pending = globalThis.setTimeout(() => {
@@ -1263,18 +1335,26 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
           if (abort.signal.aborted || revision !== revisionRef.current) return;
           setAnalysis(result);
           setAnalysisError(false);
-          const attentionDiagnostics = new Set(
-            result.diagnostics
-              .filter((diagnostic) => diagnostic.severity !== 'info')
-              .map(
-                (diagnostic) =>
-                  `${diagnostic.severity}:${diagnostic.code ?? ''}:${diagnostic.range.start}:${diagnostic.range.end}:${diagnostic.message.ja}:${diagnostic.message.en}`,
-              ),
-          );
+          const attentionDiagnostics = new Map<string, number>();
+          for (const diagnostic of result.diagnostics) {
+            if (diagnostic.severity === 'info') continue;
+            const key = JSON.stringify([
+              diagnostic.severity,
+              diagnostic.code ?? '',
+              diagnostic.message.ja,
+              diagnostic.message.en,
+            ]);
+            attentionDiagnostics.set(
+              key,
+              (attentionDiagnostics.get(key) ?? 0) + 1,
+            );
+          }
           const previous = previousAttentionDiagnostics.current;
           if (
             previous !== null &&
-            [...attentionDiagnostics].some((key) => !previous.has(key))
+            [...attentionDiagnostics].some(
+              ([key, count]) => count > (previous.get(key) ?? 0),
+            )
           ) {
             setDiagnosticsExpanded(true);
           }
@@ -1500,12 +1580,9 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
 
   const editorPane = (
     <EditorPane
-      adapter={adapter}
+      attachEditor={attachEditor}
+      detachEditor={detachEditor}
       locale={locale}
-      onChange={onEditorChange}
-      onController={onEditorController}
-      settingValues={settingValues}
-      value={source}
     />
   );
   const previewPane =
@@ -1633,7 +1710,7 @@ export function PlaygroundApp({ adapter }: PlaygroundAppProps) {
               <ActionButtonText>{message(locale, 'preview')}</ActionButtonText>
             </Tab>
           </TabList>
-          <TabPanel id="editor" styles={mobilePanelStyle}>
+          <TabPanel id="editor" shouldForceMount styles={mobilePanelStyle}>
             <div className={mobilePanelContentStyle}>{editorPane}</div>
           </TabPanel>
           <TabPanel id="preview" styles={mobilePanelStyle}>

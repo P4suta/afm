@@ -156,6 +156,7 @@ export default defineConfig(({ command, isPreview }) => ({
   build: {
     target: ['es2022', 'safari16.2'],
     cssTarget: 'safari16.2',
+    modulePreload: { polyfill: false },
     sourcemap: false,
     assetsInlineLimit: 0,
     cssCodeSplit: false,

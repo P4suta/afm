@@ -3,19 +3,21 @@ name: docs
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref == 'refs/heads/main' && 'deploy' || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -25,7 +27,7 @@ jobs:
           version: 2026.7.13
           cache: true
           install_args: >-
-            rust@1.96.0 bun just cargo:wasm-pack
+            rust@1.96.0 bun node just cargo:wasm-pack npm:binaryen
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: docs
@@ -36,8 +38,9 @@ jobs:
 
   deploy:
     name: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write

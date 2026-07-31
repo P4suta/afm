@@ -86,6 +86,23 @@ test.describe('deferred engine startup', () => {
       'Edited before engine readiness',
     );
   });
+
+  test('keeps the WASM failure alert accessible', async ({ page }) => {
+    await page.route(/\.wasm(?:$|\?)/, async (route) => {
+      await route.fulfill({
+        body: Buffer.from([0x00, 0x61, 0x73, 0x6d]),
+        contentType: 'application/wasm',
+        status: 200,
+      });
+    });
+
+    await page.goto('./');
+    await expect(page.locator('.cm-editor')).toBeVisible();
+    const alert = page.getByRole('alert');
+    await expect(alert).toContainText('WebAssembly failed to initialize.');
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expectNoAxeViolations(page);
+  });
 });
 
 test.describe('desktop authoring workspace', () => {
@@ -102,6 +119,7 @@ test.describe('desktop authoring workspace', () => {
     await expect(
       page.getByRole('dialog', { name: 'Command palette' }),
     ).toBeVisible();
+    await expectNoAxeViolations(page);
 
     const dimensions = await page.evaluate(() => ({
       body: document.body.scrollHeight,
@@ -190,7 +208,12 @@ test.describe('desktop authoring workspace', () => {
     await expect(page.getByRole('region', { name: 'Editor' })).toBeHidden();
     const disclosure = page.getByRole('button', { name: 'Diagnostics (1)' });
     await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
-    await page.getByRole('button', { name: /unmatched.*aozora/i }).click();
+    const diagnostic = page.getByRole('button', {
+      name: /unmatched.*aozora/i,
+    });
+    await expect(diagnostic).toBeVisible();
+    await expectNoAxeViolations(page);
+    await diagnostic.click();
     await expect(page.getByRole('region', { name: 'Editor' })).toBeVisible();
     await expect(page.locator('.cm-content')).toBeFocused();
     expect(await page.evaluate(() => getSelection()?.toString())).toBe('》');
@@ -294,6 +317,7 @@ test.describe('desktop authoring workspace', () => {
     await expect(
       page.getByRole('dialog', { name: 'aozora-md notation guide' }),
     ).toBeVisible();
+    await expectNoAxeViolations(page);
     await page.keyboard.press('Escape');
     await expect(guide).toBeFocused();
 
@@ -320,6 +344,7 @@ test.describe('desktop authoring workspace', () => {
       'href',
       'https://github.com/P4suta/aozora-flavored-markdown',
     );
+    await expectNoAxeViolations(page);
   });
 
   test('loads a sample and persists language, theme, and editor assists', async ({
@@ -471,6 +496,121 @@ test.describe('mobile authoring workspace', () => {
     expect(dimensions.overflow).toBeLessThanOrEqual(1);
   });
 
+  test('retains the live editor and authoring state across mobile tabs and responsive layouts', async ({
+    page,
+  }) => {
+    await openPlayground(page);
+    await expect(
+      page.getByRole('button', { name: 'Diagnostics' }),
+    ).toBeEnabled();
+    const editor = page.locator('.cm-content');
+    const editorShell = page.locator('.cm-editor');
+    const originalEditor = await editorShell.elementHandle();
+    expect(originalEditor).not.toBeNull();
+
+    await replaceEditor(
+      page,
+      [
+        '# alpha',
+        '［＃ここから字下げ］',
+        'folded body',
+        '［＃ここで字下げ終わり］',
+        'omega',
+      ].join('\n'),
+    );
+    await page.waitForTimeout(600);
+    await page.keyboard.insertText('!');
+    await page.waitForTimeout(600);
+
+    await editor.press('Control+Home');
+    await editor.press('ArrowDown');
+    await editor.press('Control+Shift+BracketLeft');
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+
+    await editor.press('Control+End');
+    await editor.press('Shift+Home');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+
+    await page.getByRole('tab', { name: 'Preview' }).click();
+    await expect(page.getByRole('tab', { name: 'Preview' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page.locator('.playground-preview-host h1')).toHaveText(
+      'alpha',
+    );
+    await expect(page.locator('.playground-preview-host')).toContainText(
+      'folded body',
+    );
+    await expectNoAxeViolations(page);
+
+    await page.getByRole('tab', { name: 'Editor' }).click();
+    await editor.focus();
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+    let currentEditor = await editorShell.elementHandle();
+    expect(
+      await originalEditor?.evaluate(
+        (original, current) => original.isSameNode(current),
+        currentEditor,
+      ),
+    ).toBe(true);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByRole('radio', { name: 'Split' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Editor' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Preview' })).toBeVisible();
+    await editor.focus();
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+    currentEditor = await editorShell.elementHandle();
+    expect(
+      await originalEditor?.evaluate(
+        (original, current) => original.isSameNode(current),
+        currentEditor,
+      ),
+    ).toBe(true);
+
+    await page.setViewportSize({ width: 320, height: 720 });
+    await expect(page.getByRole('tab', { name: 'Editor' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await editor.focus();
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+    await expect(editor).not.toContainText('folded body');
+    expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+      'omega!',
+    );
+    currentEditor = await editorShell.elementHandle();
+    expect(
+      await originalEditor?.evaluate(
+        (original, current) => original.isSameNode(current),
+        currentEditor,
+      ),
+    ).toBe(true);
+
+    await page.keyboard.press('ControlOrMeta+Z');
+    await expect(editor).toContainText('omega');
+    await expect(editor).not.toContainText('omega!');
+    await expect(page.locator('.cm-foldPlaceholder')).toBeVisible();
+
+    await editor.press('Control+Home');
+    await editor.press('ArrowDown');
+    await editor.press('Control+Shift+BracketRight');
+    await expect(page.locator('.cm-foldPlaceholder')).toHaveCount(0);
+    await expect(editor).toContainText('folded body');
+  });
+
   test('uses mobile dialogs for outline and diagnostics and remains accessible', async ({
     page,
   }) => {
@@ -488,6 +628,7 @@ test.describe('mobile authoring workspace', () => {
     await page.getByRole('button', { name: 'Diagnostics (1)' }).click();
     const dialog = page.getByRole('dialog', { name: 'Diagnostics (1)' });
     await expect(dialog).toBeVisible();
+    await expectNoAxeViolations(page);
     await dialog.getByRole('button', { name: /unmatched.*aozora/i }).click();
     await expect(page.getByRole('tab', { name: 'Editor' })).toHaveAttribute(
       'aria-selected',
@@ -583,6 +724,18 @@ test.describe('boot compatibility and production policy', () => {
       .getAttribute('src');
     expect(scriptSource).toMatch(
       /^\/aozora-flavored-markdown\/playground\/assets\//,
+    );
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+      'href',
+      'https://p4suta.github.io/aozora-flavored-markdown/playground/',
+    );
+    await expect(page.locator('meta[property="og:url"]')).toHaveAttribute(
+      'content',
+      'https://p4suta.github.io/aozora-flavored-markdown/playground/',
+    );
+    await expect(page.locator('meta[name="twitter:card"]')).toHaveAttribute(
+      'content',
+      'summary',
     );
     expect([...origins]).toEqual([new URL(page.url()).origin]);
 

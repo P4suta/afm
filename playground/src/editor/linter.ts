@@ -22,8 +22,8 @@ import {
 } from './parserState';
 
 /**
- * Map a raw diagnostic `kind` from aozora-flavored-markdown-wasm to a CM6 severity + a
- * Japanese message. The kinds originate from the embedded aozora
+ * Map a raw diagnostic `kind` from aozora-flavored-markdown-wasm to a CM6
+ * severity and localized message. The kinds originate from the embedded aozora
  * parser's `diagnostics_json`. Unknown kinds fall through as `info`
  * with the raw kind name displayed so nothing is silently dropped.
  */

@@ -3,11 +3,23 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CATALOG,
   diagnosticText,
+  type MessageKey,
   setEditorLocale,
   slugDocumentation,
   t,
   tf,
 } from './i18n';
+
+const placeholderPattern = /\{(\w+)\}/g;
+
+function placeholders(value: string): string[] {
+  const names: string[] = [];
+  for (const match of value.matchAll(placeholderPattern)) {
+    const name = match[1];
+    if (name !== undefined) names.push(name);
+  }
+  return names.sort();
+}
 
 describe('editor catalog', () => {
   afterEach(() => setEditorLocale('ja'));
@@ -16,6 +28,18 @@ describe('editor catalog', () => {
     expect(Object.keys(CATALOG.ja).sort()).toEqual(
       Object.keys(CATALOG.en).sort(),
     );
+  });
+
+  it('keeps interpolation placeholders aligned across every locale', () => {
+    const keys = Object.keys(CATALOG.ja) as MessageKey[];
+    for (const key of keys) {
+      const expected = placeholders(CATALOG.ja[key]);
+      for (const [locale, catalog] of Object.entries(CATALOG)) {
+        expect(placeholders(catalog[key]), `${locale}.${key}`).toEqual(
+          expected,
+        );
+      }
+    }
   });
 
   it('switches locale without coupling editor features to the app shell', () => {

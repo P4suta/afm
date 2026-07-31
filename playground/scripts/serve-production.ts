@@ -12,7 +12,25 @@ const compressible = new Set([
   '.svg',
   '.wasm',
 ]);
-const gzipCache = new Map<string, ArrayBuffer>();
+const gzipCache = new Map<string, Uint8Array>();
+
+function acceptsGzip(header: string | null): boolean {
+  if (header === null) return false;
+  const encodings = new Map<string, number>();
+  for (const value of header.split(',')) {
+    const [name, ...parameters] = value.trim().split(';');
+    if (!name) continue;
+    const qualityParameter = parameters.find((parameter) =>
+      parameter.trim().toLowerCase().startsWith('q='),
+    );
+    const quality =
+      qualityParameter === undefined
+        ? 1
+        : Number(qualityParameter.trim().slice(2));
+    encodings.set(name.toLowerCase(), quality);
+  }
+  return (encodings.get('gzip') ?? encodings.get('*') ?? 0) > 0;
+}
 
 function assetPath(pathname: string): string | null {
   if (pathname === base.slice(0, -1)) return '';
@@ -49,19 +67,18 @@ const server = Bun.serve({
         : 'no-cache',
       'Content-Type': file.type || 'application/octet-stream',
     });
-    const acceptsGzip = request.headers
-      .get('accept-encoding')
-      ?.split(',')
-      .some((value) => value.trim().startsWith('gzip'));
-    if (acceptsGzip && compressible.has(extname(path))) {
+    const isCompressible = compressible.has(extname(path));
+    if (isCompressible) headers.set('Vary', 'Accept-Encoding');
+    if (isCompressible && acceptsGzip(request.headers.get('accept-encoding'))) {
       let compressed = gzipCache.get(path);
       if (!compressed) {
-        compressed = Uint8Array.from(Bun.gzipSync(await file.bytes())).buffer;
+        compressed = Bun.gzipSync(await file.bytes());
         gzipCache.set(path, compressed);
       }
       headers.set('Content-Encoding', 'gzip');
-      headers.set('Vary', 'Accept-Encoding');
-      return new Response(request.method === 'HEAD' ? null : compressed, {
+      const body =
+        request.method === 'HEAD' ? null : new Uint8Array(compressed);
+      return new Response(body, {
         headers,
       });
     }

@@ -15,6 +15,7 @@ module.exports = {
       },
     },
     assert: {
+      aggregationMethod: 'median',
       assertions: {
         'categories:accessibility': ['error', { minScore: 1 }],
         'categories:best-practices': ['error', { minScore: 1 }],

@@ -202,7 +202,12 @@ export const afmPlaygroundAdapter: PlaygroundAdapter = {
     },
   ],
   createEditorDuringInitialization: true,
-  setLocale: setEditorLocale,
+  setLocale(locale) {
+    setEditorLocale(locale);
+    for (const editor of activeEditors) {
+      editor.refreshLocale();
+    }
+  },
   async initialize() {
     await initializeAdapterEngine();
   },

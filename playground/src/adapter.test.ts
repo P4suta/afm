@@ -6,6 +6,51 @@ import { afmPlaygroundAdapter } from './adapter';
 playgroundAdapterContract('Aozora Flavored Markdown', afmPlaygroundAdapter);
 
 describe('AFM playground adapter contract', () => {
+  it('refreshes every active editor locale without replacing its DOM', async () => {
+    afmPlaygroundAdapter.setLocale?.('en');
+    const firstParent = document.createElement('div');
+    const secondParent = document.createElement('div');
+    document.body.append(firstParent, secondParent);
+    const firstEditor = await afmPlaygroundAdapter.createEditor(
+      firstParent,
+      '',
+      () => {},
+    );
+    const secondEditor = await afmPlaygroundAdapter.createEditor(
+      secondParent,
+      '',
+      () => {},
+    );
+    const firstEditorElement = firstParent.querySelector('.cm-editor');
+    const secondEditorElement = secondParent.querySelector('.cm-editor');
+
+    expect(firstParent.querySelector('.cm-content')).toHaveAttribute(
+      'aria-label',
+      'Markdown source',
+    );
+    expect(secondParent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Type Markdown and Aozora notation…',
+    );
+
+    afmPlaygroundAdapter.setLocale?.('ja');
+
+    expect(firstParent.querySelector('.cm-editor')).toBe(firstEditorElement);
+    expect(secondParent.querySelector('.cm-editor')).toBe(secondEditorElement);
+    expect(firstParent.querySelector('.cm-content')).toHaveAttribute(
+      'aria-label',
+      'Markdown ソース',
+    );
+    expect(secondParent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Markdown と青空文庫記法を入力…',
+    );
+
+    firstEditor.destroy();
+    secondEditor.destroy();
+    firstParent.remove();
+    secondParent.remove();
+    afmPlaygroundAdapter.setLocale?.('ja');
+  });
+
   it('initializes the real WASM and returns author-facing analysis', async () => {
     await afmPlaygroundAdapter.initialize();
     const source = '# 章\n\n吾輩《わがはい》は猫である。';

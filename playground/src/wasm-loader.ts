@@ -26,12 +26,10 @@ export function slugsJson(): string {
 }
 
 // Wire types come straight from the wasm-pack `.d.ts`, which `tsify`
-// derives from the Rust IR + envelope types (ADR-0017) — so the `ir`
-// field below is the real IR tree rather than `unknown`, with no separate
-// codegen step that could drift. Re-exported here because this module is the
-// one edge to the wasm package; the IR types are consumed from here directly
-// (outline.ts, App.tsx) and the diagnostic ones through `diagnostics.ts`,
-// which `diagnostics.test.ts` holds every consumer to.
+// derives from the Rust IR + envelope types (ADR-0017). The `ir` field is
+// therefore the real IR tree rather than `unknown`, with no separate codegen
+// step that could drift. This module is the browser's single typed edge to the
+// WASM package; adapter-engine.ts and outline.ts consume the aliases below.
 //
 // The IR types are aliased back to their `Ir*` spelling on the way out:
 // unprefixed is right inside the Rust `ir` module, which supplies the

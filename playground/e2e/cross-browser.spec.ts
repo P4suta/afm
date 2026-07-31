@@ -138,6 +138,43 @@ test('keeps edits while retrying a failed initial WASM request', async ({
   );
 });
 
+test('keeps one editor session across responsive layouts', async ({ page }) => {
+  const errors = collectClientErrors(page);
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto('./');
+  const editor = page.locator('.cm-content');
+  const editorShell = page.locator('.cm-editor');
+  await expect(editor).toBeVisible({ timeout: 30_000 });
+  await replaceEditor(page, 'cross-browser history marker');
+  await editor.press('Shift+Home');
+  const originalEditor = await editorShell.elementHandle();
+
+  await page.getByRole('tab', { name: 'Preview' }).click();
+  await expect(editorShell).toBeHidden();
+  await page.getByRole('tab', { name: 'Editor' }).click();
+  await expect(editorShell).toBeVisible();
+
+  await page.setViewportSize({ width: 900, height: 800 });
+  await expect(page.getByRole('tab', { name: 'Editor' })).toHaveCount(0);
+  await page.setViewportSize({ width: 320, height: 720 });
+  await expect(page.getByRole('tab', { name: 'Editor' })).toBeVisible();
+
+  const returnedEditor = await editorShell.elementHandle();
+  expect(
+    await originalEditor?.evaluate(
+      (original, returned) => original.isSameNode(returned),
+      returnedEditor,
+    ),
+  ).toBe(true);
+  await editor.focus();
+  expect(await page.evaluate(() => getSelection()?.toString())).toBe(
+    'cross-browser history marker',
+  );
+  await page.keyboard.press('ControlOrMeta+Z');
+  await expect(editor).not.toContainText('cross-browser history marker');
+  expect(unexpectedClientErrors(errors)).toEqual([]);
+});
+
 test('keeps the 320px authoring page fixed and filled', async ({ page }) => {
   const errors = collectClientErrors(page);
   await page.setViewportSize({ width: 320, height: 720 });

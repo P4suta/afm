@@ -5,6 +5,7 @@ export const PLAYGROUND_UI_FILES = [
   'package.json',
   'src/PlaygroundApp.test.tsx',
   'src/PlaygroundApp.tsx',
+  'src/catalog.test.ts',
   'src/catalog.ts',
   'src/index.ts',
   'src/share.test.ts',

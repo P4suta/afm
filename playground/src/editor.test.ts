@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import 'aozora-flavored-markdown-wasm';
 import { createEditor } from './editor';
 import { createEngineFeatures } from './editor/engineFeatures';
+import { setEditorLocale } from './i18n';
 import { AozoraDocument } from './wasm-loader';
 
 describe('CodeMirror editor lifecycle', () => {
@@ -17,6 +18,7 @@ describe('CodeMirror editor lifecycle', () => {
   });
 
   afterEach(() => {
+    setEditorLocale('ja');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -87,6 +89,33 @@ describe('CodeMirror editor lifecycle', () => {
     expect(() => editor.setSetting('unknown', true)).not.toThrow();
 
     editor.destroy();
+    editor.destroy();
+    parent.remove();
+  });
+
+  it('refreshes localized editor attributes without replacing the editor', () => {
+    setEditorLocale('en');
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, '', () => {});
+    const editorElement = parent.querySelector('.cm-editor');
+    const contentElement = parent.querySelector('.cm-content');
+
+    expect(contentElement).toHaveAttribute('aria-label', 'Markdown source');
+    expect(parent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Type Markdown and Aozora notation…',
+    );
+
+    setEditorLocale('ja');
+    editor.refreshLocale();
+
+    expect(parent.querySelector('.cm-editor')).toBe(editorElement);
+    expect(parent.querySelector('.cm-content')).toBe(contentElement);
+    expect(contentElement).toHaveAttribute('aria-label', 'Markdown ソース');
+    expect(parent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Markdown と青空文庫記法を入力…',
+    );
+
     editor.destroy();
     parent.remove();
   });

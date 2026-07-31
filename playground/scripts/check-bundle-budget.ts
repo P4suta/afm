@@ -9,6 +9,7 @@ const limits = {
   '.js': 440 * 1024,
   '.wasm': 480 * 1024,
 } as const;
+const initialJavaScriptLimit = 210 * 1024;
 
 const totals = new Map<string, number>();
 const files: string[] = [];
@@ -66,6 +67,39 @@ for (const file of files) {
 // hundreds of compressed KiB to the critical path even though the total
 // bundle budget still passes.
 const indexHtml = await readFile(join(root, 'index.html'), 'utf8');
+const initialJavaScript = new Set<string>();
+for (const match of indexHtml.matchAll(/<(?:link|script)\b[^>]*>/gi)) {
+  const tag = match[0];
+  const source = /\bsrc=["']([^"']+)["']/i.exec(tag)?.[1];
+  const href = /\bhref=["']([^"']+)["']/i.exec(tag)?.[1];
+  const type = /\btype=["']([^"']+)["']/i.exec(tag)?.[1];
+  const relation = /\brel=["']([^"']+)["']/i.exec(tag)?.[1];
+  const reference =
+    type === 'module' ? source : relation === 'modulepreload' ? href : null;
+  if (!reference) continue;
+  const file = files.find((candidate) =>
+    reference.endsWith(`/${relative(root, candidate)}`),
+  );
+  if (!file) {
+    failures.push(
+      `index.html: initial JavaScript asset is missing: ${reference}`,
+    );
+    continue;
+  }
+  initialJavaScript.add(file);
+}
+let initialJavaScriptBytes = 0;
+for (const file of initialJavaScript) {
+  initialJavaScriptBytes += gzipSync(await readFile(file)).byteLength;
+}
+const initialJavaScriptBudget =
+  `${(initialJavaScriptBytes / 1024).toFixed(1)} KiB / ` +
+  `${(initialJavaScriptLimit / 1024).toFixed(0)} KiB`;
+if (initialJavaScriptBytes > initialJavaScriptLimit) {
+  failures.push(`initial .js: ${initialJavaScriptBudget}`);
+} else {
+  process.stdout.write(`initial .js: ${initialJavaScriptBudget}\n`);
+}
 for (const deferredChunk of [
   'vendor-codemirror',
   'adapter-engine',
@@ -73,6 +107,11 @@ for (const deferredChunk of [
   'wasm-loader',
   '.wasm',
 ]) {
+  if (!files.some((file) => relative(root, file).includes(deferredChunk))) {
+    failures.push(
+      `deferred production asset is missing or renamed: ${deferredChunk}`,
+    );
+  }
   const preload = new RegExp(
     `<link[^>]+rel=["']modulepreload["'][^>]+${deferredChunk}`,
     'i',

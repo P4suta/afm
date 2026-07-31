@@ -7,6 +7,10 @@ import {
   listFiles,
   PLAYGROUND_UI_FILES,
 } from './playground-ui-files';
+import {
+  assertCanonicalRepository,
+  UPSTREAM_REPOSITORY,
+} from './vendor-repository';
 
 function git(directory: string, ...arguments_: string[]): string {
   const process = Bun.spawnSync(['git', '-C', directory, ...arguments_]);
@@ -44,6 +48,20 @@ if (status !== '') {
     'canonical playground-ui must be committed before it can be vendored',
   );
 }
+if (packagePath !== 'playground-ui') {
+  throw new Error(
+    `canonical playground-ui package path differs: ${packagePath}`,
+  );
+}
+const upstreamCommit = git(repositoryRoot, 'rev-parse', 'HEAD^{commit}');
+const upstreamRepositoryTree = git(repositoryRoot, 'rev-parse', 'HEAD^{tree}');
+const upstreamPackageTree = git(
+  repositoryRoot,
+  'rev-parse',
+  `HEAD:${packagePath}`,
+);
+const remote = git(repositoryRoot, 'remote', 'get-url', 'origin');
+assertCanonicalRepository(remote);
 
 await Promise.all(
   PLAYGROUND_UI_FILES.map((file) => readFile(join(sourceRoot, file))),
@@ -60,18 +78,10 @@ for (const file of PLAYGROUND_UI_FILES) {
   await copyFile(source, destination);
 }
 
-const upstreamCommit = git(repositoryRoot, 'rev-parse', 'HEAD^{commit}');
-const upstreamRepositoryTree = git(repositoryRoot, 'rev-parse', 'HEAD^{tree}');
-const upstreamPackageTree = git(
-  repositoryRoot,
-  'rev-parse',
-  `HEAD:${packagePath}`,
-);
-const remote = git(repositoryRoot, 'remote', 'get-url', 'origin');
 const lock = {
   schemaVersion: 1,
   state: 'locked',
-  upstreamRepository: remote,
+  upstreamRepository: UPSTREAM_REPOSITORY,
   upstreamCommit,
   upstreamRepositoryTree,
   upstreamPackagePath: packagePath,

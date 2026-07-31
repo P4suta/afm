@@ -7,8 +7,14 @@ import {
   foldKeymap,
   indentOnInput,
 } from '@codemirror/language';
+import { forceLinting } from '@codemirror/lint';
 import { searchKeymap } from '@codemirror/search';
-import { Annotation, EditorState } from '@codemirror/state';
+import {
+  Annotation,
+  Compartment,
+  EditorState,
+  Transaction,
+} from '@codemirror/state';
 import {
   drawSelection,
   EditorView,
@@ -36,9 +42,20 @@ import { t } from './i18n';
 
 export interface EngineAwareEditorController extends EditorController {
   enableEngineFeatures(factory: EngineFeatureFactory): void;
+  refreshLocale(): void;
 }
 
 const externalUpdate = Annotation.define<true>();
+const localeCompartment = new Compartment();
+
+function localizedEditorExtensions() {
+  return [
+    EditorView.contentAttributes.of({
+      'aria-label': t('editorPaneTitle'),
+    }),
+    placeholder(t('editorPlaceholder')),
+  ];
+}
 
 export function createEditor(
   parent: HTMLElement,
@@ -61,10 +78,7 @@ export function createEditor(
         bracketMatching(),
         foldGutter(),
         EditorView.lineWrapping,
-        EditorView.contentAttributes.of({
-          'aria-label': t('editorPaneTitle'),
-        }),
-        placeholder(t('editorPlaceholder')),
+        localeCompartment.of(localizedEditorExtensions()),
         keymap.of([
           ...aozoraMdWrapKeymap,
           ...defaultKeymap,
@@ -108,12 +122,22 @@ export function createEditor(
 
   return {
     enableEngineFeatures,
+    refreshLocale: () => {
+      if (destroyed) return;
+      view.dispatch({
+        effects: localeCompartment.reconfigure(localizedEditorExtensions()),
+      });
+      forceLinting(view);
+    },
     setValue: (value: string) => {
       if (destroyed) return;
       if (view.state.doc.toString() === value) return;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: value },
-        annotations: externalUpdate.of(true),
+        annotations: [
+          externalUpdate.of(true),
+          Transaction.addToHistory.of(false),
+        ],
       });
     },
     focus: () => {
