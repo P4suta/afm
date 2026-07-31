@@ -64,9 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           key: ci-web
-      - name: Install web dependencies
-        working-directory: playground
-        run: bun install --frozen-lockfile
+      - name: Build WASM and install web dependencies
+        run: just playground-install
       - name: Install Playwright system dependencies
         working-directory: playground
         run: bun x --no-install playwright install --with-deps chromium firefox webkit
