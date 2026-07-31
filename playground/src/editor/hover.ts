@@ -3,6 +3,7 @@
 // `※［＃...］` gaiji reference in a hoverTooltip, delegating the actual
 // lookup to aozora-flavored-markdown-wasm (`AozoraDocument.resolveGaijiAt`).
 import { hoverTooltip, type Tooltip } from '@codemirror/view';
+import { t } from '../i18n';
 import {
   byteToUtf16,
   type ParserState,
@@ -72,7 +73,7 @@ export const aozoraMdHover = hoverTooltip((view, pos): Tooltip | null => {
       dom.className = 'cm-tooltip-aozora-gaiji';
       const resolvedHtml = r.resolved
         ? `<strong>${escapeHtml(r.resolved)}</strong>`
-        : `<span class="muted">(未解決)</span>`;
+        : `<span class="muted">${escapeHtml(t('hoverUnresolved'))}</span>`;
       const cp = formatCodepoint(r.codepoint);
       const cpHtml = cp ? ` <span class="muted">${cp}</span>` : '';
       const mencodeHtml = r.mencode

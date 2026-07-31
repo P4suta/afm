@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "types": ["bun", "node", "vite/client"]
+  },
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "e2e/**/*.ts",
+    "scripts/**/*.ts"
+  ]
+}

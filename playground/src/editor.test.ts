@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import 'aozora-flavored-markdown-wasm';
 import { createEditor } from './editor';
+import { createEngineFeatures } from './editor/engineFeatures';
+import { setEditorLocale } from './i18n';
 import { AozoraDocument } from './wasm-loader';
 
-describe('CodeMirror WASM document ownership', () => {
+describe('CodeMirror editor lifecycle', () => {
   beforeEach(() => {
     vi.stubGlobal(
       'ResizeObserver',
@@ -15,6 +18,7 @@ describe('CodeMirror WASM document ownership', () => {
   });
 
   afterEach(() => {
+    setEditorLocale('ja');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -23,13 +27,118 @@ describe('CodeMirror WASM document ownership', () => {
     const freed = vi.spyOn(AozoraDocument.prototype, 'free');
     const parent = document.createElement('div');
     document.body.append(parent);
-    const editor = createEditor(parent, '一', () => {});
+    const editor = createEditor(parent, '一', () => {}, createEngineFeatures);
 
     editor.setValue('二');
     expect(freed).toHaveBeenCalledTimes(1);
 
-    editor.view.destroy();
+    editor.destroy();
     expect(freed).toHaveBeenCalledTimes(2);
+    parent.remove();
+  });
+
+  it('reports author edits without echoing controlled values', () => {
+    const onChange = vi.fn();
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, '一', onChange);
+
+    editor.setValue('一');
+    expect(onChange).not.toHaveBeenCalled();
+    editor.setValue('二');
+    expect(onChange).not.toHaveBeenCalled();
+    editor.revealRange({ start: 0, end: 1 });
+    expect(editor.runCommand('aozora-md.wrap.ruby')).toBe(true);
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenLastCalledWith('｜二《》');
+
+    editor.destroy();
+    parent.remove();
+  });
+
+  it('selects UTF-16 ranges and executes every published wrap command', () => {
+    const onChange = vi.fn();
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, '漢字', onChange);
+
+    editor.revealRange({ start: 0, end: 2 });
+    expect(editor.runCommand('aozora-md.wrap.ruby')).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith('｜漢字《》');
+    expect(editor.runCommand('unknown')).toBe(false);
+    expect(() => editor.revealRange({ start: -10, end: 10_000 })).not.toThrow();
+
+    editor.destroy();
+    parent.remove();
+  });
+
+  it('reconfigures authoring assists without recreating the editor', () => {
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, '※［＃二の字点、1-2-22］', () => {});
+
+    editor.setSetting('structureHighlight', false);
+    editor.setSetting('gaijiInlayHints', false);
+    editor.enableEngineFeatures(createEngineFeatures);
+    editor.enableEngineFeatures(createEngineFeatures);
+
+    for (const id of ['structureHighlight', 'gaijiInlayHints']) {
+      expect(() => editor.setSetting(id, false)).not.toThrow();
+      expect(() => editor.setSetting(id, true)).not.toThrow();
+    }
+    expect(() => editor.setSetting('unknown', true)).not.toThrow();
+
+    editor.destroy();
+    editor.destroy();
+    parent.remove();
+  });
+
+  it('refreshes localized editor attributes without replacing the editor', () => {
+    setEditorLocale('en');
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, '', () => {});
+    const editorElement = parent.querySelector('.cm-editor');
+    const contentElement = parent.querySelector('.cm-content');
+
+    expect(contentElement).toHaveAttribute('aria-label', 'Markdown source');
+    expect(parent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Type Markdown and Aozora notation…',
+    );
+
+    setEditorLocale('ja');
+    editor.refreshLocale();
+
+    expect(parent.querySelector('.cm-editor')).toBe(editorElement);
+    expect(parent.querySelector('.cm-content')).toBe(contentElement);
+    expect(contentElement).toHaveAttribute('aria-label', 'Markdown ソース');
+    expect(parent.querySelector('.cm-placeholder')).toHaveTextContent(
+      'Markdown と青空文庫記法を入力…',
+    );
+
+    editor.destroy();
+    parent.remove();
+  });
+
+  it('preserves current content and latest settings during the engine upgrade', () => {
+    const onChange = vi.fn();
+    const parent = document.createElement('div');
+    document.body.append(parent);
+    const editor = createEditor(parent, 'initial', onChange);
+
+    editor.setValue('latest');
+    editor.setSetting('structureHighlight', false);
+    editor.setSetting('gaijiInlayHints', false);
+    editor.enableEngineFeatures(createEngineFeatures);
+
+    expect(parent.querySelector('.cm-content')).toHaveTextContent('latest');
+    expect(onChange).not.toHaveBeenCalled();
+
+    editor.destroy();
+    expect(() =>
+      editor.enableEngineFeatures(createEngineFeatures),
+    ).not.toThrow();
+    expect(() => editor.setSetting('structureHighlight', true)).not.toThrow();
     parent.remove();
   });
 });

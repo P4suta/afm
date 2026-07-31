@@ -26,6 +26,7 @@ import {
 } from '@codemirror/autocomplete';
 import type { EditorView } from '@codemirror/view';
 
+import { type MessageKey, slugDocumentation, t } from '../i18n';
 import { slugsJson } from '../wasm-loader';
 
 // ---------------------------------------------------------------------------
@@ -75,61 +76,68 @@ export function loadSlugCatalog(): SlugEntry[] {
  * Structured snippets — single-character triggers that immediately
  * expand into a parameterised template the user can tab through.
  *
- * 仕様メモ：
- * - すべて青空文庫記法の全角文字で構成する。半角を残さない
- * - trigger 文字も snippet 内に保持する（`｜` の前置や `※` のマーカーは
- *   記法上の意味があるので、accept してもユーザーが打った文字は消えない）
- * - `${1:placeholder}` で初期 selection、`${0}` で最終カーソル位置
+ * Design notes:
+ * - Use full-width Aozora notation characters throughout. Do not leave
+ *   half-width notation in the expanded text.
+ * - Keep the trigger character in the snippet. Prefixes such as `｜` and
+ *   markers such as `※` carry semantic meaning, so accepting a completion
+ *   must not discard the character the user entered.
+ * - `${1:placeholder}` defines the initial selection and `${0}` defines the
+ *   final cursor position.
  */
 interface TriggerSnippet {
   trigger: string;
   snippet: string;
-  label: string;
-  detail: string;
+  label: MessageKey;
+  detail: MessageKey;
+  explicitOnly?: boolean;
 }
 
 const TRIGGER_SNIPPETS: TriggerSnippet[] = [
-  // ＃ → ［＃...］：1 行注記。onType で `[` から既に ［＃］ が入る場合の
-  // 補完は slug カタログが担当するので、これは ＃ 単独で打った時のフォールバック
+  // ＃ → ［＃...］: a single-line annotation. Slug catalog completion
+  // handles the pair that onType inserts from `[`, so this is the fallback
+  // for a standalone ＃.
   {
     trigger: '#',
     snippet: '［＃${1:body}］',
-    label: '＃ アノテーション',
-    detail: '［＃...］ 一行注記の即時テンプレ',
+    label: 'completionAnnotation',
+    detail: 'completionAnnotationDetail',
+    explicitOnly: true,
   },
   {
     trigger: '＃',
     snippet: '［＃${1:body}］',
-    label: '＃ アノテーション',
-    detail: '［＃...］ 一行注記の即時テンプレ',
+    label: 'completionAnnotation',
+    detail: 'completionAnnotationDetail',
   },
-  // ｜ → ｜${base}《${reading}》：明示ルビ。trigger の ｜ を保持して
-  // ${base} を最初に selection、Tab で reading に進む
+  // ｜ → ｜${base}《${reading}》: explicit ruby. Keep the ｜ trigger,
+  // select ${base} first, and advance to the reading with Tab.
   {
     trigger: '|',
     snippet: '｜${1:base}《${2:reading}》',
-    label: '｜ ルビ（明示）',
-    detail: '｜base《reading》 で明示ルビ',
+    label: 'completionExplicitRuby',
+    detail: 'completionExplicitRubyDetail',
+    explicitOnly: true,
   },
   {
     trigger: '｜',
     snippet: '｜${1:base}《${2:reading}》',
-    label: '｜ ルビ（明示）',
-    detail: '｜base《reading》 で明示ルビ',
+    label: 'completionExplicitRuby',
+    detail: 'completionExplicitRubyDetail',
   },
-  // 《 → 《${reading}》：直前 CJK 文字に読みを振る暗黙ルビ
+  // 《 → 《${reading}》: implicit ruby for the preceding CJK characters.
   {
     trigger: '《',
     snippet: '《${1:reading}》',
-    label: '《 ルビ（暗黙）',
-    detail: '直前の漢字に読みを振る',
+    label: 'completionImplicitRuby',
+    detail: 'completionImplicitRubyDetail',
   },
-  // ※ → ※［＃「${description}」、${mencode}］：外字テンプレート
+  // ※ → ※［＃「${description}」、${mencode}］: a gaiji template.
   {
     trigger: '※',
     snippet: '※［＃「${1:description}」、${2:mencode}］',
-    label: '※ 外字',
-    detail: '※［＃「desc」、mencode］',
+    label: 'completionGaiji',
+    detail: 'completionGaijiDetail',
   },
 ];
 
@@ -162,52 +170,51 @@ function familyToKind(family: string): string {
 }
 
 /**
- * Slug 補完。`apply` を関数化して、accept 時に既存の `］` を検知して
- * 消費するロジックを入れる。onType filter が `[` から `［＃］` を
- * 挿入済みで cursor が `＃` と `］` の間にあるケースを綺麗に扱える。
+ * Build a slug completion that replaces every supported opener with the
+ * canonical full-width form and consumes an existing closing bracket.
  */
-function slugCompletion(entry: SlugEntry): Completion {
+function buildSlugCompletion(entry: SlugEntry, openerFrom: number): Completion {
   const body = entry.accepts_param
     ? entry.canonical.replace(/\{N\}/g, '${1:1}')
     : entry.canonical;
 
-  // Block container open は close marker を別行に同時挿入する。
-  // 内側に最終カーソル `${0}` を置く。
+  // A block-container opener inserts its closing marker on a separate line
+  // and leaves the final `${0}` cursor position inside the container.
   const template =
     entry.family === 'blockContainerOpen' && entry.partner
-      ? `${body}］\n\${0}\n［＃${entry.partner}］`
-      : `${body}］\${0}`;
+      ? `［＃${body}］\n\${0}\n［＃${entry.partner}］`
+      : `［＃${body}］\${0}`;
 
   return {
     label: entry.canonical,
     type: familyToKind(entry.family),
-    detail: entry.doc,
+    detail: slugDocumentation(entry.doc),
     apply: (
       view: EditorView,
       completion: Completion,
-      from: number,
+      _from: number,
       to: number,
     ) => {
-      // 既存の `］`（onType が ［＃］ で挿入したペア）を消費する。
-      // hasClosing=true なら範囲を `to + 1` まで広げて重複の `］` を防ぐ。
+      // Extending the replacement through either closing form avoids leaving
+      // mixed or duplicate delimiters after canonicalization.
       const doc = view.state.doc;
       const after = doc.sliceString(to, Math.min(to + 1, doc.length));
-      const hasClosing = after === '］';
-      snippet(template)(view, completion, from, hasClosing ? to + 1 : to);
+      const hasClosing = after === '］' || after === ']';
+      snippet(template)(view, completion, openerFrom, hasClosing ? to + 1 : to);
     },
   };
 }
 
 /**
- * Structured snippet を 1 件の補完候補として返す。trigger 自身は
- * snippet テンプレートに含めているので、置換範囲は trigger 1 文字を
- * 含む（から trigger 始点）→ context.pos まで。
+ * Return one structured snippet completion. The snippet template includes
+ * the trigger itself, so the replacement range covers that one trigger
+ * character through `context.pos`.
  */
 function buildSnippetCompletion(trig: TriggerSnippet): Completion {
   return {
-    label: trig.label,
+    label: t(trig.label),
     type: 'snippet',
-    detail: trig.detail,
+    detail: t(trig.detail),
     apply: snippet(trig.snippet),
   };
 }
@@ -217,9 +224,9 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * `［＃` 直後で `＃` trigger の structured snippet を出すと redundant
- * （既に ［＃ が入っているのにさらに ［＃...］ を提案するのは謎）。
- * 直前 2 文字が `［＃` ならスキップする。
+ * A structured snippet for the `＃` trigger is redundant immediately after
+ * `［＃`, because the opener is already present. Skip it when the preceding
+ * two characters are `［＃`.
  */
 function isInsideSlugBody(context: CompletionContext): boolean {
   if (context.pos < 2) return false;
@@ -227,10 +234,11 @@ function isInsideSlugBody(context: CompletionContext): boolean {
   return before === '［＃';
 }
 
-const aozoraMdCompletionSource: CompletionSource = (
+export const aozoraMdCompletionSource: CompletionSource = (
   context: CompletionContext,
 ): CompletionResult | null => {
-  // 1) スラグ補完: ［＃ もしくは [# の直後（カーソルが本体テキストにある間）
+  // 1) Slug completion immediately after ［＃ or [#, while the cursor
+  // remains in the annotation body.
   for (const opener of SLUG_OPENERS) {
     const slugMatch = context.matchBefore(
       new RegExp(`${escapeRegex(opener)}([^］\\]\\n]*)$`),
@@ -241,17 +249,20 @@ const aozoraMdCompletionSource: CompletionSource = (
       return {
         from: bodyStart,
         to: context.pos,
-        options: slugs.map(slugCompletion),
+        options: slugs.map((entry) =>
+          buildSlugCompletion(entry, slugMatch.from),
+        ),
         validFor: /^[^］\]\n]*$/,
       };
     }
   }
 
-  // 2) Structured snippets: 直前 1 文字がトリガー
+  // 2) Structured snippets triggered by the preceding character.
   for (const trig of TRIGGER_SNIPPETS) {
     if (!context.matchBefore(new RegExp(`${escapeRegex(trig.trigger)}$`)))
       continue;
-    // `＃` trigger は ［＃ 直後では出さない（slug カタログが優先）
+    if (trig.explicitOnly && !context.explicit) continue;
+    // Prefer the slug catalog immediately after ［＃.
     if (
       (trig.trigger === '＃' || trig.trigger === '#') &&
       isInsideSlugBody(context)

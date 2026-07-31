@@ -18,9 +18,8 @@
     "allowSyntheticDefaultImports": true,
     "useDefineForClassFields": true,
     "verbatimModuleSyntax": false,
-    "jsx": "preserve",
-    "jsxImportSource": "solid-js",
+    "jsx": "react-jsx",
     "types": ["vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }

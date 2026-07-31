@@ -9,8 +9,8 @@
 // aozora-md adaptations:
 //   - parser state is imported from the local aozora-md parserState module,
 //   - the internal CSS class stays `cm-aozora-inlay` (editor implementation
-//     detail, not an aozora-md brand surface) so the shared stylesheet matches;
-//     its colours are wired to aozora-md chrome tokens (var(--aozora-md-pg-*)) in CSS.
+//     detail, not an aozora-md brand surface) so the CodeMirror workspace
+//     stylesheet can scope its inherited colour and opacity.
 
 import {
   Decoration,

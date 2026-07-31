@@ -1,9 +1,9 @@
 // The editor's parse-state backbone, ported from the sibling aozora
 // playground's editor/parserState.ts.
 //
-// A single CodeMirror StateField owns one `AozoraDocument` (the raw 青空文庫
-// parser handle from aozora-flavored-markdown-wasm) per source revision, runs every wire
-// query once, pre-parses the JSON, and builds the UTF-16 <-> UTF-8
+// A single CodeMirror StateField owns one `AozoraDocument` (the raw Aozora
+// parser handle from aozora-flavored-markdown-wasm) per source revision, runs each
+// editor-assist query once, pre-parses the JSON, and builds the UTF-16 <-> UTF-8
 // offset tables. Every other editor assist (decorations / linter /
 // hover / inlay / fold / linked-ranges) reads from
 // `view.state.field(parserStateField)` instead of touching the handle.
@@ -51,50 +51,28 @@ export interface GaijiResolutionEntry {
   resolved: string | null;
 }
 
-/** One row of `profileJson`. */
-export interface ProfilePhaseEntry {
-  name: string;
-  duration_ms: number;
-}
-
 export interface ParserState {
   doc: AozoraDocument | null;
   source: string;
-  nodesJson: string;
-  diagJson: string;
-  pairsJson: string;
-  gaijiResJson: string;
   nodes: NodeEntry[];
   diagnostics: DiagnosticEntry[];
   pairs: PairEntry[];
   gaijiResolutions: GaijiResolutionEntry[];
-  parseDurationMs: number;
-  byteLen: number;
   u2b: Uint32Array;
   b2u: Uint32Array;
   containerFolds: ContainerFold[];
-  profile: ProfilePhaseEntry[];
 }
-
-const EMPTY_ENVELOPE = '{"schemaVersion":3,"data":[]}';
 
 const EMPTY_PARSER_STATE: ParserState = {
   doc: null,
   source: '',
-  nodesJson: EMPTY_ENVELOPE,
-  diagJson: EMPTY_ENVELOPE,
-  pairsJson: EMPTY_ENVELOPE,
-  gaijiResJson: EMPTY_ENVELOPE,
   nodes: [],
   diagnostics: [],
   pairs: [],
   gaijiResolutions: [],
-  parseDurationMs: 0,
-  byteLen: 0,
   u2b: new Uint32Array(1),
   b2u: new Uint32Array(1),
   containerFolds: [],
-  profile: [],
 };
 
 /**
@@ -107,7 +85,6 @@ const EMPTY_PARSER_STATE: ParserState = {
 export function buildOffsetTables(source: string): {
   u2b: Uint32Array;
   b2u: Uint32Array;
-  byteLen: number;
 } {
   const len = source.length;
   const u2b = new Uint32Array(len + 1);
@@ -130,17 +107,7 @@ export function buildOffsetTables(source: string): {
     }
     b2u[bi] = utf16;
   }
-  return { u2b, b2u, byteLen: byte };
-}
-
-export interface ParseCallbacks {
-  onParse?: (payload: ParserState) => void;
-}
-
-let callbacks: ParseCallbacks = {};
-
-export function setParseCallbacks(cb: ParseCallbacks): void {
-  callbacks = cb;
+  return { u2b, b2u };
 }
 
 function safeParseData<T>(json: string): T[] {
@@ -201,46 +168,30 @@ function computeParserState(
       u2b: tables.u2b,
       b2u: tables.b2u,
     };
-    callbacks.onParse?.(ps);
     return ps;
   }
-  const t0 = performance.now();
   const doc = new AozoraDocument(source);
-  const nodesJson = doc.nodesJson();
-  const parseDurationMs = performance.now() - t0;
-  const diagJson = doc.diagnosticsJson();
-  const pairsJson = doc.pairsJson();
-  const gaijiResJson = doc.gaijiResolutionsJson();
-  const byteLen = doc.sourceByteLen();
   const tables = buildOffsetTables(source);
 
-  const nodes = safeParseData<NodeEntry>(nodesJson);
-  const diagnostics = safeParseData<DiagnosticEntry>(diagJson);
-  const pairs = safeParseData<PairEntry>(pairsJson);
-  const gaijiResolutions = safeParseData<GaijiResolutionEntry>(gaijiResJson);
-  const profile = safeParseData<ProfilePhaseEntry>(doc.profileJson());
+  const nodes = safeParseData<NodeEntry>(doc.nodesJson());
+  const diagnostics = safeParseData<DiagnosticEntry>(doc.diagnosticsJson());
+  const pairs = safeParseData<PairEntry>(doc.pairsJson());
+  const gaijiResolutions = safeParseData<GaijiResolutionEntry>(
+    doc.gaijiResolutionsJson(),
+  );
 
   const containerFolds = deriveContainerFolds(source, nodes, tables.b2u);
-  const ps: ParserState = {
+  return {
     doc,
     source,
-    nodesJson,
-    diagJson,
-    pairsJson,
-    gaijiResJson,
     nodes,
     diagnostics,
     pairs,
     gaijiResolutions,
-    parseDurationMs,
-    byteLen,
     u2b: tables.u2b,
     b2u: tables.b2u,
     containerFolds,
-    profile,
   };
-  callbacks.onParse?.(ps);
-  return ps;
 }
 
 /**

@@ -113,9 +113,16 @@ test-wasm:
 
 [group('web')]
 wasm-build:
-    RUSTC_WRAPPER= wasm-pack build crates/aozora-flavored-markdown-wasm \
+    RUSTC_WRAPPER= CARGO_PROFILE_RELEASE_OPT_LEVEL=z wasm-pack build crates/aozora-flavored-markdown-wasm \
         --target bundler --release \
         --out-dir pkg --out-name aozora_flavored_markdown_wasm -- --locked
+    sh -c 'set -eu; wasm=crates/aozora-flavored-markdown-wasm/pkg/aozora_flavored_markdown_wasm_bg.wasm; \
+        before=$(wc -c < "$wasm"); \
+        wasm-opt -Oz --strip-debug --strip-dwarf --vacuum \
+            --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int "$wasm" -o "$wasm"; \
+        after=$(wc -c < "$wasm"); \
+        test "$after" -lt "$before"'
 
 [group('web')]
 wasm-build-dev:
@@ -129,25 +136,38 @@ playground-install: wasm-build
 
 [group('web')]
 playground-lint: playground-install
-    cd playground && bunx --bun biome check \
-        --formatter-enabled=true \
-        --linter-enabled=true \
-        --error-on-warnings .
+    cd playground && bun run lint
+    cd playground && bun run lint:css
+    cd playground && bun run check:legacy
+    cd playground && bun run vendor:verify
 
 [group('web')]
 playground-lint-fix: playground-install
-    cd playground && bunx --bun biome check \
-        --formatter-enabled=true \
-        --linter-enabled=true \
-        --write .
+    cd playground && bun run lint:fix
+    cd playground && bun run lint:css:fix
+
+[group('web')]
+playground-typecheck: playground-install
+    cd playground && bun run typecheck
 
 [group('web')]
 playground-test: playground-install
-    cd playground && bun run test
+    cd playground && bun run test:coverage
 
 [group('web')]
 playground-build: playground-install
     cd playground && bun run build
+    cd playground && bun run check:bundle
+
+[group('web')]
+playground-e2e: playground-build
+    cd playground && bun x --no-install playwright install chromium firefox webkit
+    cd playground && bun x --no-install playwright test
+
+[group('web')]
+playground-lighthouse: playground-build
+    cd playground && bun x --no-install playwright install chromium
+    cd playground && bun run lighthouse
 
 [group('web')]
 playground-dev: playground-install
@@ -458,7 +478,7 @@ docs-site: doc playground-build
 ci-rust: fmt-check check-features clippy coverage test-doc doc-public
 
 [group('ci')]
-ci-web: test-wasm playground-lint playground-test playground-build
+ci-web: test-wasm playground-typecheck playground-lint playground-test playground-build playground-e2e playground-lighthouse
 
 [group('ci')]
 ci-repo: deny typos actionlint zizmor

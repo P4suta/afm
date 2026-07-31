@@ -1,27 +1,47 @@
 <!doctype html>
 <html lang="ja">
   <head>
-    <!-- A strict Content-Security-Policy meta tag is injected here at build
-         time only (see PROD_CSP in vite.config.ts): defense-in-depth over the
-         renderer's escaping — the preview is mounted via innerHTML, but the
-         aozora-md renderer entity-escapes all text and emits no active markup. It is
-         build-time-only because dev mode needs an HMR WebSocket that
-         connect-src 'self' would block and a <meta> CSP cannot be relaxed
-         per-environment. -->
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1e1e1e" />
     <title>aozora-md playground — Aozora Flavored Markdown</title>
     <meta
       name="description"
       content="Browser playground for Aozora Flavored Markdown (aozora-md). Try CommonMark + GFM + 青空文庫記法 (ruby, bouten, 縦中横, ...) live."
     />
-    <link id="aozora-md-theme" rel="stylesheet" href="" />
+    <link
+      rel="canonical"
+      href="https://p4suta.github.io/aozora-flavored-markdown/playground/"
+    />
+    <meta
+      property="og:title"
+      content="aozora-md playground — Aozora Flavored Markdown"
+    />
+    <meta
+      property="og:description"
+      content="Write CommonMark, GFM, and Aozora Bunko notation with a live browser preview."
+    />
+    <meta
+      property="og:url"
+      content="https://p4suta.github.io/aozora-flavored-markdown/playground/"
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary" />
+    <meta
+      name="twitter:title"
+      content="aozora-md playground — Aozora Flavored Markdown"
+    />
+    <meta
+      name="twitter:description"
+      content="Write CommonMark, GFM, and Aozora Bunko notation with a live browser preview."
+    />
+    <link id="aozora-md-theme" />
   </head>
   <body>
-    <div id="app">
-      <div id="boot-overlay" role="status" aria-live="polite">aozora-md を読み込み中…</div>
-    </div>
+    <div id="app"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

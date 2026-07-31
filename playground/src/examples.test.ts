@@ -1,3 +1,4 @@
+import { render } from 'aozora-flavored-markdown-wasm';
 import { expect, test } from 'vitest';
 
 import { loadExamples } from './examples';
@@ -48,8 +49,21 @@ test('each entry carries the source of the file it is named for', () => {
   }
 });
 
-test('every entry has a distinct, non-empty label', () => {
-  const labels = loadExamples().map((example) => example.label);
-  expect(labels.filter((label) => label.trim().length === 0)).toStrictEqual([]);
-  expect(new Set(labels).size).toBe(labels.length);
+test('every entry has distinct, non-empty labels in every locale', () => {
+  for (const locale of ['en', 'ja'] as const) {
+    const labels = loadExamples().map((example) => example.label[locale]);
+    expect(labels.filter((label) => label.trim().length === 0)).toStrictEqual(
+      [],
+    );
+    expect(new Set(labels).size).toBe(labels.length);
+  }
+});
+
+test('every shipped example renders without author-facing diagnostics', () => {
+  for (const example of loadExamples()) {
+    expect(
+      render(example.source).diagnostics,
+      `${example.slug} contains a diagnostic`,
+    ).toEqual([]);
+  }
 });

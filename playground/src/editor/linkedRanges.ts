@@ -56,6 +56,16 @@ export const linkedRangesFilter = EditorState.transactionFilter.of((tr) => {
   if (entries.length === 0) return tr;
 
   const extras: ChangeSpec[] = [];
+  const addMappedDeletion = (from: number, to: number): void => {
+    // The follow-up spec is sequential, so its coordinates belong to the
+    // document after the user's transaction. Keep insertions at either
+    // boundary outside the mirrored deletion.
+    const mappedFrom = tr.changes.mapPos(from, 1);
+    const mappedTo = tr.changes.mapPos(to, -1);
+    if (mappedFrom < mappedTo) {
+      extras.push({ from: mappedFrom, to: mappedTo, insert: '' });
+    }
+  };
 
   tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
     if (toA <= fromA) return; // pure insertion
@@ -69,11 +79,11 @@ export const linkedRangesFilter = EditorState.transactionFilter.of((tr) => {
 
       // Deletion fully contains the open span → mirror by deleting close.
       if (fromA <= openFrom && toA >= openTo && toA <= closeFrom) {
-        extras.push({ from: closeFrom, to: closeTo, insert: '' });
+        addMappedDeletion(closeFrom, closeTo);
       }
       // Deletion fully contains the close span → mirror by deleting open.
       else if (fromA <= closeFrom && toA >= closeTo && fromA >= openTo) {
-        extras.push({ from: openFrom, to: openTo, insert: '' });
+        addMappedDeletion(openFrom, openTo);
       }
     }
   });

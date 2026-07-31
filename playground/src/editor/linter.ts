@@ -13,6 +13,7 @@
 // rather than typesetter precision.
 import { type Diagnostic, linter, lintGutter } from '@codemirror/lint';
 import type { EditorView } from '@codemirror/view';
+import { t, tf } from '../i18n';
 import {
   byteToUtf16,
   type DiagnosticEntry,
@@ -21,8 +22,8 @@ import {
 } from './parserState';
 
 /**
- * Map a raw diagnostic `kind` from aozora-flavored-markdown-wasm to a CM6 severity + a
- * Japanese message. The kinds originate from the embedded aozora
+ * Map a raw diagnostic `kind` from aozora-flavored-markdown-wasm to a CM6
+ * severity and localized message. The kinds originate from the embedded aozora
  * parser's `diagnostics_json`. Unknown kinds fall through as `info`
  * with the raw kind name displayed so nothing is silently dropped.
  */
@@ -32,20 +33,20 @@ function classify(entry: DiagnosticEntry): {
 } {
   switch (entry.kind) {
     case 'unclosed_bracket':
-      return { severity: 'error', message: '括弧が閉じられていません' };
+      return { severity: 'error', message: t('lintUnclosed') };
     case 'unmatched_close':
-      return { severity: 'error', message: '対応する開き括弧がありません' };
+      return { severity: 'error', message: t('lintUnmatched') };
     case 'source_contains_pua': {
       const hex = entry.codepoint
         ? `U+${entry.codepoint.toString(16).toUpperCase().padStart(4, '0')}`
-        : '不明';
+        : t('lintUnknownCodepoint');
       return {
         severity: 'warning',
-        message: `Private Use Area の文字が含まれています (${hex})`,
+        message: tf('lintPua', { hex }),
       };
     }
     case 'residual_annotation_marker':
-      return { severity: 'warning', message: '注記マーカーが残存しています' };
+      return { severity: 'warning', message: t('lintStrayMarker') };
     default:
       return { severity: 'info', message: entry.kind };
   }

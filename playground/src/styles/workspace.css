@@ -1,0 +1,133 @@
+@layer reset, playground, _; /* stylelint-disable-line layer-name-pattern -- Spectrum 2 owns the "_" layer name. */
+
+@layer reset {
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+}
+
+@layer playground {
+  .playground-editor-host {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  html[data-color-scheme='light'] .playground-editor-host {
+    color-scheme: light;
+  }
+
+  html[data-color-scheme='dark'] .playground-editor-host {
+    color-scheme: dark;
+  }
+
+  /* stylelint-disable selector-class-pattern -- CodeMirror owns these public class names. */
+  .playground-editor-host .cm-editor,
+  .playground-editor-host .cm-scroller {
+    height: 100%;
+  }
+
+  .playground-editor-host .cm-editor {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .playground-editor-host .cm-scroller {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .playground-editor-host .cm-gutters {
+    background: transparent;
+    border-color: color-mix(in srgb, currentcolor 20%, transparent);
+    color: color-mix(in srgb, currentcolor 60%, transparent);
+  }
+
+  .playground-editor-host .cm-activeLine,
+  .playground-editor-host .cm-activeLineGutter {
+    background: color-mix(in srgb, currentcolor 7%, transparent);
+  }
+
+  .playground-editor-host .cm-cursor {
+    border-left-color: currentcolor;
+  }
+
+  .playground-editor-host .cm-content ::selection,
+  .playground-editor-host .cm-selectionBackground,
+  .playground-editor-host .cm-editor.cm-focused .cm-selectionBackground {
+    background: color-mix(in srgb, Highlight 40%, transparent);
+  }
+
+  .playground-editor-host .cm-aozora-ruby,
+  .playground-editor-host .cm-aozora-angle-quote {
+    font-weight: 650;
+  }
+
+  .playground-editor-host .cm-aozora-bouten {
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+  }
+
+  .playground-editor-host .cm-aozora-gaiji,
+  .playground-editor-host .cm-aozora-annotation,
+  .playground-editor-host .cm-aozora-heading-hint {
+    font-style: italic;
+  }
+
+  .playground-editor-host .cm-aozora-annotation,
+  .playground-editor-host .cm-aozora-heading-hint,
+  .playground-editor-host .cm-aozora-container-marker {
+    opacity: 0.72;
+  }
+
+  .playground-editor-host .cm-aozora-aozora-heading,
+  .playground-editor-host .cm-aozora-section-break,
+  .playground-editor-host .cm-aozora-page-break,
+  .playground-editor-host .cm-aozora-container-marker {
+    font-weight: 700;
+  }
+
+  .playground-editor-host .cm-aozora-inlay {
+    font-size: 0.85em;
+    opacity: 0.72;
+    padding-inline: 0.15em;
+    user-select: none;
+  }
+
+  .playground-editor-host .cm-tooltip {
+    background: Canvas;
+    border-color: color-mix(in srgb, currentcolor 24%, transparent);
+    color: CanvasText;
+  }
+
+  .playground-editor-host .cm-tooltip-aozora-gaiji {
+    line-height: 1.5;
+    max-width: 320px;
+    padding: 8px 12px;
+  }
+
+  .playground-editor-host .cm-tooltip-aozora-gaiji .muted {
+    opacity: 0.72;
+  }
+  /* stylelint-enable selector-class-pattern */
+
+  .playground-preview-host {
+    box-sizing: border-box;
+    height: 100%;
+    overflow: auto;
+    padding: 24px;
+  }
+
+  .playground-preview-host[data-writing-direction='vertical'] {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .playground-preview-host .aozora-md-root {
+    max-width: 100%;
+  }
+}

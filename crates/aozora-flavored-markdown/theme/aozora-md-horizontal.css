@@ -45,12 +45,12 @@
   line-height: 1;
 }
 
-/* 左ルビ — ruby on the far side of the base text (below, when horizontal). */
+/* Alternate-side ruby appears below the base text in horizontal writing. */
 .aozora-md-ruby-left {
   ruby-position: under;
 }
 
-/* 傍注 — a note set beside the line, as <rt> inside <ruby> or as a <sup>. */
+/* A margin note set beside the line as <rt> inside <ruby> or as a <sup>. */
 .aozora-md-margin-note {
   font-size: 0.6em;
   line-height: 1;
@@ -63,7 +63,7 @@
   opacity: 0.6;
 }
 
-/* 編者注 — the editor speaking, kept visually subordinate to the text. */
+/* An editor note, kept visually subordinate to the text. */
 .aozora-md-editor-note {
   font-size: 0.7em;
   opacity: 0.75;
@@ -97,11 +97,30 @@
  * The line kinds are not emphasis marks but rules drawn alongside the
  * run, so they turn text-emphasis off and use a decoration instead.
  */
-.aozora-md-bouten-bosen     { text-decoration: underline; text-emphasis: none; }
-.aozora-md-bouten-nijubosen { text-decoration: underline double; text-emphasis: none; }
-.aozora-md-bouten-namisen   { text-decoration: underline wavy; text-emphasis: none; }
-.aozora-md-bouten-hasen     { text-decoration: underline dashed; text-emphasis: none; }
-.aozora-md-bouten-kusarisen { text-decoration: underline dotted; text-emphasis: none; }
+.aozora-md-bouten-bosen {
+  text-decoration: underline;
+  text-emphasis: none;
+}
+
+.aozora-md-bouten-nijubosen {
+  text-decoration: underline double;
+  text-emphasis: none;
+}
+
+.aozora-md-bouten-namisen {
+  text-decoration: underline wavy;
+  text-emphasis: none;
+}
+
+.aozora-md-bouten-hasen {
+  text-decoration: underline dashed;
+  text-emphasis: none;
+}
+
+.aozora-md-bouten-kusarisen {
+  text-decoration: underline dotted;
+  text-emphasis: none;
+}
 
 /* Side of the run the marks sit on. */
 .aozora-md-bouten-right { text-emphasis-position: over; }
@@ -117,7 +136,7 @@
   text-decoration: underline;
 }
 
-/* ----- Combine-upright (縦中横: 横中 inside 縦) ------------------- */
+/* ----- Combine upright -------------------------------------------- */
 
 .aozora-md-combine-upright {
   /* In horizontal mode this has no orientation effect; the run still
@@ -169,23 +188,38 @@
 
 .aozora-md-futoji   { font-weight: bold; }
 .aozora-md-shatai   { font-style: italic; }
+
 .aozora-md-goshikku {
   font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
   font-weight: normal;
 }
 
-.aozora-md-uwatsuki  { font-size: 0.75em; vertical-align: super; }
-.aozora-md-shitatsuki { font-size: 0.75em; vertical-align: sub; }
+.aozora-md-uwatsuki {
+  font-size: 0.75em;
+  vertical-align: super;
+}
+
+.aozora-md-shitatsuki {
+  font-size: 0.75em;
+  vertical-align: sub;
+}
 
 /*
- * 行右小書き / 行左小書き — small script set against one side of the
- * line. The two sides are the vertical-mode "right of the line" and
- * "left of the line"; horizontally they read as super- and subscript.
+ * Right-side / left-side small text is set against one side of the line.
+ * The two sides are the vertical-mode "right of the line" and "left of
+ * the line"; horizontally they read as super- and subscript.
  */
-.aozora-md-kogaki-right { font-size: 0.6em; vertical-align: super; }
-.aozora-md-kogaki-left  { font-size: 0.6em; vertical-align: sub; }
+.aozora-md-kogaki-right {
+  font-size: 0.6em;
+  vertical-align: super;
+}
 
-/* 横組み — already the writing mode here, so only the hook is needed. */
+.aozora-md-kogaki-left {
+  font-size: 0.6em;
+  vertical-align: sub;
+}
+
+/* Horizontal typesetting is already active, so only the hook is needed. */
 .aozora-md-yokogumi {
   writing-mode: horizontal-tb;
 }
@@ -201,13 +235,13 @@
 .aozora-md-font-smaller[data-steps="2"] { font-size: 0.72em; }
 .aozora-md-font-smaller[data-steps="3"] { font-size: 0.61em; }
 
-/* Absolute font size (特大 / 大 / 中 / 小文字). */
+/* Absolute font size (extra large / large / medium / small). */
 .aozora-md-font-extra-large { font-size: 2em; }
 .aozora-md-font-large       { font-size: 1.5em; }
 .aozora-md-font-medium      { font-size: 1em; }
 .aozora-md-font-small       { font-size: 0.8em; }
 
-/* 分数 — <sup>numerator</sup> ⁄ <sub>denominator</sub>. */
+/* Fraction: <sup>numerator</sup> ⁄ <sub>denominator</sub>. */
 .aozora-md-bunsu {
   white-space: nowrap;
 }
@@ -217,7 +251,7 @@
   font-size: 0.7em;
 }
 
-/* キャプション — a figure/plate caption, inline or as a block container. */
+/* A figure or plate caption, inline or as a block container. */
 .aozora-md-caption {
   font-size: 0.9em;
   opacity: 0.8;
@@ -226,20 +260,20 @@
 /* ----- Enclosures ------------------------------------------------- */
 
 /*
- * 罫囲み / □囲み / ○付き文字 — a frame drawn around the run. Inline-block
- * so the frame wraps the glyphs rather than the line box.
+ * Framed, boxed, and circled text draws a frame around the run. Inline-block
+ * makes the frame wrap the glyphs rather than the line box.
  */
 .aozora-md-keigakomi-inline,
 .aozora-md-keigakomi-box {
   display: inline-block;
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   padding: 0 0.15em;
 }
 
 .aozora-md-enclosure-circle,
 .aozora-md-enclosure-circle-dotted {
   display: inline-block;
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   border-radius: 50%;
   padding: 0.1em 0.25em;
   line-height: 1;
@@ -251,7 +285,7 @@
 
 .aozora-md-enclosure-double-rule {
   display: inline-block;
-  border: 3px double currentColor;
+  border: 3px double currentcolor;
   padding: 0 0.15em;
 }
 
@@ -271,13 +305,13 @@
 .aozora-md-heading-medium { font-size: 1.4em; }
 .aozora-md-heading-small  { font-size: 1.15em; }
 
-/* 同行見出し — the heading opens the line the body text continues on. */
+/* A same-line heading opens the line that the body text continues on. */
 .aozora-md-heading-same-line {
   display: inline;
   margin: 0 0.5em 0 0;
 }
 
-/* 窓見出し — a heading set into a window inside the text block. */
+/* A window heading is set into an opening inside the text block. */
 .aozora-md-heading-window {
   float: left;
   margin: 0 1em 0.5em 0;
@@ -298,7 +332,7 @@
   /* The main body ends here and the colophon follows. */
   display: block;
   margin: 3em 0 1em;
-  border-top: 1px solid currentColor;
+  border-top: 1px solid currentcolor;
   opacity: 0.3;
 }
 
@@ -316,7 +350,7 @@
 .aozora-md-page-break {
   display: block;
   margin: 3em 0;
-  border-top: 1px solid currentColor;
+  border-top: 1px solid currentcolor;
   opacity: 0.2;
   break-before: page;
 }
@@ -332,9 +366,18 @@
   opacity: 0.5;
 }
 
-/* 改丁 — resume on the next recto; 改段 — next column; 改見開き — next spread. */
-.aozora-md-section-break-kaicho      { border-top: 3px double currentColor; break-before: recto; }
-.aozora-md-section-break-kaidan      { border-top: 1px solid currentColor; margin-top: 1em; break-before: column; }
+/* Resume on the next recto, next column, or next spread. */
+.aozora-md-section-break-kaicho {
+  border-top: 3px double currentcolor;
+  break-before: recto;
+}
+
+.aozora-md-section-break-kaidan {
+  border-top: 1px solid currentcolor;
+  margin-top: 1em;
+  break-before: column;
+}
+
 .aozora-md-section-break-kaimihiraki { break-before: left; }
 
 /* ----- Line-scope markers ----------------------------------------- */
@@ -367,8 +410,9 @@
 .aozora-md-indent-8 { width: 8em; }
 
 /*
- * 地付き / 地から N 字上げ. The marker is empty, so the alignment it
- * names belongs to the block around it and `:has()` hands it there —
+ * End alignment and lifting N characters from the end use an empty marker.
+ * The requested alignment belongs to the block around it, and `:has()` hands
+ * it there —
  * styling the marker itself would only move a zero-width box.
  *
  * It stays out of the `display: none` group below because
@@ -436,7 +480,7 @@ p:has(> .aozora-md-line-font-small)       { font-size: 0.8em; }
 .aozora-md-container-indent-8 { margin-left: 8em; }
 
 /*
- * 折り返して字下げ — wrapped lines take a deeper indent than the first.
+ * Wrapped-line indentation makes wrapped lines deeper than the first.
  * The head indent is the container's own margin, so the hanging step is
  * expressed as a negative first-line indent.
  */
@@ -453,28 +497,33 @@ p:has(> .aozora-md-line-font-small)       { font-size: 0.8em; }
 }
 
 .aozora-md-container-keigakomi {
-  border: 1px solid currentColor;
+  border: 1px solid currentcolor;
   padding: 0.5em;
 }
 
 .aozora-md-container-futoji   { font-weight: bold; }
 .aozora-md-container-shatai   { font-style: italic; }
+
 .aozora-md-container-goshikku {
   font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
 }
 
-/* 横組み block — the writing mode this theme already uses. */
+/* A horizontal-typesetting block uses this theme's existing writing mode. */
 .aozora-md-container-yokogumi {
   writing-mode: horizontal-tb;
 }
 
-/* 段組み — `data-columns` carries the count; two is the common case. */
-.aozora-md-container-columns { columns: 2; column-gap: 2em; }
+/* Multi-column layout; `data-columns` carries the count and two is common. */
+.aozora-md-container-columns {
+  columns: 2;
+  column-gap: 2em;
+}
+
 .aozora-md-container-columns[data-columns="3"] { columns: 3; }
 .aozora-md-container-columns[data-columns="4"] { columns: 4; }
 
 /*
- * 表 — the source is plain lines, not table markup, so alignment is
+ * The table source is plain lines rather than table markup, so alignment is
  * carried by preserved runs of spaces and tabular figures rather than
  * by a table layout the renderer never emits.
  */
@@ -484,10 +533,10 @@ p:has(> .aozora-md-line-font-small)       { font-size: 0.8em; }
 }
 
 /*
- * 字詰め / 字組み — a measure counted in characters (`data-width`,
- * `data-kumi-width`, `data-kumi-lines`). CSS cannot read the count, so
- * the measure comes from a custom property the host can set per book;
- * the fallback is a comfortable default.
+ * Fixed character measure and line composition use character counts
+ * (`data-width`, `data-kumi-width`, `data-kumi-lines`). CSS cannot read the
+ * count, so the measure comes from a custom property the host can set per
+ * book; the fallback is a comfortable default.
  */
 .aozora-md-container-line-width,
 .aozora-md-container-line-kumi {

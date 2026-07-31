@@ -298,6 +298,10 @@ url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip"
 [tools.node."platforms.windows-x64-baseline"]
 url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip"
 
+[[tools."npm:binaryen"]]
+version = "130.0.0"
+backend = "npm:binaryen"
+
 [[tools.rust]]
 version = "1.96.0"
 backend = "core:rust"
