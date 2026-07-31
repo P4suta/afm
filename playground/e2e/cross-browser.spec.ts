@@ -167,9 +167,9 @@ test('keeps one editor session across responsive layouts', async ({ page }) => {
     ),
   ).toBe(true);
   await editor.focus();
-  expect(await page.evaluate(() => getSelection()?.toString())).toBe(
-    'cross-browser history marker',
-  );
+  await expect
+    .poll(() => page.evaluate(() => getSelection()?.toString() ?? ''))
+    .toBe('cross-browser history marker');
   await page.keyboard.press('ControlOrMeta+Z');
   await expect(editor).not.toContainText('cross-browser history marker');
   expect(unexpectedClientErrors(errors)).toEqual([]);

@@ -639,6 +639,39 @@ test.describe('mobile authoring workspace', () => {
 
   test('ships a stable 320px visual state', async ({ page }) => {
     await openPlayground(page);
+    await expect(
+      page.getByRole('button', { name: 'Diagnostics' }),
+    ).toBeEnabled();
+    await replaceEditor(
+      page,
+      [
+        '# Stable mobile workspace',
+        '',
+        '**CommonMark + GFM** render',
+        'in the same manuscript.',
+        '',
+        '## Editing',
+        '',
+        '- emphasis',
+        '- code',
+        '- preview',
+        '',
+        '## Diagnostics',
+        '',
+        '> Keyboard-first authoring',
+        '> stays responsive.',
+      ].join('\n'),
+    );
+    await expect(page.locator('.cm-content')).toContainText(
+      'Stable mobile workspace',
+    );
+    await page
+      .getByRole('heading', {
+        name: 'Aozora Flavored Markdown',
+        exact: true,
+      })
+      .click();
+    await expect(page.locator('.cm-content')).not.toBeFocused();
     await page.evaluate(() => document.fonts.ready);
     await expect(page).toHaveScreenshot('mobile-320.png', {
       animations: 'disabled',
