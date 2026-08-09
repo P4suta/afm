@@ -184,7 +184,7 @@ miette    = { version = "7.6.0", default-features = false }
 
 # Parsing helpers
 regex                 = "1.12"
-similar               = "2.7"
+similar               = "3.1"
 
 # Serialization / data
 serde      = { version = "1.0", features = ["derive"] }
